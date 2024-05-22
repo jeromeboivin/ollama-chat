@@ -70,3 +70,28 @@ Here is an example of a JSON object that specifies a custom chatbot personality:
 ```
 
 This JSON object can be part of a JSON array if you want to specify multiple chatbot personalities.
+
+## How to Use Special Switches
+The Ollama client supports several special switches to enhance your interaction with the chatbot. Here's a brief guide on how to use them:
+
+1. `/file <path of a file to load>`: This command allows you to read a file and append its content to your user input. Replace <path of a file to load> with the actual path of the file you want to load.
+
+2. `/search <number of results>`: This command lets you query the vector database and append the answer to your user input. Replace <number of results> with the number of search results you want to retrieve.
+
+3. `/web`: This command performs a web search using DuckDuckGo.
+
+4. `/model`: This command allows you to change the Ollama model.
+
+5. `/chatbot`: This command lets you change the chatbot personality.
+
+6. `/collection`: This command allows you to change the vector database collection.
+
+7. `/cb`: This command replaces /cb with the content of your clipboard.
+
+8. `/verbose`: This command toggles verbose mode on or off.
+
+9. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+
+10. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
+
+Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.
