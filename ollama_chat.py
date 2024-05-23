@@ -1,9 +1,16 @@
-# pip install ollama colorama chromadb pywin32 pygments duckduckgo_search sentence-transformers
+# pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers
+
+# On Windows platform:
+# pip install pywin32
 
 import ollama
+import platform
 from colorama import Fore, Style
 import chromadb
-import win32clipboard
+
+if platform.system() == "Windows":
+    import win32clipboard
+
 import argparse
 import re
 import os
@@ -67,7 +74,7 @@ def print_possible_prompt_commands():
     /model: Change the Ollama model.
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
-    /cb: Replace /cb with the clipboard content.
+    /cb: Replace /cb with the clipboard content (on Windows systems only).
     /verbose: Toggle verbose mode on or off.
     reset, clear, restart: Reset the conversation.
     quit, exit, bye: Exit the chatbot.
@@ -581,13 +588,14 @@ def run():
             print(Style.RESET_ALL + "Conversation reset.")
             continue
 
-        if "/cb" in user_input:
-            # Replace /cb with the clipboard content
-            win32clipboard.OpenClipboard()
-            clipboard_content = win32clipboard.GetClipboardData()
-            win32clipboard.CloseClipboard()
-            user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
-            print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
+        if platform.system() == "Windows":
+            if "/cb" in user_input:
+                # Replace /cb with the clipboard content
+                win32clipboard.OpenClipboard()
+                clipboard_content = win32clipboard.GetClipboardData()
+                win32clipboard.CloseClipboard()
+                user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
+                print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
 
         # Add user input to conversation history
         conversation.append({"role": "user", "content": user_input})
