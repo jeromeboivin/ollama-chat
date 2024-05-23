@@ -20,7 +20,13 @@ Here is the list of required packages:
 You can install all these packages using pip, the Python package installer. Run the following command in your terminal:
 
 ```bash
-pip install ollama colorama chromadb pywin32 pygments duckduckgo_search sentence-transformers
+pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers
+```
+
+Additionally, under Windows platform, install `pywin32`:
+
+```bash
+pip install pywin32
 ```
 
 ## How to Use the Ollama Chatbot Script
