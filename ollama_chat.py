@@ -430,6 +430,7 @@ def run():
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
+    parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -442,6 +443,7 @@ def run():
     prompt_template = args.prompt_template
     additional_chatbots_file = args.additional_chatbots
     verbose_mode = args.verbose
+    initial_system_prompt = args.system_prompt
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
@@ -496,6 +498,11 @@ def run():
     set_current_collection(current_collection_name)
 
     # Initial system message
+    if initial_system_prompt:
+        if verbose_mode:
+            print(Fore.WHITE + Style.DIM + "Initial system prompt: " + initial_system_prompt)
+        system_prompt = initial_system_prompt
+
     if not no_system_role and len(user_name) > 0:
         system_prompt += f"\nYou are talking with {user_name}"
 
