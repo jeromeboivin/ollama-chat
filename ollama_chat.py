@@ -450,7 +450,9 @@ def run():
         try:
             from sentence_transformers import SentenceTransformer
             embeddings_model = SentenceTransformer(args.embeddings_model)
-            print(Fore.WHITE + Style.DIM + f"Using sentence embeddings model: {args.embeddings_model}")
+
+            if verbose_mode:
+                print(Fore.WHITE + Style.DIM + f"Using sentence embeddings model: {args.embeddings_model}")
         except:
             print(Fore.RED + "Sentence Transformers library not found. Please install it using 'pip install sentence-transformers'.")
             pass
