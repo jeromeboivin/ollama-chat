@@ -54,6 +54,8 @@ Here's a step-by-step guide on how to use it:
 
 10. **Specify the sentence embeddings model**: Use the `--embeddings-model` argument to specify the sentence embeddings model to use for vector database queries. For example, `python ollama_chat.py --embeddings-model multi-qa-mpnet-base-dot-v1`.
 
+11. **Specify a system prompt message**: Use the `--system-prompt` argument to specify a system prompt message. For example, `python ollama_chat.py --system-prompt "You are a teacher teaching physics, you must not give the answers but ask questions to guide the student in order to find the answer."`.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ## How to Specify Custom Chatbot Personalities in JSON Format
