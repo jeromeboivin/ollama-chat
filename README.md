@@ -82,18 +82,18 @@ This way of using the script can be very useful when you want to automate the pr
 
 4. **system_prompt**: This is the initial prompt that the chatbot uses to start a conversation. It should be a string that describes the chatbot's role and provides some context for the conversation. It can also include a list of possible prompt commands that the chatbot can use.
 
-Here is an example of a JSON object that specifies a custom chatbot personality:
+Here is an example of a JSON file that specifies a custom chatbot personality:
 
 ```json
-{
-    "description": "Chatbot for code-related questions",
-    "name": "code",
-    "preferred_model": "wizardlm2:latest",
-    "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}"
-}
+[
+    {
+        "description": "Chatbot for code-related questions",
+        "name": "code",
+        "preferred_model": "wizardlm2:latest",
+        "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}"
+    }
+]
 ```
-
-This JSON object can be part of a JSON array if you want to specify multiple chatbot personalities.
 
 ## How to Use Special Switches
 The Ollama client supports several special switches to enhance your interaction with the chatbot. Here's a brief guide on how to use them:
