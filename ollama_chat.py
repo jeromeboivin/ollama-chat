@@ -332,6 +332,7 @@ def bytes_to_gibibytes(bytes):
 
 def select_ollama_model_if_available(model_name):
     global no_system_role
+    global verbose_mode
 
     models = ollama.list()["models"]
     for model in models:
@@ -342,7 +343,8 @@ def select_ollama_model_if_available(model_name):
                 no_system_role=True
                 print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
-            print(Fore.WHITE + Style.DIM + f"Selected model: {model_name}")
+            if verbose_mode:
+                print(Fore.WHITE + Style.DIM + f"Selected model: {model_name}")
             return model_name
         
     print(Fore.RED + f"Model {model_name} not found.")
@@ -350,6 +352,7 @@ def select_ollama_model_if_available(model_name):
 
 def prompt_for_ollama_model(default_model):
     global no_system_role
+    global verbose_mode
 
     # List existing ollama models
     models = ollama.list()["models"]
@@ -378,7 +381,8 @@ def prompt_for_ollama_model(default_model):
         no_system_role=True
         print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
-    print(Fore.WHITE + Style.DIM + f"Selected model: {selected_model}")
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + f"Selected model: {selected_model}")
     return selected_model
 
 def get_personal_info():
@@ -439,6 +443,9 @@ def run():
     additional_chatbots_file = args.additional_chatbots
     verbose_mode = args.verbose
 
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
+
     if args.embeddings_model:
         try:
             from sentence_transformers import SentenceTransformer
@@ -455,7 +462,8 @@ def run():
     try:
         chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
     except:
-        print(Fore.RED + "ChromaDB client could not be initialized. Please check the host and port.")
+        if verbose_mode:
+            print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
         pass
 
     if not use_openai:
@@ -497,7 +505,11 @@ def run():
         conversation = []
     
     while True:
-        user_input = input(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+        try:
+            user_input = input(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+        except EOFError:
+            print(Style.RESET_ALL + "\rGoodbye!")
+            break
 
         if len(user_input) == 0:
             continue
