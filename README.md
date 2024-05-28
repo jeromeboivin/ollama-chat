@@ -56,6 +56,8 @@ Here's a step-by-step guide on how to use it:
 
 11. **Specify a system prompt message**: Use the `--system-prompt` argument to specify a system prompt message. For example, `python ollama_chat.py --system-prompt "You are a teacher teaching physics, you must not give the answers but ask questions to guide the student in order to find the answer."`.
 
+12. **Specify the Ollama model to use**: Use the `--model` argument to specify the Ollama model to be used. Default model: `phi3:mini`.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ## Redirecting standard input from the console
