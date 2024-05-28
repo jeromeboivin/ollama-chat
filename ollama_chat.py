@@ -85,7 +85,7 @@ def print_possible_prompt_commands():
 chatbots = [
     {
         "name": "basic",
-        "preferred_model": "phi3:mini",
+        "preferred_model": "",
         "description": "Basic chatbot",
         "system_prompt": "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
     }
@@ -431,6 +431,7 @@ def run():
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
+    parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -444,6 +445,7 @@ def run():
     additional_chatbots_file = args.additional_chatbots
     verbose_mode = args.verbose
     initial_system_prompt = args.system_prompt
+    preferred_model = args.model
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
@@ -475,6 +477,14 @@ def run():
         chatbot = chatbots[0]
         system_prompt = chatbot["system_prompt"]
         default_model = chatbot["preferred_model"]
+
+        if preferred_model:
+            default_model = preferred_model
+
+            # If default model does not contain ":", append ":latest" to the model name
+            if ":" not in default_model:
+                default_model += ":latest"
+
         selected_model = select_ollama_model_if_available(default_model)
         if selected_model is None:
             selected_model = prompt_for_ollama_model(default_model)
