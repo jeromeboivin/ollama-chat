@@ -58,6 +58,18 @@ Here's a step-by-step guide on how to use it:
 
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
+## Redirecting standard input from the console
+
+The script can be used by redirecting standard input from the console. This allows you to pass input to the script without manually typing it in. Here's an example:
+
+```bash
+echo "why is the sky blue?" | python ollama_chat.py
+```
+
+In this example, the echo command is used to create a string "why is the sky blue?". The pipe operator (|) then redirects this string as input to the ollama_chat.py script.
+
+This way of using the script can be very useful when you want to automate the process of sending input to the script or when you want to use the script in a larger pipeline of commands.
+
 ## How to Specify Custom Chatbot Personalities in JSON Format
 
 1. **description**: This is a brief explanation of the chatbot's purpose. It should be a string that describes what the chatbot is designed to do.
