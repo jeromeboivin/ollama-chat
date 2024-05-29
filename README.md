@@ -58,6 +58,8 @@ Here's a step-by-step guide on how to use it:
 
 12. **Specify the Ollama model to use**: Use the `--model` argument to specify the Ollama model to be used. Default model: `phi3:mini`.
 
+13. **Specifies the folder to save conversations to**: Use the `--conversations-folder <folder-path>` to specify the folder to save conversations to. If not specified, conversations will be saved in the current directory.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ## Redirecting standard input from the console
@@ -112,10 +114,12 @@ The Ollama client supports several special switches to enhance your interaction 
 
 7. `/cb`: This command replaces /cb with the content of your clipboard.
 
-8. `/verbose`: This command toggles verbose mode on or off.
+8. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
 
-9. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+9. `/verbose`: This command toggles verbose mode on or off.
 
-10. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
+10. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+
+11. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
 
 Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.

@@ -16,6 +16,7 @@ import re
 import os
 import sys
 import json
+import datetime
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
@@ -75,6 +76,7 @@ def print_possible_prompt_commands():
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
     /cb: Replace /cb with the clipboard content (on Windows systems only).
+    /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
     reset, clear, restart: Reset the conversation.
     quit, exit, bye: Exit the chatbot.
@@ -402,6 +404,24 @@ def get_personal_info():
     personal_info['user_name'] = user_name
     return personal_info
 
+def save_conversation_to_file(conversation, file_path):
+    with open(file_path, 'w') as f:
+        for message in conversation:
+            # Skip empty messages or system messages
+            if not message["content"] or message["role"] == "system":
+                continue
+
+            role = message["role"]
+
+            if role == "user":
+                role = "Me"
+            elif role == "assistant":
+                role = "Assistant"
+            
+            f.write(f"{role}: {message['content']}\n\n")
+
+    print(Fore.WHITE + Style.DIM + f"Conversation saved to {file_path}")
+
 def run():
     global current_collection_name
     global collection
@@ -432,6 +452,7 @@ def run():
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
+    parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -446,6 +467,7 @@ def run():
     verbose_mode = args.verbose
     initial_system_prompt = args.system_prompt
     preferred_model = args.model
+    conversations_folder = args.conversations_folder
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
@@ -597,6 +619,25 @@ def run():
 
         if "/model" in user_input:
             selected_model = prompt_for_ollama_model(default_model)
+            continue
+
+        if "/save" in user_input:
+            # If the user input contains /save and followed by a filename, save the conversation to that file
+            if re.search(r'/save\s+\S+', user_input):
+                file_path = re.search(r'/save\s+(\S+)', user_input).group(1)
+
+                if conversations_folder:
+                    file_path = os.path.join(conversations_folder, file_path)
+
+                save_conversation_to_file(conversation, file_path)
+            else:
+                # Save the conversation to a file, use current timestamp as the filename
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                if conversations_folder:
+                    save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
+                else:
+                    save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
             continue
 
         if "/collection" in user_input:
