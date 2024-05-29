@@ -453,6 +453,7 @@ def run():
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
+    parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -468,6 +469,7 @@ def run():
     initial_system_prompt = args.system_prompt
     preferred_model = args.model
     conversations_folder = args.conversations_folder
+    auto_save = args.auto_save
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
@@ -678,6 +680,14 @@ def run():
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
+
+    if auto_save:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if conversations_folder:
+            save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
+        else:
+            save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
 
 if __name__ == "__main__":
     run()

@@ -58,7 +58,9 @@ Here's a step-by-step guide on how to use it:
 
 12. **Specify the Ollama model to use**: Use the `--model` argument to specify the Ollama model to be used. Default model: `phi3:mini`.
 
-13. **Specifies the folder to save conversations to**: Use the `--conversations-folder <folder-path>` to specify the folder to save conversations to. If not specified, conversations will be saved in the current directory.
+13. **Specify the folder to save conversations to**: Use the `--conversations-folder <folder-path>` to specify the folder to save conversations to. If not specified, conversations will be saved in the current directory.
+
+14. **Save the conversation automatically**: Use the `--auto-save` argument to automatically saves the conversation when exiting the program.
 
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
