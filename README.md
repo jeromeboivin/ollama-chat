@@ -20,7 +20,13 @@ Here is the list of required packages:
 You can install all these packages using pip, the Python package installer. Run the following command in your terminal:
 
 ```bash
-pip install ollama colorama chromadb pywin32 pygments duckduckgo_search sentence-transformers
+pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers
+```
+
+Additionally, under Windows platform, install `pywin32`:
+
+```bash
+pip install pywin32
 ```
 
 ## How to Use the Ollama Chatbot Script
@@ -48,7 +54,27 @@ Here's a step-by-step guide on how to use it:
 
 10. **Specify the sentence embeddings model**: Use the `--embeddings-model` argument to specify the sentence embeddings model to use for vector database queries. For example, `python ollama_chat.py --embeddings-model multi-qa-mpnet-base-dot-v1`.
 
+11. **Specify a system prompt message**: Use the `--system-prompt` argument to specify a system prompt message. For example, `python ollama_chat.py --system-prompt "You are a teacher teaching physics, you must not give the answers but ask questions to guide the student in order to find the answer."`.
+
+12. **Specify the Ollama model to use**: Use the `--model` argument to specify the Ollama model to be used. Default model: `phi3:mini`.
+
+13. **Specify the folder to save conversations to**: Use the `--conversations-folder <folder-path>` to specify the folder to save conversations to. If not specified, conversations will be saved in the current directory.
+
+14. **Save the conversation automatically**: Use the `--auto-save` argument to automatically saves the conversation when exiting the program.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
+
+## Redirecting standard input from the console
+
+The script can be used by redirecting standard input from the console. This allows you to pass input to the script without manually typing it in. Here's an example:
+
+```bash
+echo "why is the sky blue?" | python ollama_chat.py
+```
+
+In this example, the echo command is used to create a string "why is the sky blue?". The pipe operator (|) then redirects this string as input to the ollama_chat.py script.
+
+This way of using the script can be very useful when you want to automate the process of sending input to the script or when you want to use the script in a larger pipeline of commands.
 
 ## How to Specify Custom Chatbot Personalities in JSON Format
 
@@ -60,18 +86,18 @@ Remember, all these arguments are optional. If you don't specify them, the scrip
 
 4. **system_prompt**: This is the initial prompt that the chatbot uses to start a conversation. It should be a string that describes the chatbot's role and provides some context for the conversation. It can also include a list of possible prompt commands that the chatbot can use.
 
-Here is an example of a JSON object that specifies a custom chatbot personality:
+Here is an example of a JSON file that specifies a custom chatbot personality:
 
 ```json
-{
-    "description": "Chatbot for code-related questions",
-    "name": "code",
-    "preferred_model": "wizardlm2:latest",
-    "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}"
-}
+[
+    {
+        "description": "Chatbot for code-related questions",
+        "name": "code",
+        "preferred_model": "wizardlm2:latest",
+        "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}"
+    }
+]
 ```
-
-This JSON object can be part of a JSON array if you want to specify multiple chatbot personalities.
 
 ## How to Use Special Switches
 The Ollama client supports several special switches to enhance your interaction with the chatbot. Here's a brief guide on how to use them:
@@ -90,10 +116,12 @@ The Ollama client supports several special switches to enhance your interaction 
 
 7. `/cb`: This command replaces /cb with the content of your clipboard.
 
-8. `/verbose`: This command toggles verbose mode on or off.
+8. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
 
-9. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+9. `/verbose`: This command toggles verbose mode on or off.
 
-10. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
+10. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+
+11. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
 
 Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.

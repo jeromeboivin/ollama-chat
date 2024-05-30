@@ -16,6 +16,7 @@ import re
 import os
 import sys
 import json
+import datetime
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
@@ -76,6 +77,7 @@ def print_possible_prompt_commands():
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
     /cb: Replace /cb with the clipboard content (on Windows systems only).
+    /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
     reset, clear, restart: Reset the conversation.
     quit, exit, bye: Exit the chatbot.
@@ -86,7 +88,7 @@ def print_possible_prompt_commands():
 chatbots = [
     {
         "name": "basic",
-        "preferred_model": "phi3:mini",
+        "preferred_model": "",
         "description": "Basic chatbot",
         "system_prompt": "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
     }
@@ -343,6 +345,7 @@ def bytes_to_gibibytes(bytes):
 
 def select_ollama_model_if_available(model_name):
     global no_system_role
+    global verbose_mode
 
     models = ollama.list()["models"]
     for model in models:
@@ -353,7 +356,8 @@ def select_ollama_model_if_available(model_name):
                 no_system_role=True
                 print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
-            print(Fore.WHITE + Style.DIM + f"Selected model: {model_name}")
+            if verbose_mode:
+                print(Fore.WHITE + Style.DIM + f"Selected model: {model_name}")
             return model_name
         
     print(Fore.RED + f"Model {model_name} not found.")
@@ -361,6 +365,7 @@ def select_ollama_model_if_available(model_name):
 
 def prompt_for_ollama_model(default_model):
     global no_system_role
+    global verbose_mode
 
     # List existing ollama models
     models = ollama.list()["models"]
@@ -389,7 +394,8 @@ def prompt_for_ollama_model(default_model):
         no_system_role=True
         print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
-    print(Fore.WHITE + Style.DIM + f"Selected model: {selected_model}")
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + f"Selected model: {selected_model}")
     return selected_model
 
 def get_personal_info():
@@ -408,6 +414,24 @@ def get_personal_info():
     
     personal_info['user_name'] = user_name
     return personal_info
+
+def save_conversation_to_file(conversation, file_path):
+    with open(file_path, 'w') as f:
+        for message in conversation:
+            # Skip empty messages or system messages
+            if not message["content"] or message["role"] == "system":
+                continue
+
+            role = message["role"]
+
+            if role == "user":
+                role = "Me"
+            elif role == "assistant":
+                role = "Assistant"
+            
+            f.write(f"{role}: {message['content']}\n\n")
+
+    print(Fore.WHITE + Style.DIM + f"Conversation saved to {file_path}")
 
 def run():
     global current_collection_name
@@ -438,6 +462,10 @@ def run():
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
+    parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
+    parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
+    parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
+    parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
@@ -451,6 +479,13 @@ def run():
     prompt_template = args.prompt_template
     additional_chatbots_file = args.additional_chatbots
     verbose_mode = args.verbose
+    initial_system_prompt = args.system_prompt
+    preferred_model = args.model
+    conversations_folder = args.conversations_folder
+    auto_save = args.auto_save
+
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
     syntax_highlighting = args.syntax_highlighting
 
     print("syntax_highlighting: ", syntax_highlighting)
@@ -459,7 +494,9 @@ def run():
         try:
             from sentence_transformers import SentenceTransformer
             embeddings_model = SentenceTransformer(args.embeddings_model)
-            print(Fore.WHITE + Style.DIM + f"Using sentence embeddings model: {args.embeddings_model}")
+
+            if verbose_mode:
+                print(Fore.WHITE + Style.DIM + f"Using sentence embeddings model: {args.embeddings_model}")
         except:
             print(Fore.RED + "Sentence Transformers library not found. Please install it using 'pip install sentence-transformers'.")
             pass
@@ -471,7 +508,8 @@ def run():
     try:
         chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
     except:
-        print(Fore.RED + "ChromaDB client could not be initialized. Please check the host and port.")
+        if verbose_mode:
+            print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
         pass
 
     if not use_openai:
@@ -479,6 +517,14 @@ def run():
         chatbot = chatbots[0]
         system_prompt = chatbot["system_prompt"]
         default_model = chatbot["preferred_model"]
+
+        if preferred_model:
+            default_model = preferred_model
+
+            # If default model does not contain ":", append ":latest" to the model name
+            if ":" not in default_model:
+                default_model += ":latest"
+
         selected_model = select_ollama_model_if_available(default_model)
         if selected_model is None:
             selected_model = prompt_for_ollama_model(default_model)
@@ -502,6 +548,11 @@ def run():
     set_current_collection(current_collection_name)
 
     # Initial system message
+    if initial_system_prompt:
+        if verbose_mode:
+            print(Fore.WHITE + Style.DIM + "Initial system prompt: " + initial_system_prompt)
+        system_prompt = initial_system_prompt
+
     if not no_system_role and len(user_name) > 0:
         system_prompt += f"\nYou are talking with {user_name}"
 
@@ -513,7 +564,11 @@ def run():
         conversation = []
     
     while True:
-        user_input = input(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+        try:
+            user_input = input(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+        except EOFError:
+            print(Style.RESET_ALL + "\rGoodbye!")
+            break
 
         if len(user_input) == 0:
             continue
@@ -584,6 +639,25 @@ def run():
             selected_model = prompt_for_ollama_model(default_model)
             continue
 
+        if "/save" in user_input:
+            # If the user input contains /save and followed by a filename, save the conversation to that file
+            if re.search(r'/save\s+\S+', user_input):
+                file_path = re.search(r'/save\s+(\S+)', user_input).group(1)
+
+                if conversations_folder:
+                    file_path = os.path.join(conversations_folder, file_path)
+
+                save_conversation_to_file(conversation, file_path)
+            else:
+                # Save the conversation to a file, use current timestamp as the filename
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                if conversations_folder:
+                    save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
+                else:
+                    save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
+            continue
+
         if "/collection" in user_input:
             collection_name = prompt_for_vector_database_collection()
             set_current_collection(collection_name)
@@ -624,6 +698,14 @@ def run():
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
+
+    if auto_save:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if conversations_folder:
+            save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
+        else:
+            save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
 
 if __name__ == "__main__":
     run()
