@@ -483,12 +483,10 @@ def run():
     preferred_model = args.model
     conversations_folder = args.conversations_folder
     auto_save = args.auto_save
+    syntax_highlighting = args.syntax_highlighting
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
-    syntax_highlighting = args.syntax_highlighting
-
-    print("syntax_highlighting: ", syntax_highlighting)
 
     if args.embeddings_model:
         try:
