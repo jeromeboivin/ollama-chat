@@ -31,6 +31,7 @@ number_of_documents_to_return_from_vector_db = 1
 temperature = 0
 verbose_mode = False
 embeddings_model = None
+syntax_highlighting = True
 
 def web_search(query, n_results=10):
     search = DDGS()
@@ -296,6 +297,7 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
 
 def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None):
     global no_system_role
+    global syntax_highlighting
 
     # Some models do not support the "system" role, merge the system message with the first user message
     if no_system_role and len(conversation) > 1 and conversation[0]["role"] == "system":
@@ -304,6 +306,10 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
 
     if use_openai:
         return ask_openai_with_conversation(conversation, selected_model, temperature, prompt_template)
+
+    if not syntax_highlighting:
+        sys.stdout.write(Style.RESET_ALL + "Bot: ")
+        sys.stdout.flush()
 
     stream = ollama.chat(
         model=selected_model,
@@ -318,7 +324,12 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         chunk_count += 1
         delta = chunk['message']['content']
         bot_response += delta
-        print_spinning_wheel(chunk_count)
+        
+        if syntax_highlighting:
+            print_spinning_wheel(chunk_count)
+        else:
+            sys.stdout.write(delta)
+            sys.stdout.flush()
 
     return bot_response.strip()
 
@@ -408,6 +419,7 @@ def run():
     global prompt_template
     global verbose_mode
     global embeddings_model
+    global syntax_highlighting
 
     # Default ChromaDB client host and port
     chroma_client_host = "localhost"
@@ -426,6 +438,7 @@ def run():
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
+    parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -438,6 +451,9 @@ def run():
     prompt_template = args.prompt_template
     additional_chatbots_file = args.additional_chatbots
     verbose_mode = args.verbose
+    syntax_highlighting = args.syntax_highlighting
+
+    print("syntax_highlighting: ", syntax_highlighting)
 
     if args.embeddings_model:
         try:
@@ -556,8 +572,8 @@ def run():
             web_search_response = web_search(user_input)
             if web_search_response:
                 initial_user_input = user_input
-                user_input = "Question: " + initial_user_input
-                user_input += web_search_response
+                user_input = "Question: " + initial_user_input + "\n"
+                user_input += "Answer: " + web_search_response
                 user_input += "\n\nAnswer the question as truthfully as possible using the provided web search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
                 user_input += "Cite some useful links from the search results to support your answer."
 
@@ -602,7 +618,9 @@ def run():
 
         # Generate response
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template)
-        print(Style.RESET_ALL + '\rBot: ' + colorize(bot_response))
+        
+        if syntax_highlighting:
+            print(Style.RESET_ALL + '\rBot: ' + colorize(bot_response))
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
