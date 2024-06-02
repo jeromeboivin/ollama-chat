@@ -34,6 +34,54 @@ verbose_mode = False
 embeddings_model = None
 syntax_highlighting = True
 
+class DocumentIndexer:
+    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
+        self.root_folder = root_folder
+        self.collection_name = collection_name
+        self.client = chroma_client
+        self.model = embeddings_model
+        self.collection = self.client.get_or_create_collection(name=self.collection_name)
+
+    def get_text_files(self):
+        """
+        Recursively find all .txt and .md files in the root folder.
+        """
+        text_files = []
+        for root, dirs, files in os.walk(self.root_folder):
+            for file in files:
+                if file.endswith(".txt") or file.endswith(".md") or file.endswith(".tex"):
+                    text_files.append(os.path.join(root, file))
+        return text_files
+
+    def read_file(self, file_path):
+        """
+        Read the content of a file.
+        """
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
+
+    def index_documents(self):
+        """
+        Index all text files in the root folder.
+        """
+        text_files = self.get_text_files()
+
+        for file_path in text_files:
+            content = self.read_file(file_path)
+            document_id = os.path.splitext(os.path.basename(file_path))[0]
+            
+            # Embed the content
+            embedding = self.model.encode(content).tolist()
+            
+            # Add the content to the collection
+            self.collection.upsert(
+                documents=[content],
+                metadatas=[{'filename': file_path}],
+                ids=[document_id],
+                embeddings=[embedding]
+            )
+            print(f"Added document {document_id} to the collection")
+
 def web_search(query, n_results=10):
     search = DDGS()
 
@@ -76,6 +124,7 @@ def print_possible_prompt_commands():
     /model: Change the Ollama model.
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
+    /index <folder path>: Index text files in the folder to the vector database.
     /cb: Replace /cb with the clipboard content (on Windows systems only).
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
@@ -461,12 +510,13 @@ def run():
     parser.add_argument('--prompt-template', type=str, help='Prompt template to use for Llama-CPP', default=None)
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
+    parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default="all-MiniLM-L6-v2")
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--index-documents', type=str, help='Root folder to index text files', default=None)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -508,7 +558,16 @@ def run():
     except:
         if verbose_mode:
             print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
+        chroma_client = None
         pass
+
+    if args.index_documents and chroma_client:
+        if not embeddings_model:
+            print(Fore.RED + "Please specify a sentence embeddings model to index documents.")
+            return
+
+        document_indexer = DocumentIndexer(args.index_documents, preferred_collection_name, chroma_client, embeddings_model)
+        document_indexer.index_documents()
 
     if not use_openai:
         # Load the default chatbot
@@ -594,6 +653,19 @@ def run():
             except FileNotFoundError:
                 print(Fore.RED + "File not found. Please try again.")
                 continue
+
+        if "/index" in user_input:
+            if not chroma_client:
+                print(Fore.RED + "ChromaDB client not initialized.")
+                continue
+
+            if not embeddings_model:
+                print(Fore.RED + "Please specify a sentence embeddings model to index documents.")
+                continue
+
+            document_indexer = DocumentIndexer(user_input.split("/index")[1].strip(), preferred_collection_name, chroma_client, embeddings_model)
+            document_indexer.index_documents()
+            continue
 
         if "/verbose" in user_input:
             verbose_mode = not verbose_mode

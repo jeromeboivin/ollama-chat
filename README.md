@@ -62,6 +62,8 @@ Here's a step-by-step guide on how to use it:
 
 14. **Save the conversation automatically**: Use the `--auto-save` argument to automatically saves the conversation when exiting the program.
 
+15. **Index a local folder to the current ChromaDB collection**: Use the `--index-documents` to specify the root folder containing text files to index.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ## Redirecting standard input from the console
@@ -114,14 +116,16 @@ The Ollama client supports several special switches to enhance your interaction 
 
 6. `/collection`: This command allows you to change the vector database collection.
 
-7. `/cb`: This command replaces /cb with the content of your clipboard.
+7. `/index <folder path>`: Index text files in the specified folder to current vector database collection.
 
-8. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
+8. `/cb`: This command replaces /cb with the content of your clipboard.
 
-9. `/verbose`: This command toggles verbose mode on or off.
+9. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
 
-10. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+10. `/verbose`: This command toggles verbose mode on or off.
 
-11. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
+11. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+
+12. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
 
 Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.
