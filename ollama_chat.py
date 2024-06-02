@@ -58,7 +58,10 @@ class DocumentIndexer:
         Read the content of a file.
         """
         with open(file_path, 'r', encoding='utf-8') as file:
-            return file.read()
+            try:
+                return file.read()
+            except:
+                return None
 
     def index_documents(self):
         """
@@ -68,6 +71,11 @@ class DocumentIndexer:
 
         for file_path in text_files:
             content = self.read_file(file_path)
+
+            if not content:
+                print(Fore.RED + f"An error occurred while reading file: {file_path}")
+                continue
+
             document_id = os.path.splitext(os.path.basename(file_path))[0]
             
             # Embed the content
