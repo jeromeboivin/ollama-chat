@@ -13,6 +13,7 @@ Here is the list of required packages:
 - `colorama`: This package is used for colored terminal text.
 - `chromadb`: This package enables the script to interact with the ChromaDB vector database.
 - `pywin32`: This package provides access to some useful APIs on Windows like clipboard.
+- `pyperclip`: This package provides access to clipboard (Linux and MacOS).
 - `pygments`: This package is used for syntax highlighting.
 - `duckduckgo_search`: This package allows the script to perform DuckDuckGo searches.
 - `sentence-transformers`: This package is used for transforming sentences into embeddings.

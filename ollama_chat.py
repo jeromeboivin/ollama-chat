@@ -1,4 +1,4 @@
-# pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers
+# pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers pyperclip
 
 # On Windows platform:
 # pip install pywin32
@@ -10,6 +10,8 @@ import chromadb
 
 if platform.system() == "Windows":
     import win32clipboard
+else:
+    import pyperclip
 
 import argparse
 import re
@@ -133,7 +135,7 @@ def print_possible_prompt_commands():
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
     /index <folder path>: Index text files in the folder to the vector database.
-    /cb: Replace /cb with the clipboard content (on Windows systems only).
+    /cb: Replace /cb with the clipboard content.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
     reset, clear, restart: Reset the conversation.
@@ -756,14 +758,17 @@ def run():
             print(Style.RESET_ALL + "Conversation reset.")
             continue
 
-        if platform.system() == "Windows":
-            if "/cb" in user_input:
+        
+        if "/cb" in user_input:
+            if platform.system() == "Windows":
                 # Replace /cb with the clipboard content
                 win32clipboard.OpenClipboard()
                 clipboard_content = win32clipboard.GetClipboardData()
                 win32clipboard.CloseClipboard()
-                user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
-                print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
+            else:
+                clipboard_content = pyperclip.paste()
+            user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
+            print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
 
         # Add user input to conversation history
         conversation.append({"role": "user", "content": user_input})
