@@ -147,11 +147,13 @@ The image was likely taken in a canal or waterway, possibly in Venice, Italy. Th
 
 ## How to Specify Custom Chatbot Personalities in JSON Format
 
+Use the `--additional-chatbots` to specify the path to a JSON file containing additional pre-defined chatbots. This JSON file has to be an array of objects specifying these chatbots properties:
+
 1. **description**: This is a brief explanation of the chatbot's purpose. It should be a string that describes what the chatbot is designed to do.
 
 2. **name**: This is the name of the chatbot. It should be a string that uniquely identifies the chatbot.
 
-3. **preferred_model**: This is the model that the chatbot uses to generate responses. It should be a string that specifies the model's name.
+3. **preferred_model**: This is the model that the chatbot uses to generate responses. It should be a string that specifies the Ollama model's name.
 
 4. **system_prompt**: This is the initial prompt that the chatbot uses to start a conversation. It should be a string that describes the chatbot's role and provides some context for the conversation. It can also include a list of possible prompt commands that the chatbot can use.
 
