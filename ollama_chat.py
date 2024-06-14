@@ -653,16 +653,25 @@ def run():
                 conversation = []
             continue
 
+        image_path = None
         # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
         if "/file" in user_input:
             file_path = user_input.split("/file")[1].strip()
-            try:
-                with open(file_path, 'r') as file:
-                    user_input = user_input.replace("/file", "")
-                    user_input += "\n" + file.read()
-            except FileNotFoundError:
-                print(Fore.RED + "File not found. Please try again.")
-                continue
+            file_path = file_path.strip("'\"")
+            
+            # Check if the file is an image
+            _, ext = os.path.splitext(file_path)
+            if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
+                try:
+                    with open(file_path, 'r') as file:
+                        user_input = user_input.replace("/file", "")
+                        user_input += "\n" + file.read()
+                except FileNotFoundError:
+                    print(Fore.RED + "File not found. Please try again.")
+                    continue
+            else:
+                user_input = user_input.split("/file")[0].strip()
+                image_path = file_path
 
         if "/index" in user_input:
             if not chroma_client:
@@ -771,7 +780,10 @@ def run():
             print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
 
         # Add user input to conversation history
-        conversation.append({"role": "user", "content": user_input})
+        if image_path:
+            conversation.append({"role": "user", "content": user_input, "images": [image_path]})
+        else:
+            conversation.append({"role": "user", "content": user_input})
 
         # Generate response
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template)
