@@ -100,10 +100,14 @@ Remember, all these arguments are optional. If you don't specify them, the scrip
 
 ## Redirecting standard input from the console
 
-The script can be used by redirecting standard input from the console. This allows you to pass input to the script without manually typing it in. Here's an example:
+The script can be used by redirecting standard input from the console. This allows you to pass input to the script without manually typing it in. 
+
+Use the `--no-interactive` command-line switch to deactivate any prompt.
+
+Here's an example:
 
 ```bash
-echo "why is the sky blue?" | python ollama_chat.py
+echo "why is the sky blue?" | python ollama_chat.py --no-interactive
 ```
 
 In this example, the echo command is used to create a string "why is the sky blue?". The pipe operator (|) then redirects this string as input to the ollama_chat.py script.
