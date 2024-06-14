@@ -157,7 +157,7 @@ Use the `--additional-chatbots` to specify the path to a JSON file containing ad
 
 4. **system_prompt**: This is the initial prompt that the chatbot uses to start a conversation. It should be a string that describes the chatbot's role and provides some context for the conversation. It can also include a list of possible prompt commands that the chatbot can use.
 
-**Note**: special token `{possible_prompt_commands}` in the system prompt will be replace by the script automatically.
+**Note**: special token `{possible_prompt_commands}` in the system prompt will be replaced by the possible commands automatically (see [How to Use Special Switches](## How to Use Special Switches) section above).
 
 Here is an example of a JSON file that specifies a custom chatbot personality:
 
