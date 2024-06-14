@@ -35,6 +35,7 @@ temperature = 0
 verbose_mode = False
 embeddings_model = None
 syntax_highlighting = True
+interactive_mode = True
 
 class DocumentIndexer:
     def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
@@ -359,6 +360,7 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
 def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None):
     global no_system_role
     global syntax_highlighting
+    global interactive_mode
 
     # Some models do not support the "system" role, merge the system message with the first user message
     if no_system_role and len(conversation) > 1 and conversation[0]["role"] == "system":
@@ -369,7 +371,10 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         return ask_openai_with_conversation(conversation, selected_model, temperature, prompt_template)
 
     if not syntax_highlighting:
-        sys.stdout.write(Style.RESET_ALL + "Bot: ")
+        if (interactive_mode):
+            sys.stdout.write(Style.RESET_ALL + "Bot: ")
+        else:
+            sys.stdout.write(Style.RESET_ALL)
         sys.stdout.flush()
 
     stream = ollama.chat(
@@ -386,7 +391,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         delta = chunk['message']['content']
         bot_response += delta
         
-        if syntax_highlighting:
+        if syntax_highlighting and interactive_mode:
             print_spinning_wheel(chunk_count)
         else:
             sys.stdout.write(delta)
@@ -503,6 +508,7 @@ def run():
     global verbose_mode
     global embeddings_model
     global syntax_highlighting
+    global interactive_mode
 
     # Default ChromaDB client host and port
     chroma_client_host = "localhost"
@@ -527,6 +533,7 @@ def run():
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--index-documents', type=str, help='Root folder to index text files', default=None)
+    parser.add_argument('--interactive', type=bool, help='Use interactive mode', default=True, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -544,6 +551,7 @@ def run():
     conversations_folder = args.conversations_folder
     auto_save = args.auto_save
     syntax_highlighting = args.syntax_highlighting
+    interactive_mode = args.interactive
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
@@ -631,10 +639,12 @@ def run():
         conversation = []
     
     while True:
+
         try:
-            user_input = input(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+            if (interactive_mode):
+                sys.stdout.write(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+            user_input = input()
         except EOFError:
-            print(Style.RESET_ALL + "\rGoodbye!")
             break
 
         if len(user_input) == 0:
@@ -789,7 +799,10 @@ def run():
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template)
         
         if syntax_highlighting:
-            print(Style.RESET_ALL + '\rBot: ' + colorize(bot_response))
+            if (interactive_mode):
+                print(Style.RESET_ALL + '\rBot: ' + colorize(bot_response))
+            else:
+                print(Style.RESET_ALL + colorize(bot_response))
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
