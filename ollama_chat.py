@@ -1,4 +1,4 @@
-# pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers pyperclip langchain-text-splitters
+# pip install ollama colorama chromadb pygments duckduckgo_search pyperclip langchain-text-splitters
 
 # On Windows platform:
 # pip install pywin32
@@ -98,7 +98,12 @@ class DocumentIndexer:
                     embedding = None
 
                     if self.model:
-                        embedding = self.model.encode(chunk).tolist()
+                        # generate an embedding for the chunk
+                        response = ollama.embeddings(
+                            prompt=chunk,
+                            model=self.model
+                        )
+                        embedding = response["embedding"]
                     
                     # Add the content to the collection
                     if embedding:
@@ -283,8 +288,13 @@ def query_vector_database(question, n_results, collection_name=current_collectio
             n_results=n_results
         )
     else:
+        # generate an embedding for the question and retrieve the most relevant doc
+        response = ollama.embeddings(
+            prompt=question,
+            model=embeddings_model
+        )
         result = collection.query(
-            query_embeddings=[embeddings_model.encode(question).tolist()],
+            query_embeddings=[response["embedding"]],
             n_results=n_results
         )
 
@@ -605,20 +615,10 @@ def run():
     auto_save = args.auto_save
     syntax_highlighting = args.syntax_highlighting
     interactive_mode = args.interactive
+    embeddings_model = args.embeddings_model
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
-
-    if args.embeddings_model:
-        try:
-            from sentence_transformers import SentenceTransformer
-            embeddings_model = SentenceTransformer(args.embeddings_model)
-
-            if verbose_mode:
-                print(Fore.WHITE + Style.DIM + f"Using sentence embeddings model: {args.embeddings_model}")
-        except:
-            print(Fore.RED + "Sentence Transformers library not found. Please install it using 'pip install sentence-transformers'.")
-            pass
 
     # Load additional chatbots from a JSON file
     load_additional_chatbots(additional_chatbots_file)
