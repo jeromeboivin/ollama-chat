@@ -1,4 +1,4 @@
-# pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers pyperclip
+# pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers pyperclip langchain-text-splitters
 
 # On Windows platform:
 # pip install pywin32
@@ -37,6 +37,10 @@ embeddings_model = None
 syntax_highlighting = True
 interactive_mode = True
 
+# Default ChromaDB client host and port
+chroma_client_host = "localhost"
+chroma_client_port = 8000
+
 class DocumentIndexer:
     def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
         self.root_folder = root_folder
@@ -67,31 +71,52 @@ class DocumentIndexer:
                 return None
 
     def index_documents(self):
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
         """
         Index all text files in the root folder.
         """
         text_files = self.get_text_files()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
         for file_path in text_files:
-            content = self.read_file(file_path)
+            try:
+                content = self.read_file(file_path)
 
-            if not content:
-                print(Fore.RED + f"An error occurred while reading file: {file_path}")
-                continue
+                if not content:
+                    print(Fore.RED + f"An error occurred while reading file: {file_path}")
+                    continue
 
-            document_id = os.path.splitext(os.path.basename(file_path))[0]
-            
-            # Embed the content
-            embedding = self.model.encode(content).tolist()
-            
-            # Add the content to the collection
-            self.collection.upsert(
-                documents=[content],
-                metadatas=[{'filename': file_path}],
-                ids=[document_id],
-                embeddings=[embedding]
-            )
-            print(f"Added document {document_id} to the collection")
+                document_id = os.path.splitext(os.path.basename(file_path))[0]
+                
+                # Split the content using langchain text splitter
+                chunks = text_splitter.split_text(content)
+                
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"{document_id}_{i}"
+                    
+                    # Embed the content
+                    embedding = None
+
+                    if self.model:
+                        embedding = self.model.encode(chunk).tolist()
+                    
+                    # Add the content to the collection
+                    if embedding:
+                        self.collection.upsert(
+                            documents=[chunk],
+                            metadatas=[{'filename': file_path}],
+                            ids=[chunk_id],
+                            embeddings=[embedding]
+                        )
+                    else:
+                        self.collection.upsert(
+                            documents=[chunk],
+                            metadatas=[{'filename': file_path}],
+                            ids=[chunk_id]
+                        )
+                    print(Fore.WHITE + Style.DIM + f"Added chunk {chunk_id} to the collection")
+            except KeyboardInterrupt:
+                break
 
 def web_search(query, n_results=10):
     search = DDGS()
@@ -196,12 +221,18 @@ def prompt_for_chatbot():
 def prompt_for_vector_database_collection():
     global chroma_client
 
+    load_chroma_client()
+
     # List existing collections
-    collections = chroma_client.list_collections()
+    collections = None
+    if chroma_client:
+        collections = chroma_client.list_collections()
+    else:
+        print(Fore.RED + "ChromaDB is not running.")
 
     if not collections:
-        print(Fore.RED + "No collections found.")
-        return ""
+        print(Fore.RED + "No collections found")
+        return input("Enter a new collection to create: ")
 
     # Ask user to choose a collection
     print(Style.RESET_ALL + "Available collections:")
@@ -216,6 +247,8 @@ def prompt_for_vector_database_collection():
 def set_current_collection(collection_name):
     global collection
     global current_collection_name
+
+    load_chroma_client()
 
     if not collection_name or not chroma_client:
         collection = None
@@ -501,6 +534,23 @@ def save_conversation_to_file(conversation, file_path):
 
     print(Fore.WHITE + Style.DIM + f"Conversation saved to {file_path}")
 
+def load_chroma_client():
+    global chroma_client
+    global verbose_mode
+    global chroma_client_host
+    global chroma_client_port
+
+    if chroma_client:
+        return
+
+    # Initialize the ChromaDB client
+    try:
+        chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
+    except:
+        if verbose_mode:
+            print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
+        chroma_client = None
+
 def run():
     global current_collection_name
     global collection
@@ -513,10 +563,9 @@ def run():
     global embeddings_model
     global syntax_highlighting
     global interactive_mode
+    global chroma_client_host
+    global chroma_client_port
 
-    # Default ChromaDB client host and port
-    chroma_client_host = "localhost"
-    chroma_client_port = 8000
     prompt_template = None
 
     # If specified as script named arguments, use the provided ChromaDB client host (--chroma-host) and port (--chroma-port)
@@ -530,7 +579,7 @@ def run():
     parser.add_argument('--prompt-template', type=str, help='Prompt template to use for Llama-CPP', default=None)
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default="all-MiniLM-L6-v2")
+    parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
@@ -574,21 +623,9 @@ def run():
     # Load additional chatbots from a JSON file
     load_additional_chatbots(additional_chatbots_file)
 
-    # Initialize the ChromaDB client
-    try:
-        chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
-    except:
-        if verbose_mode:
-            print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
-        chroma_client = None
-        pass
-
-    if args.index_documents and chroma_client:
-        if not embeddings_model:
-            print(Fore.RED + "Please specify a sentence embeddings model to index documents.")
-            return
-
-        document_indexer = DocumentIndexer(args.index_documents, preferred_collection_name, chroma_client, embeddings_model)
+    if args.index_documents:
+        load_chroma_client()
+        document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
         document_indexer.index_documents()
 
     if not use_openai:
@@ -692,11 +729,13 @@ def run():
                 print(Fore.RED + "ChromaDB client not initialized.")
                 continue
 
-            if not embeddings_model:
-                print(Fore.RED + "Please specify a sentence embeddings model to index documents.")
-                continue
+            load_chroma_client()
 
-            document_indexer = DocumentIndexer(user_input.split("/index")[1].strip(), preferred_collection_name, chroma_client, embeddings_model)
+            if not current_collection_name:
+                print(Fore.RED + "No ChromaDB collection loaded.")
+                set_current_collection(prompt_for_vector_database_collection())
+
+            document_indexer = DocumentIndexer(user_input.split("/index")[1].strip(), current_collection_name, chroma_client, embeddings_model)
             document_indexer.index_documents()
             continue
 
