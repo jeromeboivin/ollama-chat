@@ -386,16 +386,20 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
 
     bot_response = ""
     chunk_count = 0
-    for chunk in stream:
-        chunk_count += 1
-        delta = chunk['message']['content']
-        bot_response += delta
-        
-        if syntax_highlighting and interactive_mode:
-            print_spinning_wheel(chunk_count)
-        else:
-            sys.stdout.write(delta)
-            sys.stdout.flush()
+
+    try:
+        for chunk in stream:
+            chunk_count += 1
+            delta = chunk['message']['content']
+            bot_response += delta
+            
+            if syntax_highlighting and interactive_mode:
+                print_spinning_wheel(chunk_count)
+            else:
+                sys.stdout.write(delta)
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        stream.close()
 
     return bot_response.strip()
 
