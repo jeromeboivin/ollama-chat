@@ -15,12 +15,11 @@ Here is the list of required packages:
 - `pyperclip`: This package provides access to clipboard (Linux and MacOS).
 - `pygments`: This package is used for syntax highlighting.
 - `duckduckgo_search`: This package allows the script to perform DuckDuckGo searches.
-- `sentence-transformers`: This package is used for transforming sentences into embeddings.
 
 You can install all these packages using pip, the Python package installer. Run the following command in your terminal:
 
 ```bash
-pip install ollama colorama chromadb pygments duckduckgo_search sentence-transformers
+pip install ollama colorama chromadb pygments duckduckgo_search
 ```
 
 Additionally, under Windows platform, install `pywin32`:
@@ -53,7 +52,7 @@ Here's a step-by-step guide on how to use it:
 
 9. **Enable verbose mode**: If you want to enable verbose mode, use the `--verbose` argument. For example, `python ollama_chat.py --verbose`.
 
-10. **Specify the sentence embeddings model**: Use the `--embeddings-model` argument to specify the sentence embeddings model to use for vector database queries. For example, `python ollama_chat.py --embeddings-model multi-qa-mpnet-base-dot-v1`.
+10. **Specify the Ollama sentence embeddings model**: Use the `--embeddings-model` argument to specify the sentence embeddings model to use for vector database queries. For example, `python ollama_chat.py --embeddings-model mxbai-embed-large`.
 
 11. **Specify a system prompt message**: Use the `--system-prompt` argument to specify a system prompt message. For example, `python ollama_chat.py --system-prompt "You are a teacher teaching physics, you must not give the answers but ask questions to guide the student in order to find the answer."`.
 
