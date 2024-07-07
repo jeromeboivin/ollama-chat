@@ -19,6 +19,8 @@ import os
 import sys
 import json
 import datetime
+import importlib.util
+import inspect
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
@@ -36,10 +38,44 @@ verbose_mode = False
 embeddings_model = None
 syntax_highlighting = True
 interactive_mode = True
+plugins = []
+plugins_folder = None
 
 # Default ChromaDB client host and port
 chroma_client_host = "localhost"
 chroma_client_port = 8000
+
+def discover_plugins(plugin_folder=None):
+    global verbose_mode
+
+    if plugin_folder is None:
+        # Get the directory of the current script (main program)
+        main_dir = os.path.dirname(os.path.abspath(__file__))
+        # Default plugin folder named "plugins" in the same directory
+        plugin_folder = os.path.join(main_dir, "plugins")
+    
+    if not os.path.isdir(plugin_folder):
+        if verbose_mode:
+            print(Fore.RED + "Plugin folder does not exist: " + plugin_folder + Style.RESET_ALL)
+        return []
+    
+    plugins = []
+    for filename in os.listdir(plugin_folder):
+        if filename.endswith(".py") and not filename.startswith("__"):
+            module_name = filename[:-3]
+            module_path = os.path.join(plugin_folder, filename)
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            for name, obj in inspect.getmembers(module):
+                if inspect.isclass(obj):
+                    # Check if the class has a 'on_user_input' method
+                    if hasattr(obj, 'on_user_input') and callable(getattr(obj, 'on_user_input')):
+                        plugins.append(obj())
+                        if verbose_mode:
+                            print(Fore.WHITE + Style.DIM + f"Discovered plugin: {name}")
+    return plugins
 
 class DocumentIndexer:
     def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
@@ -575,6 +611,8 @@ def run():
     global interactive_mode
     global chroma_client_host
     global chroma_client_port
+    global plugins
+    global plugins_folder
 
     prompt_template = None
 
@@ -597,6 +635,7 @@ def run():
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--index-documents', type=str, help='Root folder to index text files', default=None)
     parser.add_argument('--interactive', type=bool, help='Use interactive mode', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--plugins-folder', type=str, default=None, help='Path to the plugins folder')
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -616,6 +655,9 @@ def run():
     syntax_highlighting = args.syntax_highlighting
     interactive_mode = args.interactive
     embeddings_model = args.embeddings_model
+    plugins_folder = args.plugins_folder
+
+    plugins = discover_plugins(plugins_folder)
 
     if verbose_mode:
         print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
@@ -686,6 +728,9 @@ def run():
                 sys.stdout.write(Fore.YELLOW + Style.NORMAL + "\nYou: ")
             user_input = input()
         except EOFError:
+            break
+        except KeyboardInterrupt:
+            print(Style.RESET_ALL + "\nGoodbye!")
             break
 
         if len(user_input) == 0:
@@ -831,6 +876,11 @@ def run():
                 clipboard_content = pyperclip.paste()
             user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
             print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
+
+        for plugin in plugins:
+            user_input_from_plugin = plugin.on_user_input(user_input, verbose_mode=verbose_mode)
+            if user_input_from_plugin:
+                user_input = user_input_from_plugin
 
         # Add user input to conversation history
         if image_path:
