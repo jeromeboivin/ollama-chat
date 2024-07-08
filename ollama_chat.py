@@ -494,6 +494,9 @@ def select_ollama_model_if_available(model_name):
     global no_system_role
     global verbose_mode
 
+    if not model_name:
+        return None
+
     models = ollama.list()["models"]
     for model in models:
         if model["name"] == model_name:
@@ -629,7 +632,7 @@ def run():
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
-    parser.add_argument('--model', type=str, help='Preferred Ollama model', default="phi3:mini")
+    parser.add_argument('--model', type=str, help='Preferred Ollama model', default=None)
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
@@ -730,6 +733,8 @@ def run():
         except EOFError:
             break
         except KeyboardInterrupt:
+            # CTRL+C hit: disable auto-save of conversation
+            auto_save = False
             print(Style.RESET_ALL + "\nGoodbye!")
             break
 
