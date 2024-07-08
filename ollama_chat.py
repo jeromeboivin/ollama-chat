@@ -12,6 +12,7 @@ if platform.system() == "Windows":
     import win32clipboard
 else:
     import pyperclip
+    import readline
 
 import argparse
 import re
