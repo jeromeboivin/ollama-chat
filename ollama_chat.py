@@ -524,7 +524,8 @@ def prompt_for_ollama_model(default_model):
     # Ask user to choose a model
     print(Style.RESET_ALL + "Available models:")
     for i, model in enumerate(models):
-        print(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])})")
+        star = " *" if model['name'] == default_model else ""
+        print(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}")
     
     # if stable-code:instruct is available, suggest it as the default model
     default_choice_index = None
