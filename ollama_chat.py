@@ -568,7 +568,7 @@ def get_personal_info():
     return personal_info
 
 def save_conversation_to_file(conversation, file_path):
-    with open(file_path, 'w') as f:
+    with open(file_path, 'w', encoding="utf8") as f:
         for message in conversation:
             # Skip empty messages or system messages
             if not message["content"] or message["role"] == "system":
