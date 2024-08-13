@@ -305,7 +305,7 @@ def set_current_collection(collection_name):
     except:
         raise Exception(f"Collection {collection_name} not found")
 
-def query_vector_database(question, n_results, collection_name=current_collection_name, answer_distance_threshold=0):
+def query_vector_database(question, n_results=5, collection_name=current_collection_name, answer_distance_threshold=0):
     global collection
     global verbose_mode
     global embeddings_model
@@ -437,7 +437,7 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
     bot_response = completion.choices[0].message.content
     return bot_response.strip()
 
-def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None):
+def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False):
     global no_system_role
     global syntax_highlighting
     global interactive_mode
@@ -451,7 +451,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         return ask_openai_with_conversation(conversation, selected_model, temperature, prompt_template)
 
     if not syntax_highlighting:
-        if (interactive_mode):
+        if interactive_mode and not no_bot_prompt:
             sys.stdout.write(Style.RESET_ALL + "Bot: ")
         else:
             sys.stdout.write(Style.RESET_ALL)
@@ -461,31 +461,88 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         model=selected_model,
         messages=conversation,
         stream=True,
-        options={"temperature": temperature}
+        options={"temperature": temperature},
+        tools=tools
     )
 
     bot_response = ""
     chunk_count = 0
 
+    bot_response_is_json = False
+
     try:
         for chunk in stream:
             chunk_count += 1
-            delta = chunk['message']['content']
+            # tool_calls = chunk['message'].get('tool_calls', [])
+            # print("Tool calls: ", tool_calls)
+
+            delta = chunk['message'].get('content', '')
+
+            if len(bot_response) == 0:
+                delta = delta.strip()
+
+                if len(delta) == 0:
+                    continue
+
+            # Check if the first delta is a '{' or a '[' to determine if it is a JSON response
+            if len(bot_response) == 0 and len(delta) > 0 and (delta[0] == '{' or delta[0] == '['):
+                bot_response_is_json = True
+
             bot_response += delta
             
             if syntax_highlighting and interactive_mode:
                 print_spinning_wheel(chunk_count)
             else:
-                sys.stdout.write(delta)
-                sys.stdout.flush()
+                if not bot_response_is_json:
+                    sys.stdout.write(delta)
+                    sys.stdout.flush()
     except KeyboardInterrupt:
         stream.close()
+    except ollama.ResponseError as e:
+        print(Fore.RED + f"An error occurred during the conversation: {e}")
+        return ""
+
+    # Attempt to parse the bot response as JSON and call the tool functions
+    bot_response_json = None
+    try:
+        bot_response_json = json.loads(bot_response.strip())
+    except:
+        pass
+
+    if bot_response_json:
+        if 'name' in bot_response_json:
+            tool_name = bot_response_json['name']
+            for tool in tools:
+                if 'type' in tool and tool['type'] == 'function' and 'function' in tool and 'name' in tool['function'] and tool['function']['name'] == tool_name:
+                    # Call the tool function with the parameters
+                    parameters = bot_response_json.get('parameters', {})
+
+                    if verbose_mode:
+                        print(Fore.WHITE + Style.DIM + f"Calling tool: {tool_name} with parameters: {parameters}")
+
+                    tool_response = globals()[tool_name](**parameters)
+
+                    if verbose_mode:
+                        print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
+
+                    if tool_response:
+                        initial_user_input = conversation[-1]["content"]
+                        tool_input = tool_response + "\n\n"
+                        tool_input += "Question: " + initial_user_input + "\n"
+                        tool_input += "Answer the question as truthfully as possible using the provided search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
+                        tool_input += "Cite some useful links from the search results to support your answer."
+
+                        if verbose_mode:
+                            print(Fore.WHITE + Style.DIM + tool_input)
+
+                        conversation += [{"role": "tool", "content": tool_input}]
+                        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt=True)
 
     return bot_response.strip()
 
-def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None):
+def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[]):
     conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
-    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template)
+    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools)
 
 def bytes_to_gibibytes(bytes):
     gigabytes = bytes / (1024 ** 3)
@@ -895,8 +952,47 @@ def run():
         else:
             conversation.append({"role": "user", "content": user_input})
 
+        tools = [{
+            'type': 'function',
+            'function': {
+                'name': 'web_search',
+                'description': 'Perform a web search using DuckDuckGo',
+                'parameters': {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "str",
+                            "description": "The search query"
+                        }
+                    },
+                    "required": [
+                        "query"
+                    ]
+                }
+            }
+        },
+        {
+            'type': 'function',
+            'function': {
+                'name': 'query_vector_database',
+                'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
+                'parameters': {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "str",
+                            "description": "The question to search for"
+                        }
+                    },
+                    "required": [
+                        "question"
+                    ]
+                }
+            }
+        }]
+
         # Generate response
-        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template)
+        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=tools)
         
         if syntax_highlighting:
             if (interactive_mode):
