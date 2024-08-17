@@ -952,6 +952,8 @@ def run():
         else:
             conversation.append({"role": "user", "content": user_input})
 
+        tools = []
+        '''
         tools = [{
             'type': 'function',
             'function': {
@@ -990,6 +992,7 @@ def run():
                 }
             }
         }]
+        '''
 
         # Generate response
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=tools)
