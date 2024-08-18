@@ -92,17 +92,19 @@ The Ollama client supports several special switches to enhance your interaction 
 
 6. `/collection`: This command allows you to change the vector database collection.
 
-7. `/index <folder path>`: Index text files in the specified folder to current vector database collection.
+7. `/tools`: This command displays the available tools and allows you to select or deselect them for use in your session.
 
-8. `/cb`: This command replaces /cb with the content of your clipboard.
+8. `/index <folder path>`: Index text files in the specified folder to current vector database collection.
 
-9. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
+9. `/cb`: This command replaces /cb with the content of your clipboard.
 
-10. `/verbose`: This command toggles verbose mode on or off.
+10. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
 
-11. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+11. `/verbose`: This command toggles verbose mode on or off.
 
-12. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
+12. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+
+13. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
 
 Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.
 
@@ -121,6 +123,132 @@ echo "why is the sky blue?" | python ollama_chat.py --no-interactive
 In this example, the echo command is used to create a string "why is the sky blue?". The pipe operator (|) then redirects this string as input to the ollama_chat.py script.
 
 This way of using the script can be very useful when you want to automate the process of sending input to the script or when you want to use the script in a larger pipeline of commands.
+
+### How to Extend and Implement Tool Plugins
+
+This section will explain how to set up and use custom tool plugins, using the provided console output as an example.
+
+#### 1. **Understanding Tool Selection**
+
+When interacting with the system, tools must be selected and configured before they can be used. Here’s how this is done:
+
+```bash
+You: /tools
+Available tools:
+1. [ ] web_search: Perform a web search using DuckDuckGo
+2. [ ] query_vector_database: Performs a semantic search using knowledge base collection named: None
+3. [ ] get_current_weather: Get the current weather for a city
+
+Select or deselect tools by entering the corresponding number (e.g., 1).
+Enter 'done' when you are finished.
+
+Your choice: 3
+Tool 'get_current_weather' selected.
+```
+
+In this example, tool number 3, `get_current_weather`, is selected. Once the desired tools are selected, you finalize the selection by typing `done`.
+
+#### 2. **Using Selected Tools**
+
+Once a tool is selected, it can be invoked by asking questions that match the tool's function. For example:
+
+```bash
+You: What's the current weather in Lyon, France?
+Bot: Calling tool: get_current_weather with parameters: {'city': 'Lyon, France'}
+The current weather in Lyon is rain shower with a temperature of 18°C, feeling like 18°C. The humidity is around 83%, and the wind is blowing at 7 km/h from the N.
+```
+
+The tool `get_current_weather` is called automatically by the system with the appropriate parameters (in this case, `city: 'Lyon, France'`).
+
+#### 3. **Answering Questions Using Tool Output**
+
+The system will then provide an answer based on the tool's output:
+
+```bash
+Question: What's the current weather in Lyon, France?
+Answer the question as truthfully as possible using the provided information, and if the answer is not contained within the text above, say 'I don't know'.
+The current weather in Lyon, France is rain shower with a temperature of 18°C.
+```
+
+The system uses the data fetched by the `get_current_weather` tool to generate a natural language response.
+
+#### 4. **Creating a Custom Tool Plugin**
+
+To create a custom tool plugin, the following structure is used. Assume we want to create a weather tool plugin:
+
+```python
+import requests
+
+class WeatherPluginSample():
+    def get_tool_definition(self):
+        return {
+            'type': 'function',
+            'function': {
+                'name': 'get_current_weather',
+                'description': 'Get the current weather for a city',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'city': {
+                            'type': 'string',
+                            'description': 'The name of the city',
+                        }
+                    },
+                    'required': ['city']
+                },
+            },
+        }
+
+    def on_user_input(self, user_input, verbose_mode=False):
+        return None
+
+    def get_current_weather(self, city):
+        # URL to fetch weather data from wttr.in in JSON format
+        url = f"https://wttr.in/{city}?format=j2"
+        
+        # Make the API request
+        response = requests.get(url)
+        
+        # Check if the response status code is OK
+        if response.status_code == 200:
+            data = response.json()
+
+            # Extract relevant weather information
+            current_weather = data['current_condition'][0]
+            city_name = data['nearest_area'][0]['areaName'][0]['value']
+            temperature = current_weather['temp_C']
+            feels_like = current_weather['FeelsLikeC']
+            description = current_weather['weatherDesc'][0]['value']
+            humidity = current_weather['humidity']
+            wind_speed = current_weather['windspeedKmph']
+            wind_direction = current_weather['winddir16Point']
+            
+            # Create a natural language response
+            weather_report = (
+                f"The current weather in {city_name} is {description.lower()} with a temperature of "
+                f"{temperature}°C, feeling like {feels_like}°C. The humidity is around {humidity}%, and "
+                f"the wind is blowing at {wind_speed} km/h from the {wind_direction}."
+            )
+            
+            return weather_report
+        else:
+            return "I couldn't find the city you're looking for, or an error occurred while fetching the weather data."
+```
+
+#### 5. **Plugin Location and Requirements**
+
+- **Location:** The plugin file must be placed under the `plugins` subfolder. For instance, the example plugin should be saved as `plugins/plugin_weather_sample_tool.py`.
+
+- **Required Methods:**
+  - **`get_tool_definition`**: This method must return a dictionary that defines the tool. It includes the tool’s name, description, and input parameters.
+  - **`on_user_input`**: This method is required by the system but can return `None` if not needed.
+  - **Custom Function**: The core logic of the tool (e.g., `get_current_weather`) should perform the main task, like fetching and processing data.
+
+#### 6. **Integrating the Plugin**
+
+Once the plugin is placed in the correct location and contains the required methods, it will be recognized by the program and can be used as demonstrated in the previous steps.
+
+This setup allows for the addition of various custom tools to extend the functionality of Ollama, tailoring it to specific needs and tasks.
 
 ## Generating text descriptions from images with vision models
 

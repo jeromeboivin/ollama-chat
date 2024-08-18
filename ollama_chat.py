@@ -41,10 +41,85 @@ syntax_highlighting = True
 interactive_mode = True
 plugins = []
 plugins_folder = None
+selected_tools = []  # Initially no tools selected
 
 # Default ChromaDB client host and port
 chroma_client_host = "localhost"
 chroma_client_port = 8000
+
+available_tools = [{
+    'type': 'function',
+    'function': {
+        'name': 'web_search',
+        'description': 'Perform a web search using DuckDuckGo',
+        'parameters': {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "str",
+                    "description": "The search query"
+                }
+            },
+            "required": [
+                "query"
+            ]
+        }
+    }
+},
+{
+    'type': 'function',
+    'function': {
+        'name': 'query_vector_database',
+        'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
+        'parameters': {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "str",
+                    "description": "The question to search for"
+                }
+            },
+            "required": [
+                "question"
+            ]
+        }
+    }
+}]
+
+def select_tools(available_tools, selected_tools):
+    def display_tool_options():
+        print(Style.RESET_ALL + "Available tools:")
+        for i, tool in enumerate(available_tools):
+            tool_name = tool['function']['name']
+            status = "[X]" if tool in selected_tools else "[ ]"
+            print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
+
+    while True:
+        display_tool_options()
+        print("\nSelect or deselect tools by entering the corresponding number (e.g., 1).")
+        print("Enter 'done' when you are finished.\n")
+
+        user_input = input("Your choice: ").strip()
+
+        if user_input.lower() == 'done':
+            break
+
+        try:
+            index = int(user_input) - 1
+            if 0 <= index < len(available_tools):
+                selected_tool = available_tools[index]
+                if selected_tool in selected_tools:
+                    selected_tools.remove(selected_tool)
+                    print(f"Tool '{selected_tool['function']['name']}' deselected.\n")
+                else:
+                    selected_tools.append(selected_tool)
+                    print(f"Tool '{selected_tool['function']['name']}' selected.\n")
+            else:
+                print("Invalid selection. Please choose a valid tool number.\n")
+        except ValueError:
+            print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
+
+    return selected_tools
 
 def discover_plugins(plugin_folder=None):
     global verbose_mode
@@ -76,6 +151,10 @@ def discover_plugins(plugin_folder=None):
                         plugins.append(obj())
                         if verbose_mode:
                             print(Fore.WHITE + Style.DIM + f"Discovered plugin: {name}")
+                    if hasattr(obj, 'get_tool_definition') and callable(getattr(obj, 'get_tool_definition')):
+                        available_tools.append(obj().get_tool_definition())
+                        if verbose_mode:
+                            print(Fore.WHITE + Style.DIM + f"Discovered tool: {name}")
     return plugins
 
 class DocumentIndexer:
@@ -162,18 +241,15 @@ class DocumentIndexer:
 
 def web_search(query, n_results=10):
     search = DDGS()
-
-    # Perform a chatbot search to get the answer
-    result = search.chat(query)
+    output = ""
 
     # Add the search results to the chatbot response
     search_results = search.text(query, max_results=n_results)
     if search_results:
-        result += "\n\nSearch results:\n"
         for i, search_result in enumerate(search_results):
-            result += f"{i+1}. {search_result['title']}\n{search_result['body']}\n{search_result['href']}\n\n"
+            output += f"{i+1}. {search_result['title']}\n{search_result['body']}\n{search_result['href']}\n\n"
 
-    return result
+    return output
 
 def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
@@ -200,6 +276,7 @@ def print_possible_prompt_commands():
     /search <number of results>: Query the vector database and append the answer to user input (RAG system).
     /web: Perform a web search using DuckDuckGo.
     /model: Change the Ollama model.
+    /tools: Prompts the user to select or deselect tools from the available tools list.
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
     /index <folder path>: Index text files in the folder to the vector database.
@@ -521,23 +598,25 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                     if verbose_mode:
                         print(Fore.WHITE + Style.DIM + f"Calling tool: {tool_name} with parameters: {parameters}")
 
-                    tool_response = globals()[tool_name](**parameters)
-
-                    if verbose_mode:
-                        print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
+                    if tool_name in globals():
+                        tool_response = globals()[tool_name](**parameters)
+                    else:
+                        for plugin in plugins:
+                            if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
+                                tool_response = getattr(plugin, tool_name)(**parameters)
+                                break
 
                     if tool_response:
                         initial_user_input = conversation[-1]["content"]
                         tool_input = tool_response + "\n\n"
-                        tool_input += "Question: " + initial_user_input + "\n"
-                        tool_input += "Answer the question as truthfully as possible using the provided search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
-                        tool_input += "Cite some useful links from the search results to support your answer."
+                        tool_input += f"Question: {initial_user_input}\n"
+                        tool_input += "Answer the question as truthfully as possible using the provided information, and if the answer is not contained within the text above, say 'I don't know'."
 
                         if verbose_mode:
                             print(Fore.WHITE + Style.DIM + tool_input)
 
-                        conversation += [{"role": "tool", "content": tool_input}]
-                        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt=True)
+                        tool_conversation = [{"role": "user", "content": tool_input}]
+                        bot_response = ask_ollama_with_conversation(tool_conversation, selected_model, temperature, prompt_template, tools=[], no_bot_prompt=True)
 
     return bot_response.strip()
 
@@ -676,6 +755,7 @@ def run():
     global chroma_client_port
     global plugins
     global plugins_folder
+    global selected_tools
 
     prompt_template = None
 
@@ -908,6 +988,10 @@ def run():
             selected_model = prompt_for_ollama_model(default_model)
             continue
 
+        if "/tools" in user_input:
+            selected_tools = select_tools(available_tools, selected_tools)
+            continue
+
         if "/save" in user_input:
             # If the user input contains /save and followed by a filename, save the conversation to that file
             if re.search(r'/save\s+\S+', user_input):
@@ -970,50 +1054,8 @@ def run():
         else:
             conversation.append({"role": "user", "content": user_input})
 
-        tools = []
-        '''
-        tools = [{
-            'type': 'function',
-            'function': {
-                'name': 'web_search',
-                'description': 'Perform a web search using DuckDuckGo',
-                'parameters': {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "str",
-                            "description": "The search query"
-                        }
-                    },
-                    "required": [
-                        "query"
-                    ]
-                }
-            }
-        },
-        {
-            'type': 'function',
-            'function': {
-                'name': 'query_vector_database',
-                'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
-                'parameters': {
-                    "type": "object",
-                    "properties": {
-                        "question": {
-                            "type": "str",
-                            "description": "The question to search for"
-                        }
-                    },
-                    "required": [
-                        "question"
-                    ]
-                }
-            }
-        }]
-        '''
-
         # Generate response
-        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=tools)
+        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools)
         
         if syntax_highlighting:
             if (interactive_mode):
