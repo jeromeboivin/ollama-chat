@@ -208,6 +208,7 @@ def print_possible_prompt_commands():
     /verbose: Toggle verbose mode on or off.
     reset, clear, restart: Reset the conversation.
     quit, exit, bye: Exit the chatbot.
+    For multiline input, you can wrap text with triple double quotes.
     """
     return possible_prompt_commands.strip()
 
@@ -784,20 +785,37 @@ def run():
         conversation = []
     
     while True:
-
         try:
-            if (interactive_mode):
+            if interactive_mode:
                 sys.stdout.write(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+            
             user_input = input()
+            if user_input.strip().startswith('"""'):
+                multi_line_input = [user_input[3:]]  # Keep the content after the first """
+                sys.stdout.write("... ")  # Prompt continuation line
+                
+                while True:
+                    line = input()
+                    if line.strip().endswith('"""') and len(line.strip()) > 3:
+                        # Handle if the line contains content before """
+                        multi_line_input.append(line[:-3])
+                        break
+                    elif line.strip().endswith('"""'):
+                        break
+                    else:
+                        multi_line_input.append(line)
+                        sys.stdout.write("... ")  # Prompt continuation line
+                
+                user_input = "\n".join(multi_line_input)
+            
         except EOFError:
             break
         except KeyboardInterrupt:
-            # CTRL+C hit: disable auto-save of conversation
             auto_save = False
             print(Style.RESET_ALL + "\nGoodbye!")
             break
 
-        if len(user_input) == 0:
+        if len(user_input.strip()) == 0:
             continue
         
         # Exit condition

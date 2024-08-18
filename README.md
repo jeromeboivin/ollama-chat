@@ -66,6 +66,16 @@ Here's a step-by-step guide on how to use it:
 
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
+### Multiline input
+
+For multiline input, you can wrap text with `"""`:
+
+```
+You: """Hello,
+... world!
+... """
+```
+
 ## How to Use Special Switches
 
 The Ollama client supports several special switches to enhance your interaction with the chatbot. Here's a brief guide on how to use them:
