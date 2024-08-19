@@ -535,65 +535,69 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
             sys.stdout.write(Style.RESET_ALL)
         sys.stdout.flush()
 
+    stream_active = True
+
+    # If tools are selected, deactivate the stream to get the full response
+    if len(tools) > 0:
+        stream_active = False
+
     stream = ollama.chat(
         model=selected_model,
         messages=conversation,
-        stream=True,
+        stream=stream_active,
         options={"temperature": temperature},
         tools=tools
     )
 
     bot_response = ""
-    chunk_count = 0
-
-    bot_response_is_json = False
+    bot_response_is_tool_calls = False
 
     try:
-        for chunk in stream:
-            chunk_count += 1
-            # tool_calls = chunk['message'].get('tool_calls', [])
-            # print("Tool calls: ", tool_calls)
+        if stream_active:
+            chunk_count = 0
+            for chunk in stream:
+                chunk_count += 1
 
-            delta = chunk['message'].get('content', '')
+                delta = chunk['message'].get('content', '')
 
-            if len(bot_response) == 0:
-                delta = delta.strip()
+                if len(bot_response) == 0:
+                    delta = delta.strip()
 
-                if len(delta) == 0:
-                    continue
+                    if len(delta) == 0:
+                        continue
 
-            # Check if the first delta is a '{' or a '[' to determine if it is a JSON response
-            if len(bot_response) == 0 and len(delta) > 0 and (delta[0] == '{' or delta[0] == '['):
-                bot_response_is_json = True
-
-            bot_response += delta
-            
-            if syntax_highlighting and interactive_mode:
-                print_spinning_wheel(chunk_count)
-            else:
-                if not bot_response_is_json:
+                bot_response += delta
+                
+                if syntax_highlighting and interactive_mode:
+                    print_spinning_wheel(chunk_count)
+                else:
                     sys.stdout.write(delta)
                     sys.stdout.flush()
+        else:
+            tool_calls = stream['message'].get('tool_calls', [])
+
+            if len(tool_calls) > 0:
+                conversation.append(stream['message'])
+
+                if verbose_mode:
+                    print(Fore.WHITE + Style.DIM + "Tool calls: ", tool_calls)
+                bot_response = tool_calls
+                bot_response_is_tool_calls = True
+            else:
+                bot_response = stream['message']['content']
     except KeyboardInterrupt:
         stream.close()
     except ollama.ResponseError as e:
         print(Fore.RED + f"An error occurred during the conversation: {e}")
         return ""
 
-    # Attempt to parse the bot response as JSON and call the tool functions
-    bot_response_json = None
-    try:
-        bot_response_json = json.loads(bot_response.strip())
-    except:
-        pass
-
-    if bot_response_json:
-        if 'name' in bot_response_json:
-            tool_name = bot_response_json['name']
+    if bot_response_is_tool_calls:
+        for tool_call in bot_response:
+            tool_name = tool_call['function']['name']
             for tool in tools:
                 if 'type' in tool and tool['type'] == 'function' and 'function' in tool and 'name' in tool['function'] and tool['function']['name'] == tool_name:
                     # Call the tool function with the parameters
-                    parameters = bot_response_json.get('parameters', {})
+                    parameters = tool_call['function'].get('arguments', {})
 
                     if verbose_mode:
                         print(Fore.WHITE + Style.DIM + f"Calling tool: {tool_name} with parameters: {parameters}")
@@ -607,16 +611,12 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                                 break
 
                     if tool_response:
-                        initial_user_input = conversation[-1]["content"]
-                        tool_input = tool_response + "\n\n"
-                        tool_input += f"Question: {initial_user_input}\n"
-                        tool_input += "Answer the question as truthfully as possible using the provided information, and if the answer is not contained within the text above, say 'I don't know'."
-
                         if verbose_mode:
-                            print(Fore.WHITE + Style.DIM + tool_input)
+                            print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
 
-                        tool_conversation = [{"role": "user", "content": tool_input}]
-                        bot_response = ask_ollama_with_conversation(tool_conversation, selected_model, temperature, prompt_template, tools=[], no_bot_prompt=True)
+                        conversation.append({"role": "tool", "content": tool_response})
+
+        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools=[], no_bot_prompt=True)
 
     return bot_response.strip()
 
