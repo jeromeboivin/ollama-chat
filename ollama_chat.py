@@ -97,11 +97,11 @@ def select_tools(available_tools, selected_tools):
     while True:
         display_tool_options()
         print("\nSelect or deselect tools by entering the corresponding number (e.g., 1).")
-        print("Enter 'done' when you are finished.\n")
+        print("Press Enter when done.\n")
 
         user_input = input("Your choice: ").strip()
 
-        if user_input.lower() == 'done':
+        if len(user_input) == 0:
             break
 
         try:
@@ -541,13 +541,17 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
     if len(tools) > 0:
         stream_active = False
 
-    stream = ollama.chat(
-        model=selected_model,
-        messages=conversation,
-        stream=stream_active,
-        options={"temperature": temperature},
-        tools=tools
-    )
+    try:
+        stream = ollama.chat(
+            model=selected_model,
+            messages=conversation,
+            stream=stream_active,
+            options={"temperature": temperature},
+            tools=tools
+        )
+    except ollama.ResponseError as e:
+        print(Fore.RED + f"An error occurred during the conversation: {e}")
+        return ""
 
     bot_response = ""
     bot_response_is_tool_calls = False
