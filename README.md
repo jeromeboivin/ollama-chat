@@ -155,7 +155,6 @@ Once a tool is selected, it can be invoked by asking questions that match the to
 ```bash
 You: What's the current weather in Lyon, France?
 Bot: Calling tool: get_current_weather with parameters: {'city': 'Lyon, France'}
-The current weather in Lyon is rain shower with a temperature of 18°C, feeling like 18°C. The humidity is around 83%, and the wind is blowing at 7 km/h from the N.
 ```
 
 The tool `get_current_weather` is called automatically by the system with the appropriate parameters (in this case, `city: 'Lyon, France'`).
@@ -165,9 +164,8 @@ The tool `get_current_weather` is called automatically by the system with the ap
 The system will then provide an answer based on the tool's output:
 
 ```bash
-Question: What's the current weather in Lyon, France?
-Answer the question as truthfully as possible using the provided information, and if the answer is not contained within the text above, say 'I don't know'.
-The current weather in Lyon, France is rain shower with a temperature of 18°C.
+You: What's the current weather in Lyon, France?
+Bot: The current weather in Lyon is rain shower with a temperature of 18°C, feeling like 18°C. The humidity is around 83%, and the wind is blowing at 7 km/h from the N.
 ```
 
 The system uses the data fetched by the `get_current_weather` tool to generate a natural language response.
