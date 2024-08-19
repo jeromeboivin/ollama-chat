@@ -124,11 +124,11 @@ In this example, the echo command is used to create a string "why is the sky blu
 
 This way of using the script can be very useful when you want to automate the process of sending input to the script or when you want to use the script in a larger pipeline of commands.
 
-### How to Extend and Implement Tool Plugins
+## How to Extend and Implement Tool Plugins
 
 This section will explain how to set up and use custom tool plugins, using the provided console output as an example.
 
-#### 1. **Understanding Tool Selection**
+### 1. **Understanding Tool Selection**
 
 When interacting with the system, tools must be selected and configured before they can be used. Here’s how this is done:
 
@@ -140,15 +140,15 @@ Available tools:
 3. [ ] get_current_weather: Get the current weather for a city
 
 Select or deselect tools by entering the corresponding number (e.g., 1).
-Enter 'done' when you are finished.
+Press Enter when done.
 
 Your choice: 3
 Tool 'get_current_weather' selected.
 ```
 
-In this example, tool number 3, `get_current_weather`, is selected. Once the desired tools are selected, you finalize the selection by typing `done`.
+In this example, tool number 3, `get_current_weather`, is selected. Once the desired tools are selected, you finalize the selection by typing `Enter`.
 
-#### 2. **Using Selected Tools**
+### 2. **Using Selected Tools**
 
 Once a tool is selected, it can be invoked by asking questions that match the tool's function. For example:
 
@@ -160,7 +160,7 @@ The current weather in Lyon is rain shower with a temperature of 18°C, feeling 
 
 The tool `get_current_weather` is called automatically by the system with the appropriate parameters (in this case, `city: 'Lyon, France'`).
 
-#### 3. **Answering Questions Using Tool Output**
+### 3. **Answering Questions Using Tool Output**
 
 The system will then provide an answer based on the tool's output:
 
@@ -172,7 +172,7 @@ The current weather in Lyon, France is rain shower with a temperature of 18°C.
 
 The system uses the data fetched by the `get_current_weather` tool to generate a natural language response.
 
-#### 4. **Creating a Custom Tool Plugin**
+### 4. **Creating a Custom Tool Plugin**
 
 To create a custom tool plugin, the following structure is used. Assume we want to create a weather tool plugin:
 
@@ -235,7 +235,7 @@ class WeatherPluginSample():
             return "I couldn't find the city you're looking for, or an error occurred while fetching the weather data."
 ```
 
-#### 5. **Plugin Location and Requirements**
+### 5. **Plugin Location and Requirements**
 
 - **Location:** The plugin file must be placed under the `plugins` subfolder. For instance, the example plugin should be saved as `plugins/plugin_weather_sample_tool.py`.
 
@@ -244,7 +244,7 @@ class WeatherPluginSample():
   - **`on_user_input`**: This method is required by the system but can return `None` if not needed.
   - **Custom Function**: The core logic of the tool (e.g., `get_current_weather`) should perform the main task, like fetching and processing data.
 
-#### 6. **Integrating the Plugin**
+### 6. **Integrating the Plugin**
 
 Once the plugin is placed in the correct location and contains the required methods, it will be recognized by the program and can be used as demonstrated in the previous steps.
 
