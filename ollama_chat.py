@@ -618,7 +618,13 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                         if verbose_mode:
                             print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
 
-                        conversation.append({"role": "tool", "content": tool_response})
+                        # If the tool response is a string, append it to the conversation
+                        if isinstance(tool_response, str):
+                            conversation.append({"role": "tool", "content": tool_response})
+                        else:
+                            # Convert the tool response to a string
+                            tool_response_str = json.dumps(tool_response, indent=4)
+                            conversation.append({"role": "tool", "content": tool_response_str})
 
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools=[], no_bot_prompt=True)
 
@@ -639,7 +645,12 @@ def select_ollama_model_if_available(model_name):
     if not model_name:
         return None
 
-    models = ollama.list()["models"]
+    try:
+        models = ollama.list()["models"]
+    except:
+        print(Fore.RED + "Ollama API is not running.")
+        return None
+
     for model in models:
         if model["name"] == model_name:
             selected_model = model
@@ -660,7 +671,11 @@ def prompt_for_ollama_model(default_model):
     global verbose_mode
 
     # List existing ollama models
-    models = ollama.list()["models"]
+    try:
+        models = ollama.list()["models"]
+    except:
+        print(Fore.RED + "Ollama API is not running.")
+        return None
 
     # Ask user to choose a model
     print(Style.RESET_ALL + "Available models:")
@@ -833,6 +848,8 @@ def run():
         selected_model = select_ollama_model_if_available(default_model)
         if selected_model is None:
             selected_model = prompt_for_ollama_model(default_model)
+        if selected_model is None:
+            return
     else:
         from openai import OpenAI
         openai_client = OpenAI(
