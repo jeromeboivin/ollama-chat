@@ -34,7 +34,7 @@ chroma_client = None
 current_collection_name = None
 collection = None
 number_of_documents_to_return_from_vector_db = 1
-temperature = 0
+temperature = 0.1
 verbose_mode = False
 embeddings_model = None
 syntax_highlighting = True
@@ -47,44 +47,50 @@ selected_tools = []  # Initially no tools selected
 chroma_client_host = "localhost"
 chroma_client_port = 8000
 
-available_tools = [{
-    'type': 'function',
-    'function': {
-        'name': 'web_search',
-        'description': 'Perform a web search using DuckDuckGo',
-        'parameters': {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "str",
-                    "description": "The search query"
-                }
-            },
-            "required": [
-                "query"
-            ]
+custom_tools = []
+def get_available_tools():
+    default_tools = [{
+        'type': 'function',
+        'function': {
+            'name': 'web_search',
+            'description': 'Perform a web search using DuckDuckGo',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "str",
+                        "description": "The search query"
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            }
         }
-    }
-},
-{
-    'type': 'function',
-    'function': {
-        'name': 'query_vector_database',
-        'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
-        'parameters': {
-            "type": "object",
-            "properties": {
-                "question": {
-                    "type": "str",
-                    "description": "The question to search for"
-                }
-            },
-            "required": [
-                "question"
-            ]
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'query_vector_database',
+            'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "str",
+                        "description": "The question to search for"
+                    }
+                },
+                "required": [
+                    "question"
+                ]
+            }
         }
-    }
-}]
+    }]
+
+    # Add custom tools from plugins
+    available_tools = default_tools + custom_tools
+    return available_tools
 
 def select_tools(available_tools, selected_tools):
     def display_tool_options():
@@ -152,7 +158,7 @@ def discover_plugins(plugin_folder=None):
                         if verbose_mode:
                             print(Fore.WHITE + Style.DIM + f"Discovered plugin: {name}")
                     if hasattr(obj, 'get_tool_definition') and callable(getattr(obj, 'get_tool_definition')):
-                        available_tools.append(obj().get_tool_definition())
+                        custom_tools.append(obj().get_tool_definition())
                         if verbose_mode:
                             print(Fore.WHITE + Style.DIM + f"Discovered tool: {name}")
     return plugins
@@ -187,12 +193,22 @@ class DocumentIndexer:
                 return None
 
     def index_documents(self):
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        allow_chunks = True
+
+        # Ask the user to confirm if they want to allow chunking of large documents
+        if allow_chunks:
+            print("Large documents will be chunked into smaller pieces for indexing.")
+            allow_chunks = input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
+
+        if allow_chunks:
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
         """
         Index all text files in the root folder.
         """
         text_files = self.get_text_files()
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+
+        if allow_chunks:
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
         for file_path in text_files:
             try:
@@ -204,38 +220,66 @@ class DocumentIndexer:
 
                 document_id = os.path.splitext(os.path.basename(file_path))[0]
                 
-                # Split the content using langchain text splitter
-                chunks = text_splitter.split_text(content)
-                
-                for i, chunk in enumerate(chunks):
-                    chunk_id = f"{document_id}_{i}"
+                if allow_chunks:
+                    # Split the content using langchain text splitter
+                    chunks = text_splitter.split_text(content)
                     
+                    for i, chunk in enumerate(chunks):
+                        chunk_id = f"{document_id}_{i}"
+                        
+                        # Embed the content
+                        embedding = None
+
+                        if self.model:
+                            # generate an embedding for the chunk
+                            response = ollama.embeddings(
+                                prompt=chunk,
+                                model=self.model
+                            )
+                            embedding = response["embedding"]
+                        
+                        # Add the content to the collection
+                        if embedding:
+                            self.collection.upsert(
+                                documents=[chunk],
+                                metadatas=[{'filename': file_path}],
+                                ids=[chunk_id],
+                                embeddings=[embedding]
+                            )
+                        else:
+                            self.collection.upsert(
+                                documents=[chunk],
+                                metadatas=[{'filename': file_path}],
+                                ids=[chunk_id]
+                            )
+                        print(Fore.WHITE + Style.DIM + f"Added chunk {chunk_id} to the collection")
+                else:
                     # Embed the content
                     embedding = None
 
                     if self.model:
-                        # generate an embedding for the chunk
+                        # generate an embedding for the document
                         response = ollama.embeddings(
-                            prompt=chunk,
+                            prompt=content,
                             model=self.model
                         )
                         embedding = response["embedding"]
-                    
+
                     # Add the content to the collection
                     if embedding:
                         self.collection.upsert(
-                            documents=[chunk],
+                            documents=[content],
                             metadatas=[{'filename': file_path}],
-                            ids=[chunk_id],
+                            ids=[document_id],
                             embeddings=[embedding]
                         )
                     else:
                         self.collection.upsert(
-                            documents=[chunk],
+                            documents=[content],
                             metadatas=[{'filename': file_path}],
-                            ids=[chunk_id]
+                            ids=[document_id]
                         )
-                    print(Fore.WHITE + Style.DIM + f"Added chunk {chunk_id} to the collection")
+                    print(Fore.WHITE + Style.DIM + f"Added document {document_id} to the collection")
             except KeyboardInterrupt:
                 break
 
@@ -279,6 +323,7 @@ def print_possible_prompt_commands():
     /tools: Prompts the user to select or deselect tools from the available tools list.
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
+    /rmcollection <collection name>: Delete the vector database collection.
     /index <folder path>: Index text files in the folder to the vector database.
     /cb: Replace /cb with the clipboard content.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
@@ -338,7 +383,7 @@ def prompt_for_chatbot():
 
     return chatbots[choice]
 
-def prompt_for_vector_database_collection():
+def prompt_for_vector_database_collection(prompt_create_new=True):
     global chroma_client
 
     load_chroma_client()
@@ -359,8 +404,15 @@ def prompt_for_vector_database_collection():
     for i, collection in enumerate(collections):
         collection_name = collection.name
         print(f"{i}. {collection_name}")
+
+    if prompt_create_new:
+        # Propose to create a new collection
+        print(f"{len(collections)}. Create a new collection")
     
     choice = int(input("Enter the number of your preferred collection [0]: ") or 0)
+
+    if prompt_create_new and choice == len(collections):
+        return input("Enter a new collection to create: ")
 
     return collections[choice].name
 
@@ -382,8 +434,22 @@ def set_current_collection(collection_name):
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
+    
+def delete_collection(collection_name):
+    global chroma_client
 
-def query_vector_database(question, n_results=5, collection_name=current_collection_name, answer_distance_threshold=0):
+    load_chroma_client()
+
+    if not chroma_client:
+        return
+
+    try:
+        chroma_client.delete_collection(name=collection_name)
+        print(Fore.WHITE + Style.DIM + f"Collection {collection_name} deleted.")
+    except:
+        print(Fore.RED + f"Collection {collection_name} not found")
+
+def query_vector_database(question, n_results=10, collection_name=current_collection_name, answer_distance_threshold=0):
     global collection
     global verbose_mode
     global embeddings_model
@@ -784,7 +850,7 @@ def run():
     parser.add_argument('--chroma-port', type=int, help='ChromaDB client port', default=8000)
     parser.add_argument('--collection', type=str, help='ChromaDB collection name', default=None)
     parser.add_argument('--use-openai', type=bool, help='Use OpenAI API or Llama-CPP', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--temperature', type=float, help='Temperature for OpenAI API', default=0)
+    parser.add_argument('--temperature', type=float, help='Temperature for OpenAI API', default=0.1)
     parser.add_argument('--disable-system-role', type=bool, help='Specify if the selected model does not support the system role, like Google Gemma models', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--prompt-template', type=str, help='Prompt template to use for Llama-CPP', default=None)
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
@@ -1010,7 +1076,7 @@ def run():
             continue
 
         if "/tools" in user_input:
-            selected_tools = select_tools(available_tools, selected_tools)
+            selected_tools = select_tools(get_available_tools(), selected_tools)
             continue
 
         if "/save" in user_input:
@@ -1035,6 +1101,22 @@ def run():
         if "/collection" in user_input:
             collection_name = prompt_for_vector_database_collection()
             set_current_collection(collection_name)
+            continue
+
+        if "/rmcollection" in user_input or "/deletecollection" in user_input:
+            if "/rmcollection" in user_input and len(user_input.split("/rmcollection")) > 1:
+                collection_name = user_input.split("/rmcollection")[1].strip()
+
+            if not collection_name and "/deletecollection" in user_input and len(user_input.split("/deletecollection")) > 1:
+                collection_name = user_input.split("/deletecollection")[1].strip()
+
+            if not collection_name:
+                collection_name = prompt_for_vector_database_collection(prompt_create_new=False)
+
+            if not collection_name:
+                continue
+
+            delete_collection(collection_name)
             continue
 
         if "/chatbot" in user_input:
