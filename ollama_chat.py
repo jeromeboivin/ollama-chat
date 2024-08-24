@@ -288,10 +288,14 @@ def web_search(query, n_results=10):
     output = ""
 
     # Add the search results to the chatbot response
-    search_results = search.text(query, max_results=n_results)
-    if search_results:
-        for i, search_result in enumerate(search_results):
-            output += f"{i+1}. {search_result['title']}\n{search_result['body']}\n{search_result['href']}\n\n"
+    try:
+        search_results = search.text(query, max_results=n_results)
+        if search_results:
+            for i, search_result in enumerate(search_results):
+                output += f"{i+1}. {search_result['title']}\n{search_result['body']}\n{search_result['href']}\n\n"
+    except:
+        # TODO: handle retries in case of duckduckgo_search.exceptions.RatelimitException
+        pass
 
     return output
 
@@ -581,7 +585,7 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
     bot_response = completion.choices[0].message.content
     return bot_response.strip()
 
-def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False):
+def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True):
     global no_system_role
     global syntax_highlighting
     global interactive_mode
@@ -601,11 +605,13 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
             sys.stdout.write(Style.RESET_ALL)
         sys.stdout.flush()
 
-    stream_active = True
-
     # If tools are selected, deactivate the stream to get the full response
     if len(tools) > 0:
         stream_active = False
+
+    bot_response = ""
+    bot_response_is_tool_calls = False
+    model_support_tools = True
 
     try:
         stream = ollama.chat(
@@ -616,52 +622,60 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
             tools=tools
         )
     except ollama.ResponseError as e:
-        print(Fore.RED + f"An error occurred during the conversation: {e}")
-        return ""
-
-    bot_response = ""
-    bot_response_is_tool_calls = False
-
-    try:
-        if stream_active:
-            chunk_count = 0
-            for chunk in stream:
-                chunk_count += 1
-
-                delta = chunk['message'].get('content', '')
-
-                if len(bot_response) == 0:
-                    delta = delta.strip()
-
-                    if len(delta) == 0:
-                        continue
-
-                bot_response += delta
-                
-                if syntax_highlighting and interactive_mode:
-                    print_spinning_wheel(chunk_count)
-                else:
-                    sys.stdout.write(delta)
-                    sys.stdout.flush()
-        else:
-            tool_calls = stream['message'].get('tool_calls', [])
-
-            if len(tool_calls) > 0:
-                conversation.append(stream['message'])
-
-                if verbose_mode:
-                    print(Fore.WHITE + Style.DIM + "Tool calls: ", tool_calls)
-                bot_response = tool_calls
+        if "does not support tools" in str(e):
+            tool_response = generate_tool_response(find_latest_user_message(conversation), tools, selected_model, temperature, prompt_template)
+            
+            if not tool_response is None and len(tool_response) > 0:
+                bot_response = tool_response
                 bot_response_is_tool_calls = True
+                model_support_tools = False
             else:
-                bot_response = stream['message']['content']
-    except KeyboardInterrupt:
-        stream.close()
-    except ollama.ResponseError as e:
-        print(Fore.RED + f"An error occurred during the conversation: {e}")
-        return ""
+                return ""
+        else:
+            print(Fore.RED + f"An error occurred during the conversation: {e}")
+            return ""
 
-    if bot_response_is_tool_calls:
+    if not bot_response_is_tool_calls:
+        try:
+            if stream_active:
+                chunk_count = 0
+                for chunk in stream:
+                    chunk_count += 1
+
+                    delta = chunk['message'].get('content', '')
+
+                    if len(bot_response) == 0:
+                        delta = delta.strip()
+
+                        if len(delta) == 0:
+                            continue
+
+                    bot_response += delta
+                    
+                    if syntax_highlighting and interactive_mode:
+                        print_spinning_wheel(chunk_count)
+                    else:
+                        sys.stdout.write(delta)
+                        sys.stdout.flush()
+            else:
+                tool_calls = stream['message'].get('tool_calls', [])
+
+                if len(tool_calls) > 0:
+                    conversation.append(stream['message'])
+
+                    if verbose_mode:
+                        print(Fore.WHITE + Style.DIM + "Tool calls: ", tool_calls)
+                    bot_response = tool_calls
+                    bot_response_is_tool_calls = True
+                else:
+                    bot_response = stream['message']['content']
+        except KeyboardInterrupt:
+            stream.close()
+        except ollama.ResponseError as e:
+            print(Fore.RED + f"An error occurred during the conversation: {e}")
+            return ""
+
+    if bot_response and bot_response_is_tool_calls:
         for tool_call in bot_response:
             tool_name = tool_call['function']['name']
             for tool in tools:
@@ -685,20 +699,103 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                             print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
 
                         # If the tool response is a string, append it to the conversation
+                        tool_role = "tool"
+                        if not model_support_tools:
+                            tool_role = "user"
                         if isinstance(tool_response, str):
-                            conversation.append({"role": "tool", "content": tool_response})
+                            if not model_support_tools:
+                                tool_response += "\n" + find_latest_user_message(conversation)
+                            conversation.append({"role": tool_role, "content": tool_response})
                         else:
                             # Convert the tool response to a string
                             tool_response_str = json.dumps(tool_response, indent=4)
-                            conversation.append({"role": "tool", "content": tool_response_str})
+                            if not model_support_tools:
+                                tool_response_str += "\n" + find_latest_user_message(conversation)
+                            conversation.append({"role": tool_role, "content": tool_response_str})
 
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools=[], no_bot_prompt=True)
 
     return bot_response.strip()
 
-def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[]):
+def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True):
     conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
-    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools)
+    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active)
+
+def find_latest_user_message(conversation):
+    # Iterate through the conversation list in reverse order
+    for message in reversed(conversation):
+        if message["role"] == "user":
+            return message["content"]
+    return None  # If no user message is found
+
+def render_tools(tools):
+    """Convert tools into a string format suitable for the system prompt."""
+    tool_descriptions = []
+    for tool in tools:
+        tool_info = f"Tool name: {tool['function']['name']}\nDescription: {tool['function']['description']}\n"
+        parameters = json.dumps(tool['function']['parameters'], indent=4)
+        tool_info += f"Parameters:\n{parameters}\n"
+        tool_descriptions.append(tool_info)
+    return "\n".join(tool_descriptions)
+
+def try_parse_json(json_str):
+    """Helper function to attempt JSON parsing and return the result if successful."""
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+
+def extract_json(garbage_str):
+    # First, try to parse the entire input as JSON directly
+    result = try_parse_json(garbage_str)
+    if result is not None:
+        return result
+
+    # Define a regular expression pattern to match the JSON block
+    pattern = r'```json\s*(\[\s*.*?\s*\])\s*```'
+    
+    # Search for the pattern
+    match = re.search(pattern, garbage_str, re.DOTALL)
+    
+    if match:
+        # Extract the JSON content
+        json_str = match.group(1)
+        # Attempt to load the JSON to verify it's correct
+        result = try_parse_json(json_str)
+        if result is not None:
+            return result
+        else:
+            raise ValueError("Extracted string is not a valid JSON.")
+    else:
+        raise ValueError("No valid JSON found in the input string.")
+
+def generate_tool_response(user_input, tools, selected_model, temperature=0.1, prompt_template=None):
+    """Generate a response using Ollama that suggests function calls based on the user input."""
+    global verbose_mode
+
+    rendered_tools = render_tools(tools)
+
+    # Create the system prompt with the provided tools
+    system_prompt = f"""You are an assistant that has access to the following set of tools.
+Here are the names and descriptions for each tool:
+
+{rendered_tools}
+Given the user input, return your response as a JSON array of objects, each representing a different function call. Each object should have the following structure:
+{{"function": {{
+"name": A string representing the function's name.
+"arguments": An object containing key-value pairs representing the arguments to be passed to the function. }}}}
+
+If no tool is relevant to answer, simply return an empty array: [].
+"""
+
+    # Call the existing ask_ollama function
+    tool_response = ask_ollama(system_prompt, user_input, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False)
+
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
+    
+    # The response should be in JSON format already if the function is correct.
+    return extract_json(tool_response)
 
 def bytes_to_gibibytes(bytes):
     gigabytes = bytes / (1024 ** 3)
