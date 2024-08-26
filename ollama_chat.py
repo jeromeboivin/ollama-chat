@@ -740,34 +740,75 @@ def render_tools(tools):
 
 def try_parse_json(json_str):
     """Helper function to attempt JSON parsing and return the result if successful."""
+    result = None
+
+    if not json_str or not isinstance(json_str, str):
+        return result
+
     try:
-        return json.loads(json_str)
+        result = json.loads(json_str)
     except json.JSONDecodeError:
-        return None
+        pass
+
+    return result
 
 def extract_json(garbage_str):
+    global verbose_mode
     # First, try to parse the entire input as JSON directly
     result = try_parse_json(garbage_str)
     if result is not None:
         return result
+    
+    json_str = None
 
-    # Define a regular expression pattern to match the JSON block
-    pattern = r'```json\s*(\[\s*.*?\s*\])\s*```'
+    if "```json" not in garbage_str:
+        # Find the first curly brace or square bracket
+        start_index = garbage_str.find("[")
+        if start_index == -1:
+            start_index = garbage_str.find("{")
+
+        last_index = garbage_str.rfind("]")
+        if last_index == -1:
+            last_index = garbage_str.rfind("}")
+
+        if start_index != -1 and last_index != -1:
+            # Extract the JSON content
+            json_str = garbage_str[start_index:last_index + 1]
+
+            # If a carriage return is found between the curly braces or square brackets, try to recompute the last index based on the newline character position
+            if "\n" in json_str:
+                last_index = json_str.rfind("]")
+                if last_index == -1:
+                    last_index = json_str.rfind("}")
+                
+                json_str = json_str[:last_index + 1]
+
+    if not json_str:
+        # Define a regular expression pattern to match the JSON block
+        pattern = r'```json\s*(\[\s*.*?\s*\])\s*```'
+        
+        # Search for the pattern
+        match = re.search(pattern, garbage_str, re.DOTALL)
+        
+        if match:
+            # Extract the JSON content
+            json_str = match.group(1)
     
-    # Search for the pattern
-    match = re.search(pattern, garbage_str, re.DOTALL)
-    
-    if match:
-        # Extract the JSON content
-        json_str = match.group(1)
+    if json_str:
         # Attempt to load the JSON to verify it's correct
+        if verbose_mode:
+            print(Fore.WHITE + Style.DIM + f"Extracted JSON: {json_str}")
         result = try_parse_json(json_str)
         if result is not None:
             return result
         else:
-            raise ValueError("Extracted string is not a valid JSON.")
+            if verbose_mode:
+                print(Fore.RED + "Extracted string is not a valid JSON.")
     else:
-        raise ValueError("No valid JSON found in the input string.")
+        if verbose_mode:
+            print(Fore.RED + "Extracted string is not a valid JSON.")
+    
+    return []
 
 def generate_tool_response(user_input, tools, selected_model, temperature=0.1, prompt_template=None):
     """Generate a response using Ollama that suggests function calls based on the user input."""
