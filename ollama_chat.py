@@ -1,4 +1,4 @@
-# pip install ollama colorama chromadb pygments duckduckgo_search pyperclip langchain-text-splitters
+# pip install ollama colorama chromadb pygments duckduckgo_search pyperclip langchain-text-splitters markdownify beautifulsoup4 requests PyPDF2 chardet
 
 # On Windows platform:
 # pip install pywin32
@@ -26,6 +26,11 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
 from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
+from markdownify import MarkdownConverter
+import requests
+from PyPDF2 import PdfReader
+import chardet
 
 use_openai = False
 no_system_role=False
@@ -42,6 +47,7 @@ interactive_mode = True
 plugins = []
 plugins_folder = None
 selected_tools = []  # Initially no tools selected
+current_model = None
 
 # Default ChromaDB client host and port
 chroma_client_host = "localhost"
@@ -91,6 +97,117 @@ def get_available_tools():
     # Add custom tools from plugins
     available_tools = default_tools + custom_tools
     return available_tools
+
+class SimpleWebCrawler:
+    def __init__(self, urls, llm_enabled=False, system_prompt='', selected_model='', temperature=0.1, verbose=False):
+        self.urls = urls
+        self.articles = []
+        self.llm_enabled = llm_enabled
+        self.system_prompt = system_prompt
+        self.selected_model = selected_model
+        self.temperature = temperature
+        self.verbose = verbose
+
+    def fetch_page(self, url):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            return response.content  # Return raw bytes instead of text for PDF support
+        except requests.exceptions.RequestException as e:
+            if self.verbose:
+                print(Fore.RED + f"Error fetching URL {url}: {e}")
+            return None
+
+    def md(self, soup, **options):
+        return MarkdownConverter(**options).convert_soup(soup)
+
+    def extract_text_from_html(self, html_content):
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # Remove all <script> tags
+        for script in soup.find_all('script'):
+            script.decompose()
+
+        # Convert the modified HTML content to Markdown
+        text = self.md(soup, strip=['a', 'img'], heading_style='ATX', 
+                       escape_asterisks=False, escape_underscores=False, 
+                       autolinks=False)
+        
+        # Remove extra newlines
+        text = re.sub(r'\n+', '\n', text)
+
+        return text
+
+    def extract_text_from_pdf(self, pdf_content):
+        with open('temp.pdf', 'wb') as f:
+            f.write(pdf_content)
+
+        reader = PdfReader('temp.pdf')
+        text = ''
+        for page in reader.pages:
+            text += page.extract_text()
+
+        # Clean up by removing the temporary file
+        os.remove('temp.pdf')
+
+        # Return the extracted text, with extra newlines removed
+        return re.sub(r'\n+', '\n', text)
+
+    def ask_llm(self, content, user_input):
+        # Use the provided ask_ollama function to interact with the LLM
+        user_input = content + "\n\n" + user_input
+        return ask_ollama(system_prompt=self.system_prompt, 
+                          user_input=user_input, 
+                          selected_model=self.selected_model, 
+                          temperature=self.temperature, 
+                          prompt_template=None, 
+                          tools=[], 
+                          no_bot_prompt=True, 
+                          stream_active=False)
+
+    def decode_content(self, content):
+        # Detect encoding
+        detected_encoding = chardet.detect(content)['encoding']
+        if self.verbose:
+            print(Fore.WHITE + Style.DIM + f"Detected encoding: {detected_encoding}")
+        
+        # Decode content
+        try:
+            return content.decode(detected_encoding)
+        except (UnicodeDecodeError, TypeError):
+            if self.verbose:
+                print(Fore.RED + f"Error decoding content with {detected_encoding}, using ISO-8859-1 as fallback.")
+            return content.decode('ISO-8859-1')
+
+    def crawl(self, task=None):
+        for url in self.urls:
+            if self.verbose:
+                print(Fore.WHITE + Style.DIM + f"Fetching URL: {url}")
+            content = self.fetch_page(url)
+            if content:
+                # Check if the URL points to a PDF
+                if url.lower().endswith('.pdf'):
+                    if self.verbose:
+                        print(Fore.WHITE + Style.DIM + f"Extracting text from PDF: {url}")
+                    extracted_text = self.extract_text_from_pdf(content)
+                else:
+                    if self.verbose:
+                        print(Fore.WHITE + Style.DIM + f"Extracting text from HTML: {url}")
+                    decoded_content = self.decode_content(content)
+                    extracted_text = self.extract_text_from_html(decoded_content)
+
+                article = {'url': url, 'text': extracted_text}
+                
+                if self.llm_enabled and task:
+                    if self.verbose:
+                        print(Fore.WHITE + Style.DIM + f"Using LLM to process the content. Task: {task}")
+                    llm_result = self.ask_llm(content=extracted_text, user_input=task)
+                    article['llm_result'] = llm_result
+
+                self.articles.append(article)
+
+    def get_articles(self):
+        return self.articles
 
 def select_tools(available_tools, selected_tools):
     def display_tool_options():
@@ -284,18 +401,48 @@ class DocumentIndexer:
                 break
 
 def web_search(query, n_results=10):
+    global current_model
+    global verbose_mode
+
     search = DDGS()
     output = ""
 
+    urls = []
     # Add the search results to the chatbot response
     try:
         search_results = search.text(query, max_results=n_results)
         if search_results:
             for i, search_result in enumerate(search_results):
                 output += f"{i+1}. {search_result['title']}\n{search_result['body']}\n{search_result['href']}\n\n"
+                urls.append(search_result['href'])
     except:
         # TODO: handle retries in case of duckduckgo_search.exceptions.RatelimitException
         pass
+
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + "Web Search Results:")
+        print(output)
+
+    # Reverse the order of the URLs, so the most relevant URL is at the end, as LLMs tend to focus on the last input
+    urls.reverse()
+
+    webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode)
+    webCrawler.crawl(task=f"Answer the question: '{query}', using information provided.")
+    articles = webCrawler.get_articles()
+
+    if verbose_mode:
+        print(Fore.WHITE + Style.DIM + "Web Crawler Results:")
+    for article in articles:
+        if verbose_mode:
+            print(f"URL: {article['url']}")
+            print("Text:")
+            print(article['text'])
+        if 'llm_result' in article:
+            if verbose_mode:
+                print("LLM Result:")
+                print(article['llm_result'])
+            output += article['llm_result'] + "\n"
+            output += "Source: " + article['url'] + "\n\n"
 
     return output
 
@@ -795,9 +942,10 @@ def extract_json(garbage_str):
             json_str = match.group(1)
     
     if json_str:
+        json_str = json_str.strip()
         # Attempt to load the JSON to verify it's correct
         if verbose_mode:
-            print(Fore.WHITE + Style.DIM + f"Extracted JSON: {json_str}")
+            print(Fore.WHITE + Style.DIM + f"Extracted JSON: '{json_str}'")
         result = try_parse_json(json_str)
         if result is not None:
             return result
@@ -979,6 +1127,7 @@ def run():
     global plugins
     global plugins_folder
     global selected_tools
+    global current_model
 
     prompt_template = None
 
@@ -1088,6 +1237,8 @@ def run():
     else:
         initial_message = None
         conversation = []
+
+    current_model = selected_model
     
     while True:
         try:
@@ -1211,6 +1362,7 @@ def run():
 
         if "/model" in user_input:
             selected_model = prompt_for_ollama_model(default_model)
+            current_model = selected_model
             continue
 
         if "/tools" in user_input:
