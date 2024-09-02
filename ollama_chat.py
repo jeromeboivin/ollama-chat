@@ -54,6 +54,49 @@ chroma_client_host = "localhost"
 chroma_client_port = 8000
 
 custom_tools = []
+
+def on_user_input(input_prompt=None):
+    for plugin in plugins:
+        if hasattr(plugin, "on_user_input") and callable(getattr(plugin, "on_user_input")):
+            plugin_response = getattr(plugin, "on_user_input")(input_prompt)
+            if plugin_response:
+                return plugin_response
+
+    if input_prompt:
+        return input(input_prompt)
+    else:
+        return input()
+
+def on_print(message):
+    function_handled = False
+    for plugin in plugins:
+        if hasattr(plugin, "on_print") and callable(getattr(plugin, "on_print")):
+            plugin_response = getattr(plugin, "on_print")(message)
+            function_handled = function_handled or plugin_response
+
+    if not function_handled:
+        print(message)
+
+def on_stdout_write(message):
+    function_handled = False
+    for plugin in plugins:
+        if hasattr(plugin, "on_stdout_write") and callable(getattr(plugin, "on_stdout_write")):
+            plugin_response = getattr(plugin, "on_stdout_write")(message)
+            function_handled = function_handled or plugin_response
+
+    if not function_handled:
+        sys.stdout.write(message)
+
+def on_stdout_flush():
+    function_handled = False
+    for plugin in plugins:
+        if hasattr(plugin, "on_stdout_flush") and callable(getattr(plugin, "on_stdout_flush")):
+            plugin_response = getattr(plugin, "on_stdout_flush")()
+            function_handled = function_handled or plugin_response
+
+    if not function_handled:
+        sys.stdout.flush()
+
 def get_available_tools():
     default_tools = [{
         'type': 'function',
@@ -99,7 +142,7 @@ def get_available_tools():
     return available_tools
 
 class SimpleWebCrawler:
-    def __init__(self, urls, llm_enabled=False, system_prompt='', selected_model='', temperature=0.1, verbose=False):
+    def __init__(self, urls, llm_enabled=False, system_prompt='', selected_model='', temperature=0.1, verbose=False, plugins=[]):
         self.urls = urls
         self.articles = []
         self.llm_enabled = llm_enabled
@@ -107,6 +150,7 @@ class SimpleWebCrawler:
         self.selected_model = selected_model
         self.temperature = temperature
         self.verbose = verbose
+        self.plugins = plugins
 
     def fetch_page(self, url):
         try:
@@ -115,7 +159,7 @@ class SimpleWebCrawler:
             return response.content  # Return raw bytes instead of text for PDF support
         except requests.exceptions.RequestException as e:
             if self.verbose:
-                print(Fore.RED + f"Error fetching URL {url}: {e}")
+                on_print(Fore.RED + f"Error fetching URL {url}: {e}")
             return None
 
     def md(self, soup, **options):
@@ -163,36 +207,47 @@ class SimpleWebCrawler:
                           prompt_template=None, 
                           tools=[], 
                           no_bot_prompt=True, 
-                          stream_active=False)
+                          stream_active=self.verbose)
 
     def decode_content(self, content):
         # Detect encoding
         detected_encoding = chardet.detect(content)['encoding']
         if self.verbose:
-            print(Fore.WHITE + Style.DIM + f"Detected encoding: {detected_encoding}")
+            on_print(Fore.WHITE + Style.DIM + f"Detected encoding: {detected_encoding}")
         
         # Decode content
         try:
             return content.decode(detected_encoding)
         except (UnicodeDecodeError, TypeError):
             if self.verbose:
-                print(Fore.RED + f"Error decoding content with {detected_encoding}, using ISO-8859-1 as fallback.")
+                on_print(Fore.RED + f"Error decoding content with {detected_encoding}, using ISO-8859-1 as fallback.")
             return content.decode('ISO-8859-1')
 
     def crawl(self, task=None):
         for url in self.urls:
+            continue_response_generation = True
+            for plugin in self.plugins:
+                if hasattr(plugin, "stop_generation") and callable(getattr(plugin, "stop_generation")):
+                    plugin_response = getattr(plugin, "stop_generation")()
+                    if plugin_response:
+                        continue_response_generation = False
+                        break
+
+            if not continue_response_generation:
+                break
+
             if self.verbose:
-                print(Fore.WHITE + Style.DIM + f"Fetching URL: {url}")
+                on_print(Fore.WHITE + Style.DIM + f"Fetching URL: {url}")
             content = self.fetch_page(url)
             if content:
                 # Check if the URL points to a PDF
                 if url.lower().endswith('.pdf'):
                     if self.verbose:
-                        print(Fore.WHITE + Style.DIM + f"Extracting text from PDF: {url}")
+                        on_print(Fore.WHITE + Style.DIM + f"Extracting text from PDF: {url}")
                     extracted_text = self.extract_text_from_pdf(content)
                 else:
                     if self.verbose:
-                        print(Fore.WHITE + Style.DIM + f"Extracting text from HTML: {url}")
+                        on_print(Fore.WHITE + Style.DIM + f"Extracting text from HTML: {url}")
                     decoded_content = self.decode_content(content)
                     extracted_text = self.extract_text_from_html(decoded_content)
 
@@ -200,7 +255,7 @@ class SimpleWebCrawler:
                 
                 if self.llm_enabled and task:
                     if self.verbose:
-                        print(Fore.WHITE + Style.DIM + f"Using LLM to process the content. Task: {task}")
+                        on_print(Fore.WHITE + Style.DIM + f"Using LLM to process the content. Task: {task}")
                     llm_result = self.ask_llm(content=extracted_text, user_input=task)
                     article['llm_result'] = llm_result
 
@@ -211,20 +266,20 @@ class SimpleWebCrawler:
 
 def select_tools(available_tools, selected_tools):
     def display_tool_options():
-        print(Style.RESET_ALL + "Available tools:")
+        on_print(Style.RESET_ALL + "Available tools:")
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
             status = "[X]" if tool in selected_tools else "[ ]"
-            print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
+            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
 
     while True:
         display_tool_options()
-        print("\nSelect or deselect tools by entering the corresponding number (e.g., 1).")
-        print("Press Enter when done.\n")
+        on_print("\nSelect or deselect tools by entering the corresponding number (e.g., 1).")
+        on_print("Press Enter or type 'done' when done.\n")
 
-        user_input = input("Your choice: ").strip()
+        user_input = on_user_input("Your choice: ").strip()
 
-        if len(user_input) == 0:
+        if len(user_input) == 0 or user_input == 'done':
             break
 
         try:
@@ -233,14 +288,14 @@ def select_tools(available_tools, selected_tools):
                 selected_tool = available_tools[index]
                 if selected_tool in selected_tools:
                     selected_tools.remove(selected_tool)
-                    print(f"Tool '{selected_tool['function']['name']}' deselected.\n")
+                    on_print(f"Tool '{selected_tool['function']['name']}' deselected.\n")
                 else:
                     selected_tools.append(selected_tool)
-                    print(f"Tool '{selected_tool['function']['name']}' selected.\n")
+                    on_print(f"Tool '{selected_tool['function']['name']}' selected.\n")
             else:
-                print("Invalid selection. Please choose a valid tool number.\n")
+                on_print("Invalid selection. Please choose a valid tool number.\n")
         except ValueError:
-            print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
+            on_print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
 
     return selected_tools
 
@@ -255,7 +310,7 @@ def discover_plugins(plugin_folder=None):
     
     if not os.path.isdir(plugin_folder):
         if verbose_mode:
-            print(Fore.RED + "Plugin folder does not exist: " + plugin_folder + Style.RESET_ALL)
+            on_print(Fore.RED + "Plugin folder does not exist: " + plugin_folder + Style.RESET_ALL)
         return []
     
     plugins = []
@@ -269,15 +324,15 @@ def discover_plugins(plugin_folder=None):
             
             for name, obj in inspect.getmembers(module):
                 if inspect.isclass(obj):
-                    # Check if the class has a 'on_user_input' method
-                    if hasattr(obj, 'on_user_input') and callable(getattr(obj, 'on_user_input')):
+                    # Check if the class has a 'on_user_input_done' method
+                    if hasattr(obj, 'on_user_input_done') and callable(getattr(obj, 'on_user_input_done')):
                         plugins.append(obj())
                         if verbose_mode:
-                            print(Fore.WHITE + Style.DIM + f"Discovered plugin: {name}")
+                            on_print(Fore.WHITE + Style.DIM + f"Discovered plugin: {name}")
                     if hasattr(obj, 'get_tool_definition') and callable(getattr(obj, 'get_tool_definition')):
                         custom_tools.append(obj().get_tool_definition())
                         if verbose_mode:
-                            print(Fore.WHITE + Style.DIM + f"Discovered tool: {name}")
+                            on_print(Fore.WHITE + Style.DIM + f"Discovered tool: {name}")
     return plugins
 
 class DocumentIndexer:
@@ -314,8 +369,8 @@ class DocumentIndexer:
 
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks:
-            print("Large documents will be chunked into smaller pieces for indexing.")
-            allow_chunks = input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
+            on_print("Large documents will be chunked into smaller pieces for indexing.")
+            allow_chunks = on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
 
         if allow_chunks:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -332,7 +387,7 @@ class DocumentIndexer:
                 content = self.read_file(file_path)
 
                 if not content:
-                    print(Fore.RED + f"An error occurred while reading file: {file_path}")
+                    on_print(Fore.RED + f"An error occurred while reading file: {file_path}")
                     continue
 
                 document_id = os.path.splitext(os.path.basename(file_path))[0]
@@ -369,7 +424,7 @@ class DocumentIndexer:
                                 metadatas=[{'filename': file_path}],
                                 ids=[chunk_id]
                             )
-                        print(Fore.WHITE + Style.DIM + f"Added chunk {chunk_id} to the collection")
+                        on_print(Fore.WHITE + Style.DIM + f"Added chunk {chunk_id} to the collection")
                 else:
                     # Embed the content
                     embedding = None
@@ -396,13 +451,17 @@ class DocumentIndexer:
                             metadatas=[{'filename': file_path}],
                             ids=[document_id]
                         )
-                    print(Fore.WHITE + Style.DIM + f"Added document {document_id} to the collection")
+                    on_print(Fore.WHITE + Style.DIM + f"Added document {document_id} to the collection")
             except KeyboardInterrupt:
                 break
 
-def web_search(query, n_results=10):
+def web_search(query=None, n_results=5):
     global current_model
     global verbose_mode
+    global plugins
+
+    if not query:
+        return ""
 
     search = DDGS()
     output = ""
@@ -420,27 +479,27 @@ def web_search(query, n_results=10):
         pass
 
     if verbose_mode:
-        print(Fore.WHITE + Style.DIM + "Web Search Results:")
-        print(output)
+        on_print(Fore.WHITE + Style.DIM + "Web Search Results:")
+        on_print(output)
 
     # Reverse the order of the URLs, so the most relevant URL is at the end, as LLMs tend to focus on the last input
     urls.reverse()
 
-    webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode)
-    webCrawler.crawl(task=f"Answer the question: '{query}', using information provided.")
+    webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins)
+    webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
     articles = webCrawler.get_articles()
 
     if verbose_mode:
-        print(Fore.WHITE + Style.DIM + "Web Crawler Results:")
+        on_print(Fore.WHITE + Style.DIM + "Web Crawler Results:")
     for article in articles:
         if verbose_mode:
-            print(f"URL: {article['url']}")
-            print("Text:")
-            print(article['text'])
+            on_print(f"URL: {article['url']}")
+            on_print("Text:")
+            on_print(article['text'])
         if 'llm_result' in article:
             if verbose_mode:
-                print("LLM Result:")
-                print(article['llm_result'])
+                on_print("LLM Result:")
+                on_print(article['llm_result'])
             output += article['llm_result'] + "\n"
             output += "Source: " + article['url'] + "\n\n"
 
@@ -450,8 +509,8 @@ def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
     spinner =  ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    sys.stdout.write(Style.RESET_ALL + '\rBot: ' + spinner[print_char_index % len(spinner)])
-    sys.stdout.flush()
+    on_stdout_write(Style.RESET_ALL + '\rBot: ' + spinner[print_char_index % len(spinner)])
+    on_stdout_flush()
 
 def colorize(input_text, language='md'):
     try:
@@ -505,7 +564,7 @@ def load_additional_chatbots(json_file):
         # Check if the file exists in the same directory as the script
         json_file = os.path.join(os.path.dirname(__file__), json_file)
         if not os.path.exists(json_file):
-            print(Fore.RED + f"Additional chatbots file not found: {json_file}")
+            on_print(Fore.RED + f"Additional chatbots file not found: {json_file}")
             return
 
     with open(json_file, 'r', encoding="utf8") as f:
@@ -526,11 +585,11 @@ def split_numbered_list(input_text):
 def prompt_for_chatbot():
     global chatbots
 
-    print(Style.RESET_ALL + "Available chatbots:")
+    on_print(Style.RESET_ALL + "Available chatbots:")
     for i, chatbot in enumerate(chatbots):
-        print(f"{i}. {chatbot['name']} - {chatbot['description']}")
+        on_print(f"{i}. {chatbot['name']} - {chatbot['description']}")
     
-    choice = int(input("Enter the number of your preferred chatbot [0]: ") or 0)
+    choice = int(on_user_input("Enter the number of your preferred chatbot [0]: ") or 0)
 
     return chatbots[choice]
 
@@ -544,26 +603,26 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
     if chroma_client:
         collections = chroma_client.list_collections()
     else:
-        print(Fore.RED + "ChromaDB is not running.")
+        on_print(Fore.RED + "ChromaDB is not running.")
 
     if not collections:
-        print(Fore.RED + "No collections found")
-        return input("Enter a new collection to create: ")
+        on_print(Fore.RED + "No collections found")
+        return on_user_input("Enter a new collection to create: ")
 
     # Ask user to choose a collection
-    print(Style.RESET_ALL + "Available collections:")
+    on_print(Style.RESET_ALL + "Available collections:")
     for i, collection in enumerate(collections):
         collection_name = collection.name
-        print(f"{i}. {collection_name}")
+        on_print(f"{i}. {collection_name}")
 
     if prompt_create_new:
         # Propose to create a new collection
-        print(f"{len(collections)}. Create a new collection")
+        on_print(f"{len(collections)}. Create a new collection")
     
-    choice = int(input("Enter the number of your preferred collection [0]: ") or 0)
+    choice = int(on_user_input("Enter the number of your preferred collection [0]: ") or 0)
 
     if prompt_create_new and choice == len(collections):
-        return input("Enter a new collection to create: ")
+        return on_user_input("Enter a new collection to create: ")
 
     return collections[choice].name
 
@@ -581,7 +640,7 @@ def set_current_collection(collection_name):
     # Get the target collection
     try:
         collection = chroma_client.get_or_create_collection(name=collection_name)
-        print(Fore.WHITE + Style.DIM + f"Collection {collection_name} loaded.")
+        on_print(Fore.WHITE + Style.DIM + f"Collection {collection_name} loaded.")
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
@@ -596,9 +655,9 @@ def delete_collection(collection_name):
 
     try:
         chroma_client.delete_collection(name=collection_name)
-        print(Fore.WHITE + Style.DIM + f"Collection {collection_name} deleted.")
+        on_print(Fore.WHITE + Style.DIM + f"Collection {collection_name} deleted.")
     except:
-        print(Fore.RED + f"Collection {collection_name} not found")
+        on_print(Fore.RED + f"Collection {collection_name} not found")
 
 def query_vector_database(question, n_results=10, collection_name=current_collection_name, answer_distance_threshold=0):
     global collection
@@ -606,7 +665,7 @@ def query_vector_database(question, n_results=10, collection_name=current_collec
     global embeddings_model
 
     if not collection:
-        print(Fore.RED + "No ChromaDB collection loaded.")
+        on_print(Fore.RED + "No ChromaDB collection loaded.")
         collection_name = prompt_for_vector_database_collection()
         if not collection_name:
             return ""
@@ -647,7 +706,7 @@ def query_vector_database(question, n_results=10, collection_name=current_collec
     for metadata, answer_distance, document in zip(metadatas, distances, documents):
         if answer_distance_threshold > 0 and answer_distance > answer_distance_threshold:
             if verbose_mode:
-                print(Fore.WHITE + Style.DIM + "Skipping answer with distance: " + str(answer_distance))
+                on_print(Fore.WHITE + Style.DIM + "Skipping answer with distance: " + str(answer_distance))
             continue
         answer_index += 1
         
@@ -677,7 +736,7 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
     global verbose_mode
 
     if prompt_template and verbose_mode:
-        print(Fore.WHITE + Style.DIM + "Using OpenAI API with prompt template: " + prompt_template)
+        on_print(Fore.WHITE + Style.DIM + "Using OpenAI API with prompt template: " + prompt_template)
 
     if prompt_template == "ChatML":
         # Modify conversation to match prompt template: ChatML
@@ -747,10 +806,10 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
 
     if not syntax_highlighting:
         if interactive_mode and not no_bot_prompt:
-            sys.stdout.write(Style.RESET_ALL + "Bot: ")
+            on_stdout_write(Style.RESET_ALL + "Bot: ")
         else:
-            sys.stdout.write(Style.RESET_ALL)
-        sys.stdout.flush()
+            on_stdout_write(Style.RESET_ALL)
+        on_stdout_flush()
 
     # If tools are selected, deactivate the stream to get the full response
     if len(tools) > 0:
@@ -779,7 +838,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
             else:
                 return ""
         else:
-            print(Fore.RED + f"An error occurred during the conversation: {e}")
+            on_print(Fore.RED + f"An error occurred during the conversation: {e}")
             return ""
 
     if not bot_response_is_tool_calls:
@@ -787,6 +846,18 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
             if stream_active:
                 chunk_count = 0
                 for chunk in stream:
+                    continue_response_generation = True
+                    for plugin in plugins:
+                        if hasattr(plugin, "stop_generation") and callable(getattr(plugin, "stop_generation")):
+                            plugin_response = getattr(plugin, "stop_generation")()
+                            if plugin_response:
+                                continue_response_generation = False
+                                break
+
+                    if not continue_response_generation:
+                        stream.close()
+                        break
+
                     chunk_count += 1
 
                     delta = chunk['message'].get('content', '')
@@ -802,8 +873,8 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                     if syntax_highlighting and interactive_mode:
                         print_spinning_wheel(chunk_count)
                     else:
-                        sys.stdout.write(delta)
-                        sys.stdout.flush()
+                        on_stdout_write(delta)
+                        on_stdout_flush()
             else:
                 tool_calls = stream['message'].get('tool_calls', [])
 
@@ -811,7 +882,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                     conversation.append(stream['message'])
 
                     if verbose_mode:
-                        print(Fore.WHITE + Style.DIM + "Tool calls: ", tool_calls)
+                        on_print(Fore.WHITE + Style.DIM + "Tool calls: ", tool_calls)
                     bot_response = tool_calls
                     bot_response_is_tool_calls = True
                 else:
@@ -819,11 +890,14 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         except KeyboardInterrupt:
             stream.close()
         except ollama.ResponseError as e:
-            print(Fore.RED + f"An error occurred during the conversation: {e}")
+            on_print(Fore.RED + f"An error occurred during the conversation: {e}")
             return ""
 
     if bot_response and bot_response_is_tool_calls:
         for tool_call in bot_response:
+            if not 'function' in tool_call or not 'name' in tool_call['function']:
+                continue
+
             tool_name = tool_call['function']['name']
             for tool in tools:
                 if 'type' in tool and tool['type'] == 'function' and 'function' in tool and 'name' in tool['function'] and tool['function']['name'] == tool_name:
@@ -831,7 +905,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                     parameters = tool_call['function'].get('arguments', {})
 
                     if verbose_mode:
-                        print(Fore.WHITE + Style.DIM + f"Calling tool: {tool_name} with parameters: {parameters}")
+                        on_print(Fore.WHITE + Style.DIM + f"Calling tool: {tool_name} with parameters: {parameters}")
 
                     if tool_name in globals():
                         tool_response = globals()[tool_name](**parameters)
@@ -843,7 +917,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
 
                     if tool_response:
                         if verbose_mode:
-                            print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
+                            on_print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
 
                         # If the tool response is a string, append it to the conversation
                         tool_role = "tool"
@@ -945,16 +1019,16 @@ def extract_json(garbage_str):
         json_str = json_str.strip()
         # Attempt to load the JSON to verify it's correct
         if verbose_mode:
-            print(Fore.WHITE + Style.DIM + f"Extracted JSON: '{json_str}'")
+            on_print(Fore.WHITE + Style.DIM + f"Extracted JSON: '{json_str}'")
         result = try_parse_json(json_str)
         if result is not None:
             return result
         else:
             if verbose_mode:
-                print(Fore.RED + "Extracted string is not a valid JSON.")
+                on_print(Fore.RED + "Extracted string is not a valid JSON.")
     else:
         if verbose_mode:
-            print(Fore.RED + "Extracted string is not a valid JSON.")
+            on_print(Fore.RED + "Extracted string is not a valid JSON.")
     
     return []
 
@@ -981,7 +1055,7 @@ If no tool is relevant to answer, simply return an empty array: [].
     tool_response = ask_ollama(system_prompt, user_input, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False)
 
     if verbose_mode:
-        print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
+        on_print(Fore.WHITE + Style.DIM + f"Tool response: {tool_response}")
     
     # The response should be in JSON format already if the function is correct.
     return extract_json(tool_response)
@@ -1000,7 +1074,7 @@ def select_ollama_model_if_available(model_name):
     try:
         models = ollama.list()["models"]
     except:
-        print(Fore.RED + "Ollama API is not running.")
+        on_print(Fore.RED + "Ollama API is not running.")
         return None
 
     for model in models:
@@ -1009,13 +1083,13 @@ def select_ollama_model_if_available(model_name):
     
             if "gemma" in selected_model:
                 no_system_role=True
-                print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
+                on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
             if verbose_mode:
-                print(Fore.WHITE + Style.DIM + f"Selected model: {model_name}")
+                on_print(Fore.WHITE + Style.DIM + f"Selected model: {model_name}")
             return model_name
         
-    print(Fore.RED + f"Model {model_name} not found.")
+    on_print(Fore.RED + f"Model {model_name} not found.")
     return None
 
 def prompt_for_ollama_model(default_model):
@@ -1026,14 +1100,14 @@ def prompt_for_ollama_model(default_model):
     try:
         models = ollama.list()["models"]
     except:
-        print(Fore.RED + "Ollama API is not running.")
+        on_print(Fore.RED + "Ollama API is not running.")
         return None
 
     # Ask user to choose a model
-    print(Style.RESET_ALL + "Available models:")
+    on_print(Style.RESET_ALL + "Available models:")
     for i, model in enumerate(models):
         star = " *" if model['name'] == default_model else ""
-        print(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}")
+        on_print(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}")
     
     # if stable-code:instruct is available, suggest it as the default model
     default_choice_index = None
@@ -1045,17 +1119,17 @@ def prompt_for_ollama_model(default_model):
     if default_choice_index is None:
         default_choice_index = 0
 
-    choice = int(input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
+    choice = int(on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
 
     # Use the chosen model
     selected_model = models[choice]['name']
 
     if "gemma" in selected_model:
         no_system_role=True
-        print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
+        on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
     if verbose_mode:
-        print(Fore.WHITE + Style.DIM + f"Selected model: {selected_model}")
+        on_print(Fore.WHITE + Style.DIM + f"Selected model: {selected_model}")
     return selected_model
 
 def get_personal_info():
@@ -1091,7 +1165,7 @@ def save_conversation_to_file(conversation, file_path):
             
             f.write(f"{role}: {message['content']}\n\n")
 
-    print(Fore.WHITE + Style.DIM + f"Conversation saved to {file_path}")
+    on_print(Fore.WHITE + Style.DIM + f"Conversation saved to {file_path}")
 
 def load_chroma_client():
     global chroma_client
@@ -1107,7 +1181,7 @@ def load_chroma_client():
         chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
     except:
         if verbose_mode:
-            print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
+            on_print(Fore.RED + Style.DIM + "ChromaDB client could not be initialized. Please check the host and port.")
         chroma_client = None
 
 def run():
@@ -1175,7 +1249,7 @@ def run():
     plugins = discover_plugins(plugins_folder)
 
     if verbose_mode:
-        print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
+        on_print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
 
     # Load additional chatbots from a JSON file
     load_additional_chatbots(additional_chatbots_file)
@@ -1209,10 +1283,14 @@ def run():
             base_url="http://127.0.0.1:8080",
             api_key="none"
         )
-        selected_model = "gpt-3.5-turbo"
+
+        if preferred_model:
+            selected_model = preferred_model
+        else:
+            selected_model = "gpt-3.5-turbo"
 
         if no_system_role:
-            print(Fore.WHITE + Style.DIM + "The selected model does not support the 'system' role.")
+            on_print(Fore.WHITE + Style.DIM + "The selected model does not support the 'system' role.")
             system_prompt = ""
         else:
             system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
@@ -1225,7 +1303,7 @@ def run():
     # Initial system message
     if initial_system_prompt:
         if verbose_mode:
-            print(Fore.WHITE + Style.DIM + "Initial system prompt: " + initial_system_prompt)
+            on_print(Fore.WHITE + Style.DIM + "Initial system prompt: " + initial_system_prompt)
         system_prompt = initial_system_prompt
 
     if not no_system_role and len(user_name) > 0:
@@ -1243,15 +1321,15 @@ def run():
     while True:
         try:
             if interactive_mode:
-                sys.stdout.write(Fore.YELLOW + Style.NORMAL + "\nYou: ")
+                on_stdout_write(Fore.YELLOW + Style.NORMAL + "\nYou: ")
             
-            user_input = input()
+            user_input = on_user_input()
             if user_input.strip().startswith('"""'):
                 multi_line_input = [user_input[3:]]  # Keep the content after the first """
-                sys.stdout.write("... ")  # Prompt continuation line
+                on_stdout_write("... ")  # Prompt continuation line
                 
                 while True:
-                    line = input()
+                    line = on_user_input()
                     if line.strip().endswith('"""') and len(line.strip()) > 3:
                         # Handle if the line contains content before """
                         multi_line_input.append(line[:-3])
@@ -1260,7 +1338,7 @@ def run():
                         break
                     else:
                         multi_line_input.append(line)
-                        sys.stdout.write("... ")  # Prompt continuation line
+                        on_stdout_write("... ")  # Prompt continuation line
                 
                 user_input = "\n".join(multi_line_input)
             
@@ -1268,7 +1346,7 @@ def run():
             break
         except KeyboardInterrupt:
             auto_save = False
-            print(Style.RESET_ALL + "\nGoodbye!")
+            on_print(Style.RESET_ALL + "\nGoodbye!")
             break
 
         if len(user_input.strip()) == 0:
@@ -1276,11 +1354,11 @@ def run():
         
         # Exit condition
         if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye']:
-            print(Style.RESET_ALL + "Goodbye!")
+            on_print(Style.RESET_ALL + "Goodbye!")
             break
 
         if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
-            print(Style.RESET_ALL + "Conversation reset.")
+            on_print(Style.RESET_ALL + "Conversation reset.")
             if initial_message:
                 conversation = [initial_message]
             else:
@@ -1301,7 +1379,7 @@ def run():
                         user_input = user_input.replace("/file", "")
                         user_input += "\n" + file.read()
                 except FileNotFoundError:
-                    print(Fore.RED + "File not found. Please try again.")
+                    on_print(Fore.RED + "File not found. Please try again.")
                     continue
             else:
                 user_input = user_input.split("/file")[0].strip()
@@ -1309,13 +1387,13 @@ def run():
 
         if "/index" in user_input:
             if not chroma_client:
-                print(Fore.RED + "ChromaDB client not initialized.")
+                on_print(Fore.RED + "ChromaDB client not initialized.")
                 continue
 
             load_chroma_client()
 
             if not current_collection_name:
-                print(Fore.RED + "No ChromaDB collection loaded.")
+                on_print(Fore.RED + "No ChromaDB collection loaded.")
                 set_current_collection(prompt_for_vector_database_collection())
 
             document_indexer = DocumentIndexer(user_input.split("/index")[1].strip(), current_collection_name, chroma_client, embeddings_model)
@@ -1324,7 +1402,7 @@ def run():
 
         if "/verbose" in user_input:
             verbose_mode = not verbose_mode
-            print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
+            on_print(Fore.WHITE + Style.DIM + f"Verbose mode: {verbose_mode}")
             continue
 
         if "/search" in user_input:
@@ -1346,7 +1424,7 @@ def run():
                 user_input += "\nQuestion: " + initial_user_input
 
                 if verbose_mode:
-                    print(Fore.WHITE + Style.DIM + user_input)
+                    on_print(Fore.WHITE + Style.DIM + user_input)
         elif "/web" in user_input:
             user_input = user_input.replace("/web", "").strip()
             web_search_response = web_search(user_input)
@@ -1358,7 +1436,7 @@ def run():
                 user_input += "Cite some useful links from the search results to support your answer."
 
                 if verbose_mode:
-                    print(Fore.WHITE + Style.DIM + user_input)
+                    on_print(Fore.WHITE + Style.DIM + user_input)
 
         if "/model" in user_input:
             selected_model = prompt_for_ollama_model(default_model)
@@ -1421,7 +1499,7 @@ def run():
                 conversation = [initial_message]
             else:
                 conversation = []
-            print(Style.RESET_ALL + "Conversation reset.")
+            on_print(Style.RESET_ALL + "Conversation reset.")
             continue
 
         
@@ -1434,10 +1512,10 @@ def run():
             else:
                 clipboard_content = pyperclip.paste()
             user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
-            print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
+            on_print(Fore.WHITE + Style.DIM + "Clipboard content added to user input.")
 
         for plugin in plugins:
-            user_input_from_plugin = plugin.on_user_input(user_input, verbose_mode=verbose_mode)
+            user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
             if user_input_from_plugin:
                 user_input = user_input_from_plugin
 
@@ -1450,11 +1528,17 @@ def run():
         # Generate response
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools)
         
-        if syntax_highlighting:
+        bot_response_handled_by_plugin = False
+        for plugin in plugins:
+            if hasattr(plugin, "on_llm_response") and callable(getattr(plugin, "on_llm_response")):
+                plugin_response = getattr(plugin, "on_llm_response")(bot_response)
+                bot_response_handled_by_plugin = bot_response_handled_by_plugin or plugin_response
+
+        if not bot_response_handled_by_plugin and syntax_highlighting:
             if (interactive_mode):
-                print(Style.RESET_ALL + '\rBot: ' + colorize(bot_response))
+                on_print(Style.RESET_ALL + '\rBot: ' + colorize(bot_response))
             else:
-                print(Style.RESET_ALL + colorize(bot_response))
+                on_print(Style.RESET_ALL + colorize(bot_response))
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})

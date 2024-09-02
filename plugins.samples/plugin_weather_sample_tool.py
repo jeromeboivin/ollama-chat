@@ -21,7 +21,7 @@ class WeatherPluginSample():
             },
         }
 
-    def on_user_input(self, user_input, verbose_mode=False):
+    def on_user_input_done(self, user_input, verbose_mode=False):
         return None
 
     def get_current_weather(self, city):

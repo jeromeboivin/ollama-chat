@@ -6,7 +6,7 @@ class RssFeedLoader:
     def __init__(self, rss_file='rss_feed.txt'):
         self.rss_file = rss_file
 
-    def on_user_input(self, user_input, verbose_mode=False):
+    def on_user_input_done(self, user_input, verbose_mode=False):
         return None
     
     def get_news(self, category):
