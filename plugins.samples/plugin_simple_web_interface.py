@@ -32,6 +32,10 @@ class PluginSimpleWebInterface:
         self.response_ready.wait()
         self.response_ready.clear()
         return self.user_input
+    
+    def on_prompt(self, message):
+        # Ignore prompts for now
+        return True
 
     def stop_generation(self):
         return self.stop_flag

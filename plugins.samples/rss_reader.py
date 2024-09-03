@@ -9,7 +9,7 @@ class RssFeedLoader:
     def on_user_input_done(self, user_input, verbose_mode=False):
         return None
     
-    def get_news(self, category):
+    def get_news(self, category=None):
         # category is not used in this example
         return self.get_content()
     
