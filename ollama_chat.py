@@ -94,6 +94,19 @@ def on_stdout_write(message, style="", prompt=""):
         else:
             sys.stdout.write(message)
 
+def on_llm_token_response(token, style="", prompt=""):
+    function_handled = False
+    for plugin in plugins:
+        if hasattr(plugin, "on_llm_token_response") and callable(getattr(plugin, "on_llm_token_response")):
+            plugin_response = getattr(plugin, "on_llm_token_response")(token)
+            function_handled = function_handled or plugin_response
+
+    if not function_handled:
+        if style or prompt:
+            sys.stdout.write(f"{style}{prompt}{token}")
+        else:
+            sys.stdout.write(token)
+
 def on_prompt(prompt, style=""):
     function_handled = False
     for plugin in plugins:
@@ -286,16 +299,16 @@ class SimpleWebCrawler:
 
 def select_tools(available_tools, selected_tools):
     def display_tool_options():
-        on_print("Available tools:", Style.RESET_ALL)
+        on_print("Available tools:\n", Style.RESET_ALL)
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
             status = "[X]" if tool in selected_tools else "[ ]"
-            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
+            on_stdout_write(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}\n")
+        on_stdout_flush()
 
     while True:
         display_tool_options()
-        on_print("\nSelect or deselect tools by entering the corresponding number (e.g., 1).")
-        on_print("Press Enter or type 'done' when done.\n")
+        on_print("Select or deselect tools by entering the corresponding number (e.g., 1).\nPress Enter or type 'done' when done.")
 
         user_input = on_user_input("Your choice: ").strip()
 
@@ -344,14 +357,15 @@ def discover_plugins(plugin_folder=None):
             
             for name, obj in inspect.getmembers(module):
                 if inspect.isclass(obj):
-                    # Check if the class has a 'on_user_input_done' method
-                    if hasattr(obj, 'on_user_input_done') and callable(getattr(obj, 'on_user_input_done')):
-                        plugin = obj()
-                        if hasattr(obj, 'set_web_crawler') and callable(getattr(obj, 'set_web_crawler')):
-                            plugin.set_web_crawler(SimpleWebCrawler)
-                        plugins.append(plugin)
-                        if verbose_mode:
-                            on_print(f"Discovered plugin: {name}", Fore.WHITE + Style.DIM)
+                    if verbose_mode:
+                        on_print(f"Discovered class: {name}", Fore.WHITE + Style.DIM)
+
+                    plugin = obj()
+                    if hasattr(obj, 'set_web_crawler') and callable(getattr(obj, 'set_web_crawler')):
+                        plugin.set_web_crawler(SimpleWebCrawler)
+                    plugins.append(plugin)
+                    if verbose_mode:
+                        on_print(f"Discovered plugin: {name}", Fore.WHITE + Style.DIM)
                     if hasattr(obj, 'get_tool_definition') and callable(getattr(obj, 'get_tool_definition')):
                         custom_tools.append(obj().get_tool_definition())
                         if verbose_mode:
@@ -814,7 +828,7 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
     bot_response = completion.choices[0].message.content
     return bot_response.strip()
 
-def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None):
+def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None):
     global no_system_role
     global syntax_highlighting
     global interactive_mode
@@ -828,7 +842,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         conversation = conversation[1:]
 
     if use_openai:
-        return ask_openai_with_conversation(conversation, selected_model, temperature, prompt_template)
+        return ask_openai_with_conversation(conversation, model, temperature, prompt_template)
 
     if not syntax_highlighting:
         if interactive_mode and not no_bot_prompt:
@@ -853,7 +867,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
 
     try:
         stream = ollama.chat(
-            model=selected_model,
+            model=model,
             messages=conversation,
             stream=stream_active,
             options={"temperature": temperature},
@@ -861,7 +875,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
         )
     except ollama.ResponseError as e:
         if "does not support tools" in str(e):
-            tool_response = generate_tool_response(find_latest_user_message(conversation), tools, selected_model, temperature, prompt_template)
+            tool_response = generate_tool_response(find_latest_user_message(conversation), tools, model, temperature, prompt_template)
             
             if not tool_response is None and len(tool_response) > 0:
                 bot_response = tool_response
@@ -876,6 +890,8 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
     if not bot_response_is_tool_calls:
         try:
             if stream_active:
+                if alternate_model:
+                    on_print(f"Response from model: {model}\n")
                 chunk_count = 0
                 for chunk in stream:
                     continue_response_generation = True
@@ -905,8 +921,10 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                     if syntax_highlighting and interactive_mode:
                         print_spinning_wheel(chunk_count)
                     else:
-                        on_stdout_write(delta)
+                        on_llm_token_response(delta)
                         on_stdout_flush()
+                on_llm_token_response("\n")
+                on_stdout_flush()
             else:
                 tool_calls = stream['message'].get('tool_calls', [])
 
@@ -926,6 +944,7 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
             return ""
 
     if bot_response and bot_response_is_tool_calls:
+        tool_found = False
         for tool_call in bot_response:
             if not 'function' in tool_call or not 'name' in tool_call['function']:
                 continue
@@ -936,22 +955,27 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                     # Call the tool function with the parameters
                     parameters = tool_call['function'].get('arguments', {})
 
-                    if verbose_mode:
-                        on_print(f"Calling tool: {tool_name} with parameters: {parameters}", Fore.WHITE + Style.DIM)
-
                     tool_response = None
+                    
                     if tool_name in globals():
+                        if verbose_mode:
+                            on_print(f"Calling tool function: {tool_name}", Fore.WHITE + Style.DIM)
                         tool_response = globals()[tool_name](**parameters)
+                        tool_found = True
                     else:
+                        if verbose_mode:
+                            on_print(f"Trying to find plugin with function '{tool_name}'...", Fore.WHITE + Style.DIM)
                         for plugin in plugins:
                             if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
+                                tool_found = True
+                                if verbose_mode:
+                                    on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__}", Fore.WHITE + Style.DIM)
                                 tool_response = getattr(plugin, tool_name)(**parameters)
+                                if verbose_mode:
+                                    on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
                                 break
 
                     if tool_response:
-                        if verbose_mode:
-                            on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
-
                         # If the tool response is a string, append it to the conversation
                         tool_role = "tool"
                         if not model_support_tools:
@@ -966,8 +990,11 @@ def ask_ollama_with_conversation(conversation, selected_model, temperature=0.1, 
                             if not model_support_tools:
                                 tool_response_str += "\n" + find_latest_user_message(conversation)
                             conversation.append({"role": tool_role, "content": tool_response_str})
-
-        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools=[], no_bot_prompt=True)
+        if tool_found:
+            bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True)
+        else:
+            on_print(f"Tools not found", Fore.RED)
+            return None
 
     return bot_response.strip()
 
@@ -1137,10 +1164,11 @@ def prompt_for_ollama_model(default_model):
         return None
 
     # Ask user to choose a model
-    on_print("Available models:", Style.RESET_ALL)
+    on_print("Available models:\n", Style.RESET_ALL)
     for i, model in enumerate(models):
         star = " *" if model['name'] == default_model else ""
-        on_print(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}")
+        on_stdout_write(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}\n")
+    on_stdout_flush()
     
     # if stable-code:instruct is available, suggest it as the default model
     default_choice_index = None
@@ -1554,9 +1582,10 @@ def run():
             on_print("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
 
         for plugin in plugins:
-            user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
-            if user_input_from_plugin:
-                user_input = user_input_from_plugin
+            if hasattr(plugin, "on_user_input_done") and callable(getattr(plugin, "on_user_input_done")):
+                user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
+                if user_input_from_plugin:
+                    user_input = user_input_from_plugin
 
         # Add user input to conversation history
         if image_path:
@@ -1586,15 +1615,18 @@ def run():
 
         if alternate_bot_response:
             # Ask user to select the preferred response
-            on_print("\nSelect the preferred response:", Fore.WHITE + Style.DIM)
-            on_print(f"1. Original model ({current_model})", Fore.WHITE + Style.DIM)
-            on_print(f"2. Alternate model ({alternate_model})", Fore.WHITE + Style.DIM)
+            on_print(f"Select the preferred response:\n1. Original model ({current_model})\n2. Alternate model ({alternate_model})", Fore.WHITE + Style.DIM)
             choice = on_user_input("Enter the number of your preferred response [1]: ") or "1"
             bot_response = bot_response if choice == "1" else alternate_bot_response
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
 
+    # Stop plugins, calling on_exit if available
+    for plugin in plugins:
+        if hasattr(plugin, "on_exit") and callable(getattr(plugin, "on_exit")):
+            getattr(plugin, "on_exit")()
+    
     if auto_save:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 

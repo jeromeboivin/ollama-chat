@@ -13,6 +13,9 @@ class PluginSample():
 
     def on_stdout_write(self, message):
         return False
+    
+    def on_llm_token_response(self, message):
+        return False
 
     def on_stdout_flush(self):
         return False

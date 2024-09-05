@@ -1,14 +1,14 @@
 # pip install flask flask-socketio
-from flask import Flask, render_template_string
-from flask_socketio import SocketIO, emit
+import flask
+import flask_socketio
 import threading
 import re
 
 class PluginSimpleWebInterface:
     def __init__(self):
-        self.app = Flask(__name__)
+        self.app = flask.Flask(__name__)
         self.app.config['SECRET_KEY'] = 'secret!'
-        self.socketio = SocketIO(self.app)
+        self.socketio = flask_socketio.SocketIO(self.app)
         self.user_input = None
         self.response_ready = threading.Event()
         self.stop_flag = False  # Flag to indicate stop button press
@@ -45,14 +45,15 @@ class PluginSimpleWebInterface:
             self.socketio.emit('chatbot_response', {'message': self.clean_message(message)})
         return True
 
-    def on_stdout_write(self, message):
+    def on_llm_token_response(self, message):
         if not self.stop_flag:
             self.socketio.emit('chatbot_token_response', {'message': self.clean_message(message)})
         return True
 
     def on_llm_response(self, message):
-        if not self.stop_flag:
-            self.socketio.emit('chatbot_response', {'message': self.clean_message(message)})
+        # Ignore LLM responses for now as it has been streamed to the web interface through on_llm_token_response method
+        #if not self.stop_flag:
+        #    self.socketio.emit('chatbot_response', {'message': self.clean_message(message)})
         return True
 
     def on_stdout_flush(self):
@@ -61,7 +62,7 @@ class PluginSimpleWebInterface:
     def run_web_server(self):
         @self.app.route('/')
         def index():
-            return render_template_string(self.html_template)
+            return flask.render_template_string(self.html_template)
 
         @self.socketio.on('user_input')
         def handle_user_input(data):
@@ -69,7 +70,7 @@ class PluginSimpleWebInterface:
             self.response_ready.set()
             self.stop_flag = False  # Reset stop flag when new input is received
             response = self.on_user_input_done(self.user_input)
-            emit('chatbot_response', {'message': response})
+            flask_socketio.emit('chatbot_response', {'message': response})
 
         @self.socketio.on('stop_generation')
         def handle_stop_generation():
@@ -85,81 +86,115 @@ class PluginSimpleWebInterface:
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Ollama Chatbot Interface</title>
+            <title>Chatbot Interface</title>
             <style>
                 body {
-                    font-family: Arial, sans-serif;
-                    background-color: #f5f5f5;
+                    font-family: 'Helvetica Neue', Arial, sans-serif;
+                    background-color: #f0f2f5;
                     margin: 0;
                     padding: 0;
                     display: flex;
                     justify-content: center;
                     align-items: center;
                     height: 100vh;
+                    color: #333;
+                }
+                .user_input {
                 }
                 .chat-container {
                     width: 100%;
                     max-width: 800px;
                     background-color: #ffffff;
-                    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-                    border-radius: 10px;
-                    overflow: hidden;
+                    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+                    border-radius: 12px;
                     display: flex;
                     flex-direction: column;
                     height: 80%;
-                }
-                .chat-header {
-                    background-color: #007bff;
-                    color: white;
-                    padding: 15px;
-                    font-size: 18px;
-                    text-align: center;
+                    overflow: hidden;
                 }
                 .chat-box {
                     flex: 1;
                     padding: 20px;
                     overflow-y: auto;
-                    background-color: #f9f9f9;
+                    background-color: #f0f2f5;
+                    display: flex;
+                    flex-direction: column;
                 }
-                .chat-box p {
+                .chat-box .chatbot-message {
+                    display: flex;
+                    align-items: flex-start;
                     margin: 10px 0;
-                    padding: 10px;
-                    border-radius: 5px;
-                    background-color: #e1e1e1;
+                }
+                .chat-box .chatbot-message .icon {
+                    margin-right: 10px;
+                    font-size: 24px;
+                    color: #0a82ff;
+                }
+                .chat-box .chatbot-message .message-container {
+                    background-color: #e5e7eb;
+                    color: #333;
+                    padding: 12px 18px;
+                    border-radius: 18px;
+                    max-width: 75%;
+                    line-height: 1.4;
+                    font-size: 16px;
+                    position: relative;
+                }
+                .chat-box .chatbot-message .copy-button {
+                    background-color: #ffffff;
+                    color: #0a82ff;
+                    border: 1px solid #0a82ff;
+                    border-radius: 12px;
+                    padding: 5px 10px;
+                    font-size: 14px;
+                    cursor: pointer;
+                    margin-top: 5px;
+                    transition: background-color 0.3s ease;
+                }
+                .chat-box .chatbot-message .copy-button:hover {
+                    background-color: #0a82ff;
+                    color: #ffffff;
                 }
                 .chat-box p.user {
-                    background-color: #007bff;
+                    background-color: #0a82ff;
                     color: white;
                     align-self: flex-end;
                     text-align: right;
-                }
-                .chat-box p.bot {
-                    background-color: #e1e1e1;
-                    color: black;
-                    align-self: flex-start;
-                    text-align: left;
+                    padding: 12px 18px;
+                    border-radius: 18px;
+                    max-width: 75%;
+                    margin: 10px 0;
+                    line-height: 1.4;
+                    font-size: 16px;
                 }
                 .chat-input {
                     display: flex;
+                    padding: 15px;
+                    background-color: #ffffff;
                     border-top: 1px solid #ddd;
                 }
                 .chat-input input {
                     flex: 1;
-                    padding: 15px;
-                    border: none;
+                    padding: 12px 18px;
+                    border-radius: 25px;
+                    border: 1px solid #ddd;
                     outline: none;
                     font-size: 16px;
+                    margin-right: 10px;
+                    background-color: #f9f9f9;
                 }
                 .chat-input button {
-                    padding: 15px;
-                    background-color: #007bff;
+                    padding: 12px 18px;
+                    border-radius: 25px;
+                    background-color: #0a82ff;
                     color: white;
                     border: none;
                     cursor: pointer;
                     font-size: 16px;
+                    transition: background-color 0.3s ease;
                 }
                 .chat-input button:hover {
-                    background-color: #0056b3;
+                    background-color: #006edc;
                 }
                 .stop-button {
                     background-color: red;
@@ -168,10 +203,12 @@ class PluginSimpleWebInterface:
                     cursor: pointer;
                     font-size: 16px;
                     padding: 0 15px;
-                    margin-left: 5px;
+                    border-radius: 25px;
+                    margin-left: 10px;
                     display: flex;
                     justify-content: center;
                     align-items: center;
+                    transition: background-color 0.3s ease;
                 }
                 .stop-button:hover {
                     background-color: darkred;
@@ -191,30 +228,72 @@ class PluginSimpleWebInterface:
                     socket.on('chatbot_response', function(data) {
                         if (data && data.message) {
                             data.message = data.message.replace(/\\n/g, "<br />");
-                            var botMessage = document.createElement('p');
-                            botMessage.className = 'bot';
+                            var botMessageContainer = document.createElement('div');
+                            botMessageContainer.className = 'chatbot-message';
+
+                            var botIcon = document.createElement('span');
+                            botIcon.className = 'icon';
+                            botIcon.innerHTML = '🦙';
+
+                            var botMessage = document.createElement('div');
+                            botMessage.className = 'message-container';
                             botMessage.innerHTML = data.message;
-                            chatbox.appendChild(botMessage);
+
+                            botMessageContainer.appendChild(botIcon);
+                            botMessageContainer.appendChild(botMessage);
+                            chatbox.appendChild(botMessageContainer);
                             chatbox.scrollTop = chatbox.scrollHeight;
                             currentMessageElement = botMessage;
                         }
                     });
 
-                    // New handler for chatbot_token_response
                     socket.on('chatbot_token_response', function(data) {
                         if (data && data.message) {
                             data.message = data.message.replace(/\\n/g, "<br />");
 
-                            // If there's no currentMessageElement, create one
                             if (!currentMessageElement) {
-                                currentMessageElement = document.createElement('p');
-                                currentMessageElement.className = 'bot';
-                                chatbox.appendChild(currentMessageElement);
+                                var botMessageContainer = document.createElement('div');
+                                botMessageContainer.className = 'chatbot-message';
+
+                                var botIcon = document.createElement('span');
+                                botIcon.className = 'icon';
+                                botIcon.innerHTML = '🦙';
+
+                                currentMessageElement = document.createElement('div');
+                                currentMessageElement.className = 'message-container';
+
+                                botMessageContainer.appendChild(botIcon);
+                                botMessageContainer.appendChild(currentMessageElement);
+                                chatbox.appendChild(botMessageContainer);
                             }
 
-                            // Append the token to the current message element
                             currentMessageElement.innerHTML += data.message;
                             chatbox.scrollTop = chatbox.scrollHeight;
+                            /**
+                            * Code not working as expected
+                            if (data.message.endsWith("</br>") || data.message.endsWith("<br />")) {
+                                // Create the copy button and container div
+                                var copyButtonContainer = document.createElement('div');
+                                copyButtonContainer.className = 'copy-button-container';
+
+                                var copyButton = document.createElement('button');
+                                copyButton.className = 'copy-button';
+                                copyButton.textContent = '📋';
+                                copyButton.onclick = function() {
+                                    // Replace <br \/> or <br> with newline character
+                                    var textToCopy = currentMessageElement.innerHTML.replace(/<br \/>|<br>/g, "\\n");
+                                    // If text to copy ends with a newline, remove it
+                                    if (textToCopy.endsWith("\\n")) {
+                                        textToCopy = textToCopy.slice(0, -1);
+                                    }
+                                    navigator.clipboard.writeText(textToCopy);
+                                    copyButton.textContent = '📋';
+                                    setTimeout(() => copyButton.textContent = '📋', 2000);
+                                };
+
+                                copyButtonContainer.appendChild(copyButton);
+                                chatbox.lastElementChild.appendChild(copyButtonContainer);
+                            }*/
                         }
                     });
 
@@ -229,11 +308,9 @@ class PluginSimpleWebInterface:
                         document.getElementById('user_input').value = '';
                         chatbox.scrollTop = chatbox.scrollHeight;
 
-                        // Reset the currentMessageElement to null when new user input is received
                         currentMessageElement = null;
                     };
 
-                    // Handle Stop button click
                     document.getElementById('stopButton').onclick = function() {
                         socket.emit('stop_generation');
                     };
@@ -242,15 +319,12 @@ class PluginSimpleWebInterface:
         </head>
         <body>
             <div class="chat-container">
-                <div class="chat-header">
-                    Ollama Chatbot Interface
-                </div>
                 <div id="chatbox" class="chat-box">
                     <!-- Chatbot responses will be appended here -->
                 </div>
                 <div class="chat-input">
                     <form id="inputForm">
-                        <input type="text" id="user_input" placeholder="Type your message..." required>
+                        <input type="text" id="user_input" class="user_input" placeholder="Type your message..." required>
                         <button type="submit">Send</button>
                     </form>
                     <button id="stopButton" class="stop-button">■</button>
