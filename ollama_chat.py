@@ -174,6 +174,54 @@ def get_available_tools():
     available_tools = default_tools + custom_tools
     return available_tools
 
+class MarkdownSplitter:
+    def __init__(self, markdown_content):
+        self.markdown_content = markdown_content.splitlines()
+        self.sections = []
+    
+    def is_heading(self, line):
+        """Returns the heading level if the line is a heading, otherwise returns None."""
+        match = re.match(r'^(#{1,4})\s', line)
+        return len(match.group(1)) if match else None
+
+    def split(self):
+        current_section = []
+        current_hierarchy = []
+        current_paragraph = []
+
+        for line in self.markdown_content:
+            line = line.strip()  # Remove leading/trailing whitespace
+            
+            if not line:  # If the line is empty, it signifies a paragraph boundary
+                if current_paragraph:  # If there's content in the current paragraph, add it to the section
+                    current_section.append("\n".join(current_paragraph))
+                    current_paragraph = []  # Reset for the next paragraph
+                continue
+            
+            heading_level = self.is_heading(line)
+            
+            if heading_level:
+                # If we encounter a heading, finalize the current section with its paragraphs
+                if current_section:
+                    self.sections.append("\n".join(current_section))
+                    current_section = []
+                
+                # Adjust the hierarchy based on the heading level
+                # Keep only the parts of the hierarchy up to the current heading level
+                current_hierarchy = current_hierarchy[:heading_level - 1] + [line]
+                current_section = current_hierarchy[:]
+            else:
+                # Regular content: append the line to the current paragraph
+                current_paragraph.append(line)
+
+        # Finalize the last paragraph and section if present
+        if current_paragraph:
+            current_section.append("\n".join(current_paragraph))
+        if current_section:
+            self.sections.append("\n".join(current_section))
+
+        return self.sections
+
 class SimpleWebCrawler:
     def __init__(self, urls, llm_enabled=False, system_prompt='', selected_model='', temperature=0.1, verbose=False, plugins=[]):
         self.urls = urls
