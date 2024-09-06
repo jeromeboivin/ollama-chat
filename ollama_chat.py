@@ -5,6 +5,7 @@
 
 import ollama
 import platform
+import tempfile
 from colorama import Fore, Style
 import chromadb
 
@@ -201,11 +202,10 @@ class MarkdownSplitter:
                         break
                 
                 # If the next non-empty line is a heading or not starting with '#', split paragraph
-                if next_non_empty_line and (self.is_heading(next_non_empty_line) or not next_non_empty_line.startswith('#')):
-                    if current_paragraph:
-                        # Add the paragraph with the current hierarchy
-                        self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
-                        current_paragraph = []  # Reset for the next paragraph
+                if next_non_empty_line and (self.is_heading(next_non_empty_line) or not next_non_empty_line.startswith('#')) and len(current_paragraph) > 0:
+                    # Add the paragraph with the current hierarchy
+                    self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
+                    current_paragraph = []  # Reset for the next paragraph
                 i += 1
                 continue
             
@@ -483,11 +483,9 @@ class DocumentIndexer:
             except:
                 return None
 
-    def index_documents(self):
-        allow_chunks = True
-
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False):
         # Ask the user to confirm if they want to allow chunking of large documents
-        if allow_chunks:
+        if allow_chunks and not no_chunking_confirmation:
             on_print("Large documents will be chunked into smaller pieces for indexing.")
             allow_chunks = on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
 
@@ -580,24 +578,36 @@ class DocumentIndexer:
             except KeyboardInterrupt:
                 break
 
-def web_search(query=None, n_results=5):
+def web_search(query=None, n_results=5, web_cache_collection="web_cache", web_embedding_model="nomic-embed-text"):
     global current_model
     global verbose_mode
     global plugins
 
     if not query:
         return ""
+    
+    # Ask Ollama to write a short passage about the query in order to expand the context
+    # This can be useful for web search queries
+    if verbose_mode:
+        on_print("Expanding query using Ollama...", Fore.WHITE + Style.DIM)
+    expanded_query = ask_ollama("", f"Write a short passage about '{query}' in no more than 1 paragraph.", selected_model=current_model, no_bot_prompt=True, stream_active=False)
+    if verbose_mode:
+        on_print("Expanded query:", Fore.WHITE + Style.DIM)
+        on_print(expanded_query, Fore.WHITE + Style.DIM)
+    
+    # Try to search the vector database first
+    set_current_collection(web_cache_collection)
+    search_results = query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, answer_distance_threshold=5, query_embeddings_model=web_embedding_model)
+    if search_results:
+        return search_results
 
     search = DDGS()
-    output = ""
-
     urls = []
     # Add the search results to the chatbot response
     try:
         search_results = search.text(query, max_results=n_results)
         if search_results:
             for i, search_result in enumerate(search_results):
-                output += f"{i+1}. {search_result['title']}\n{search_result['body']}\n{search_result['href']}\n\n"
                 urls.append(search_result['href'])
     except:
         # TODO: handle retries in case of duckduckgo_search.exceptions.RatelimitException
@@ -605,30 +615,36 @@ def web_search(query=None, n_results=5):
 
     if verbose_mode:
         on_print("Web Search Results:", Fore.WHITE + Style.DIM)
-        on_print(output)
-
-    # Reverse the order of the URLs, so the most relevant URL is at the end, as LLMs tend to focus on the last input
-    urls.reverse()
+        on_print(urls, Fore.WHITE + Style.DIM)
 
     webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins)
-    webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
+    # webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
+    webCrawler.crawl()
     articles = webCrawler.get_articles()
 
-    if verbose_mode:
-        on_print("Web Crawler Results:", Fore.WHITE + Style.DIM)
-    for article in articles:
-        if verbose_mode:
-            on_print(f"URL: {article['url']}")
-            on_print("Text:")
-            on_print(article['text'])
-        if 'llm_result' in article:
-            if verbose_mode:
-                on_print("LLM Result:")
-                on_print(article['llm_result'])
-            output += article['llm_result'] + "\n"
-            output += "Source: " + article['url'] + "\n\n"
+    # Save articles to temporary files, before indexing them in the vector database
+    # Create a random folder to store the temporary files, in the OS temp directory
+    temp_folder = tempfile.mkdtemp()
+    for i, article in enumerate(articles):
+        # Compute the file path for the article, using the url as the filename, removing invalid characters
+        temp_file_name = re.sub(r'[<>:"/\\|?*]', '', article['url'])
 
-    return output
+        temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}.txt")
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            f.write(article['text'])
+
+    # Index the articles in the vector database
+    document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model)
+    document_indexer.index_documents(no_chunking_confirmation=True)
+
+    # Remove the temporary folder and its contents
+    for file in os.listdir(temp_folder):
+        file_path = os.path.join(temp_folder, file)
+        os.remove(file_path)
+    os.rmdir(temp_folder)
+
+    # Search the vector database for the query
+    return query_vector_database(expanded_query, n_results=20, collection_name=web_cache_collection, query_embeddings_model=web_embedding_model)
 
 def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
@@ -784,10 +800,13 @@ def delete_collection(collection_name):
     except:
         on_print(f"Collection {collection_name} not found", Fore.RED)
 
-def query_vector_database(question, n_results=number_of_documents_to_return_from_vector_db, collection_name=current_collection_name, answer_distance_threshold=0):
+def query_vector_database(question, n_results=number_of_documents_to_return_from_vector_db, collection_name=current_collection_name, answer_distance_threshold=0, query_embeddings_model=None):
     global collection
     global verbose_mode
     global embeddings_model
+
+    if not query_embeddings_model:
+        query_embeddings_model = embeddings_model
 
     if not collection:
         on_print("No ChromaDB collection loaded.", Fore.RED)
@@ -798,7 +817,7 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
     if collection_name and collection_name != current_collection_name:
         set_current_collection(collection_name)
     
-    if embeddings_model is None:
+    if query_embeddings_model is None:
         result = collection.query(
             query_texts=[question],
             n_results=n_results
@@ -807,7 +826,7 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
         # generate an embedding for the question and retrieve the most relevant doc
         response = ollama.embeddings(
             prompt=question,
-            model=embeddings_model
+            model=query_embeddings_model
         )
         result = collection.query(
             query_embeddings=[response["embedding"]],
@@ -833,6 +852,9 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
             if verbose_mode:
                 on_print("Skipping answer with distance: " + str(answer_distance), Fore.WHITE + Style.DIM)
             continue
+
+        if verbose_mode:
+            on_print("Answer distance: " + str(answer_distance), Fore.WHITE + Style.DIM)
         answer_index += 1
         
         # Format the answer with the title, content, and URL
@@ -1598,9 +1620,9 @@ def run():
             web_search_response = web_search(user_input)
             if web_search_response:
                 initial_user_input = user_input
-                user_input = "Question: " + initial_user_input + "\n"
-                user_input += "Answer: " + web_search_response
-                user_input += "\n\nAnswer the question as truthfully as possible using the provided web search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
+                user_input += "Context: " + web_search_response
+                user_input += "\n\nQuestion: " + initial_user_input
+                user_input += "\nAnswer the question as truthfully as possible using the provided web search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
                 user_input += "Cite some useful links from the search results to support your answer."
 
                 if verbose_mode:
