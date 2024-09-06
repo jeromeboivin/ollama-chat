@@ -38,7 +38,7 @@ openai_client = None
 chroma_client = None
 current_collection_name = None
 collection = None
-number_of_documents_to_return_from_vector_db = 1
+number_of_documents_to_return_from_vector_db = 10
 temperature = 0.1
 verbose_mode = False
 embeddings_model = None
@@ -185,40 +185,51 @@ class MarkdownSplitter:
         return len(match.group(1)) if match else None
 
     def split(self):
-        current_section = []
-        current_hierarchy = []
+        current_hierarchy = []  # Stores the current heading hierarchy
         current_paragraph = []
 
-        for line in self.markdown_content:
-            line = line.strip()  # Remove leading/trailing whitespace
+        i = 0
+        while i < len(self.markdown_content):
+            line = self.markdown_content[i].strip()  # Remove leading/trailing whitespace
             
-            if not line:  # If the line is empty, it signifies a paragraph boundary
-                if current_paragraph:  # If there's content in the current paragraph, add it to the section
-                    current_section.append("\n".join(current_paragraph))
-                    current_paragraph = []  # Reset for the next paragraph
+            if not line:  # Empty line found
+                # Check the next non-empty line
+                next_non_empty_line = None
+                for j in range(i + 1, len(self.markdown_content)):
+                    if self.markdown_content[j].strip():  # Find the next non-empty line
+                        next_non_empty_line = self.markdown_content[j].strip()
+                        break
+                
+                # If the next non-empty line is a heading or not starting with '#', split paragraph
+                if next_non_empty_line and (self.is_heading(next_non_empty_line) or not next_non_empty_line.startswith('#')):
+                    if current_paragraph:
+                        # Add the paragraph with the current hierarchy
+                        self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
+                        current_paragraph = []  # Reset for the next paragraph
+                i += 1
                 continue
             
             heading_level = self.is_heading(line)
             
             if heading_level:
-                # If we encounter a heading, finalize the current section with its paragraphs
-                if current_section:
-                    self.sections.append("\n".join(current_section))
-                    current_section = []
-                
+                # If we encounter a heading, finalize the current paragraph
+                if current_paragraph:
+                    # Add the paragraph with the current hierarchy
+                    self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
+                    current_paragraph = []
+
                 # Adjust the hierarchy based on the heading level
                 # Keep only the parts of the hierarchy up to the current heading level
                 current_hierarchy = current_hierarchy[:heading_level - 1] + [line]
-                current_section = current_hierarchy[:]
             else:
                 # Regular content: append the line to the current paragraph
                 current_paragraph.append(line)
 
-        # Finalize the last paragraph and section if present
+            i += 1
+
+        # Finalize the last paragraph if present
         if current_paragraph:
-            current_section.append("\n".join(current_paragraph))
-        if current_section:
-            self.sections.append("\n".join(current_section))
+            self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
 
         return self.sections
 
@@ -420,6 +431,29 @@ def discover_plugins(plugin_folder=None):
                             on_print(f"Discovered tool: {name}", Fore.WHITE + Style.DIM)
     return plugins
 
+def is_markdown(file_path):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"The file {file_path} does not exist.")
+    
+    # Automatically consider .md files as Markdown
+    if file_path.endswith('.md'):
+        return True
+    
+    # If the file is not .md, but is .txt, proceed with content checking
+    if not file_path.endswith('.txt'):
+        raise ValueError(f"The file {file_path} is neither .md nor .txt.")
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            
+            # Check for common Markdown patterns
+            if re.match(r'^#{1,6}\s', line):  # Heading (e.g., # Heading)
+                return True
+    
+    # If no Markdown features are found, assume it's a regular text file
+    return False
+
 class DocumentIndexer:
     def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
         self.root_folder = root_folder
@@ -478,8 +512,14 @@ class DocumentIndexer:
                 document_id = os.path.splitext(os.path.basename(file_path))[0]
                 
                 if allow_chunks:
-                    # Split the content using langchain text splitter
-                    chunks = text_splitter.split_text(content)
+                    chunks = []
+                    # If input file is a Markdown file, split it into sections using MarkdownSplitter
+                    if is_markdown(file_path):
+                        markdown_splitter = MarkdownSplitter(content)
+                        chunks = markdown_splitter.split()
+                    else:
+                        # Split the content using langchain text splitter
+                        chunks = text_splitter.split_text(content)
                     
                     for i, chunk in enumerate(chunks):
                         chunk_id = f"{document_id}_{i}"
@@ -744,7 +784,7 @@ def delete_collection(collection_name):
     except:
         on_print(f"Collection {collection_name} not found", Fore.RED)
 
-def query_vector_database(question, n_results=10, collection_name=current_collection_name, answer_distance_threshold=0):
+def query_vector_database(question, n_results=number_of_documents_to_return_from_vector_db, collection_name=current_collection_name, answer_distance_threshold=0):
     global collection
     global verbose_mode
     global embeddings_model
@@ -992,36 +1032,54 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             return ""
 
     if bot_response and bot_response_is_tool_calls:
+        # Iterate over each function call in the bot response
         tool_found = False
         for tool_call in bot_response:
             if not 'function' in tool_call or not 'name' in tool_call['function']:
                 continue
 
             tool_name = tool_call['function']['name']
+            # Iterate over the available tools
             for tool in tools:
                 if 'type' in tool and tool['type'] == 'function' and 'function' in tool and 'name' in tool['function'] and tool['function']['name'] == tool_name:
-                    # Call the tool function with the parameters
-                    parameters = tool_call['function'].get('arguments', {})
+                    # Test if tool_call['function'] as arguments
+                    if 'arguments' in tool_call:
+                        # Extract parameters for the tool function
+                        parameters = tool_call.get('arguments', {})  # Update: get parameters from the 'arguments' key
+                    else:
+                        # Call the tool function with the parameters
+                        parameters = tool_call['function'].get('arguments', {})
 
                     tool_response = None
-                    
+
+                    # Check if the tool is a globally defined function
                     if tool_name in globals():
                         if verbose_mode:
-                            on_print(f"Calling tool function: {tool_name}", Fore.WHITE + Style.DIM)
-                        tool_response = globals()[tool_name](**parameters)
-                        tool_found = True
+                            on_print(f"Calling tool function: {tool_name} with parameters: {parameters}", Fore.WHITE + Style.DIM)
+                        try:
+                            # Call the global function with extracted parameters
+                            tool_response = globals()[tool_name](**parameters)
+                            tool_found = True
+                        except Exception as e:
+                            on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
                     else:
                         if verbose_mode:
                             on_print(f"Trying to find plugin with function '{tool_name}'...", Fore.WHITE + Style.DIM)
+                        # Search for the tool function in plugins
                         for plugin in plugins:
                             if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
                                 tool_found = True
                                 if verbose_mode:
                                     on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__}", Fore.WHITE + Style.DIM)
-                                tool_response = getattr(plugin, tool_name)(**parameters)
-                                if verbose_mode:
-                                    on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
-                                break
+
+                                try:
+                                    # Call the plugin's tool function with parameters
+                                    tool_response = getattr(plugin, tool_name)(**parameters)
+                                    if verbose_mode:
+                                        on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
+                                    break
+                                except Exception as e:
+                                    on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
 
                     if tool_response:
                         # If the tool response is a string, append it to the conversation
@@ -1554,8 +1612,7 @@ def run():
             continue
 
         if user_input == "/model2":
-            selected_model = prompt_for_ollama_model(default_model)
-            alternate_model = selected_model
+            alternate_model = prompt_for_ollama_model(default_model)
             continue
 
         if "/tools" in user_input:
