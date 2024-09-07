@@ -34,7 +34,7 @@ openai_client = None
 chroma_client = None
 current_collection_name = None
 collection = None
-number_of_documents_to_return_from_vector_db = 10
+number_of_documents_to_return_from_vector_db = 20
 temperature = 0.1
 verbose_mode = False
 embeddings_model = None
@@ -1076,6 +1076,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                         try:
                             # Call the global function with extracted parameters
                             tool_response = globals()[tool_name](**parameters)
+                            if verbose_mode:
+                                on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
                             tool_found = True
                         except Exception as e:
                             on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
