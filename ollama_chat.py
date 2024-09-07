@@ -1555,6 +1555,12 @@ def run():
                 conversation = []
             continue
 
+        for plugin in plugins:
+            if hasattr(plugin, "on_user_input_done") and callable(getattr(plugin, "on_user_input_done")):
+                user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
+                if user_input_from_plugin:
+                    user_input = user_input_from_plugin
+
         image_path = None
         # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
         if "/file" in user_input:
@@ -1696,7 +1702,6 @@ def run():
             on_print("Conversation reset.", Style.RESET_ALL)
             continue
 
-        
         if "/cb" in user_input:
             if platform.system() == "Windows":
                 # Replace /cb with the clipboard content
@@ -1707,12 +1712,6 @@ def run():
                 clipboard_content = pyperclip.paste()
             user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
             on_print("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
-
-        for plugin in plugins:
-            if hasattr(plugin, "on_user_input_done") and callable(getattr(plugin, "on_user_input_done")):
-                user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
-                if user_input_from_plugin:
-                    user_input = user_input_from_plugin
 
         # Add user input to conversation history
         if image_path:
