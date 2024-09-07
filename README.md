@@ -1,32 +1,97 @@
-# ollama-chat
+# Ollama-Chat: Extensible CLI for Local Language Models
 
-A CLI-based Python script that interacts with a local Language Model (LLM) through `Ollama` and `Llama-Cpp` servers. It also supports the use of a local or distant `ChromaDB` vector database for the RAG (Retrieval-Augmented Generation) model, providing a more efficient and flexible way to generate responses.
+**Ollama-Chat** is a powerful, customizable Python CLI tool that interacts with local Language Models (LLMs) via `Ollama` and `Llama-Cpp` servers. Designed with flexibility and **privacy** in mind, this tool ensures that all LLMs run locally on your machine, meaning your data never leaves your environment. It also integrates seamlessly with a local or distant `ChromaDB` vector database, providing efficient Retrieval-Augmented Generation (RAG) capabilities to enhance response accuracy.
 
-## Prerequisites
+The real magic of **Ollama-Chat** lies in its **extensibility**: you can build and integrate your own plugins, tailoring the tool to your specific workflows and creative projects.
 
-Before you can run the `ollama_chat.py` script, you need to install several Python packages. These packages provide the necessary functionality for the script to interact with the Ollama language model, the ChromaDB vector database, and other features.
+## Key Features
+- **Local and Private LLM Integration:** Interact with local LLMs through `Ollama` and `Llama-Cpp` for high-performance AI without sacrificing privacy—your data stays on your machine.
+- **RAG Support:** Harness Retrieval-Augmented Generation (RAG) with ChromaDB to provide more contextually relevant answers by integrating vectorized data.
+- **Custom Plugins:** Easily add custom plugins that extend the model’s capabilities, making the tool adaptable to your personal or team workflows.
+- **Web Search:** Use the `/web` command or web_search tool to search the web, chunk articles, and store them in ChromaDB for generating insightful answers.
 
-Here is the list of required packages:
+## Why Ollama-Chat?
+Ollama-Chat is more than just another AI interface—it's a privacy-first, customizable platform built for developers who want full control over their LLM interactions. Whether you're developing new workflows, refining business strategies, or exploring creative projects, Ollama-Chat makes it easy to add custom logic and behaviors, ensuring the tool works exactly as you need it to—all while keeping your data secure.
 
-- `ollama`: This package allows the script to interact with the Ollama server.
-- `colorama`: This package is used for colored terminal text.
-- `chromadb`: This package enables the script to interact with the ChromaDB vector database.
-- `pywin32`: This package provides access to some useful APIs on Windows like clipboard.
-- `pyperclip`: This package provides access to clipboard (Linux and MacOS).
-- `pygments`: This package is used for syntax highlighting.
-- `duckduckgo_search`: This package allows the script to perform DuckDuckGo searches.
+## Extensible Plugin System
+The plugin system allows you to enhance and personalize Ollama-Chat by adding new commands, actions, and behaviors based on user input. Whether it's generating new ideas, analyzing content, or retrieving additional resources, the possibilities are limitless.
 
-You can install all these packages using pip, the Python package installer. Run the following command in your terminal:
+### Quickstart: Writing a Plugin
 
-```bash
-pip install ollama colorama chromadb pygments duckduckgo_search
+Creating a plugin for Ollama-Chat is simple, and you can personalize how the LLM interacts with users by integrating custom chatbot personalities. Plugins can listen to user input, interact with these personalities, and respond with custom logic. Here’s an example of a **Idea Generator** plugin:
+
+```python
+class IdeaGeneratorPlugin():
+    def on_user_input_done(self, user_input, verbose_mode=False):
+        if user_input and "/idea" in user_input:
+            idea = user_input.replace("/idea", "").strip()
+            return (f"I have the following idea: '{idea}'. Please generate a list of questions "
+                    "that will help me refine this idea, one question at a time. Focus on aspects "
+                    "like clarity, feasibility, potential challenges, resources needed, and how it "
+                    "could be improved or expanded. The questions should guide me through thinking "
+                    "more deeply about how to implement or improve the idea.")
+        
+        if user_input and "/search" in user_input:
+            idea = user_input.replace("/search", "").strip()
+            return (f"I have chosen the following question to explore further: '{idea}'. Please "
+                    "generate a web search query that includes the context of the question and "
+                    "focuses on gathering relevant information or resources to help me find "
+                    "answers or solutions.")
+        
+        return None
 ```
 
-Additionally, under Windows platform, install `pywin32`:
+#### Personalizing the LLM System Prompt
+In this example, you can further enhance the experience by defining a custom chatbot personality through a system prompt. For instance, the **Idea Generator** plugin could use the following prompt:
 
-```bash
-pip install pywin32
 ```
+You are an idea-generating assistant. The user will provide a subject or a topic, and your task is to suggest a variety of creative, practical, or innovative ideas related to that subject. You should:
+
+- Provide a range of ideas that span from common solutions to more out-of-the-box thinking.
+- Ensure the ideas are useful and tailored to the specific subject given.
+- Offer a balance of simplicity and complexity, so users with different needs can find value.
+- Feel free to suggest actionable steps, project ideas, or thought-provoking concepts.
+- Avoid overly technical jargon unless the subject specifically calls for it.
+
+Be clear, concise, and aim to inspire creativity!
+```
+
+This system prompt defines the assistant’s personality and behavior, ensuring that the responses are tailored to generating and refining creative ideas. For more details on how to implement and customize system prompts, refer to the [#how-to-specify-custom-chatbot-personalities-in-json-format](#how-to-specify-custom-chatbot-personalities-in-json-format) section in the README.
+
+By combining custom plugins and personalized system prompts, Ollama-Chat provides full control over how the LLM interacts, allowing it to meet the specific needs of any user or project.
+
+### How It Works
+1. **User Input**: When the user enters a command like `/idea`, the plugin detects it and processes the input.
+2. **Response**: The plugin responds by generating helpful questions or search queries to guide further exploration.
+3. **Customization**: You can modify this plugin or create new ones that suit your specific needs, from automating workflows to integrating with external APIs.
+
+## Web Search Feature
+Ollama-Chat comes with a built-in feature that allows you to search the web using the `/web` command or web_search tool. The tool retrieves relevant articles from the web, chunks them into manageable pieces, and stores them in the ChromaDB vector database. This allows Ollama-Chat to generate more informed and contextually rich answers, blending local and web-based knowledge.
+
+### Example Workflow:
+1. **Web Search**: User types `/web What are the latest trends in AI?`.
+2. **Chunking**: Articles retrieved from the web are split into meaningful chunks.
+3. **Storage**: These chunks are stored in ChromaDB.
+4. **Response**: The model can now use this stored data to provide an informed answer, with additional context retrieved from the web.
+
+## Installation
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/jeromeboivin/ollama-chat
+   cd ollama-chat
+   ```
+
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Start the Ollama or Llama-Cpp server, then run the CLI:
+   ```bash
+   python ollama_chat.py
+   ```
+
+4. Start customizing by writing your own plugins!
 
 ## How to Use the Ollama Chatbot Script
 
@@ -276,7 +341,7 @@ Use the `--additional-chatbots` to specify the path to a JSON file containing ad
 
 **Note**: special token `{possible_prompt_commands}` in the system prompt will be replaced by the possible commands automatically (see [How to Use Special Switches] section above).
 
-Here is an example of a JSON file that specifies a custom chatbot personality:
+Here is an example of a JSON file that specifies custom chatbot personalities:
 
 ```json
 [
@@ -285,6 +350,12 @@ Here is an example of a JSON file that specifies a custom chatbot personality:
         "name": "code",
         "preferred_model": "wizardlm2:latest",
         "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}"
+    },
+	{
+        "description": "Ideas generator",
+        "name": "Ideas generator",
+        "preferred_model": "",
+        "system_prompt": "You are an idea-generating assistant. The user will provide a subject or a topic, and your task is to suggest a variety of creative, practical, or innovative ideas related to that subject. You should:\r\n\r\n- Provide a range of ideas that span from common solutions to more out-of-the-box thinking.\r\n- Ensure the ideas are useful and tailored to the specific subject given.\r\n- Offer a balance of simplicity and complexity, so users with different needs can find value.\r\n- Feel free to suggest actionable steps, project ideas, or thought-provoking concepts.\r\n- Avoid overly technical jargon unless the subject specifically calls for it.\r\n\r\nBe clear, concise, and aim to inspire creativity!"
     }
 ]
 ```

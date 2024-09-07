@@ -1,8 +1,3 @@
-# pip install ollama colorama chromadb pygments duckduckgo_search pyperclip langchain-text-splitters markdownify beautifulsoup4 requests PyPDF2 chardet
-
-# On Windows platform:
-# pip install pywin32
-
 import ollama
 import platform
 import tempfile

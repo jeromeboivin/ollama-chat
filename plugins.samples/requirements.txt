@@ -1,0 +1,16 @@
+ollama
+colorama
+chromadb
+pyperclip; platform_system != 'Windows'
+pywin32; platform_system == 'Windows'
+readline; platform_system != 'Windows'
+argparse
+pygments
+duckduckgo-search
+beautifulsoup4
+markdownify
+requests
+PyPDF2
+chardet
+langchain-text-splitters
+openai
