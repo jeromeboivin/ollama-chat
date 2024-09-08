@@ -51,6 +51,7 @@ chroma_client_host = "localhost"
 chroma_client_port = 8000
 
 custom_tools = []
+web_cache_collection_name = "web_cache"
 
 def on_user_input(input_prompt=None):
     for plugin in plugins:
@@ -583,7 +584,7 @@ class DocumentIndexer:
             except KeyboardInterrupt:
                 break
 
-def web_search(query=None, n_results=3, web_cache_collection="web_cache", web_embedding_model="nomic-embed-text"):
+def web_search(query=None, n_results=3, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text"):
     global current_model
     global verbose_mode
     global plugins
@@ -744,6 +745,7 @@ def prompt_for_chatbot():
 
 def prompt_for_vector_database_collection(prompt_create_new=True):
     global chroma_client
+    global web_cache_collection_name
 
     load_chroma_client()
 
@@ -758,22 +760,29 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
         on_print("No collections found", Fore.RED)
         return on_user_input("Enter a new collection to create: ")
 
+    # Filter out the web_cache_collection_name
+    filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name]
+
+    if not filtered_collections:
+        on_print("No collections found", Fore.RED)
+        return on_user_input("Enter a new collection to create: ")
+
     # Ask user to choose a collection
     on_print("Available collections:", Style.RESET_ALL)
-    for i, collection in enumerate(collections):
+    for i, collection in enumerate(filtered_collections):
         collection_name = collection.name
         on_print(f"{i}. {collection_name}")
 
     if prompt_create_new:
         # Propose to create a new collection
-        on_print(f"{len(collections)}. Create a new collection")
+        on_print(f"{len(filtered_collections)}. Create a new collection")
     
     choice = int(on_user_input("Enter the number of your preferred collection [0]: ") or 0)
 
-    if prompt_create_new and choice == len(collections):
+    if prompt_create_new and choice == len(filtered_collections):
         return on_user_input("Enter a new collection to create: ")
 
-    return collections[choice].name
+    return filtered_collections[choice].name
 
 def set_current_collection(collection_name):
     global collection
@@ -802,11 +811,19 @@ def delete_collection(collection_name):
     if not chroma_client:
         return
 
+    # Ask for user confirmation before deleting
+    confirmation = on_user_input(f"Are you sure you want to delete the collection '{collection_name}'? (y/n): ").lower()
+
+    if confirmation != 'y' and confirmation != 'yes':
+        on_print("Collection deletion canceled.", Fore.YELLOW)
+        return
+
     try:
         chroma_client.delete_collection(name=collection_name)
         on_print(f"Collection {collection_name} deleted.", Fore.WHITE + Style.DIM)
     except:
-        on_print(f"Collection {collection_name} not found", Fore.RED)
+        on_print(f"Collection {collection_name} not found.", Fore.RED)
+
 
 def query_vector_database(question, n_results=number_of_documents_to_return_from_vector_db, collection_name=current_collection_name, answer_distance_threshold=0, query_embeddings_model=None):
     global collection
