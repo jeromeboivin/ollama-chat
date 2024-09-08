@@ -171,9 +171,10 @@ def get_available_tools():
     return available_tools
 
 class MarkdownSplitter:
-    def __init__(self, markdown_content):
+    def __init__(self, markdown_content, split_paragraphs=False):
         self.markdown_content = markdown_content.splitlines()
         self.sections = []
+        self.split_paragraphs = split_paragraphs  # New parameter to control paragraph splitting
     
     def is_heading(self, line):
         """Returns the heading level if the line is a heading, otherwise returns None."""
@@ -189,18 +190,20 @@ class MarkdownSplitter:
             line = self.markdown_content[i].strip()  # Remove leading/trailing whitespace
             
             if not line:  # Empty line found
-                # Check the next non-empty line
-                next_non_empty_line = None
-                for j in range(i + 1, len(self.markdown_content)):
-                    if self.markdown_content[j].strip():  # Find the next non-empty line
-                        next_non_empty_line = self.markdown_content[j].strip()
-                        break
-                
-                # If the next non-empty line is a heading or not starting with '#', split paragraph
-                if next_non_empty_line and (self.is_heading(next_non_empty_line) or not next_non_empty_line.startswith('#')) and len(current_paragraph) > 0:
-                    # Add the paragraph with the current hierarchy
-                    self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
-                    current_paragraph = []  # Reset for the next paragraph
+                if self.split_paragraphs:  # Only handle splitting when split_paragraphs is True
+                    # Check the next non-empty line
+                    next_non_empty_line = None
+                    for j in range(i + 1, len(self.markdown_content)):
+                        if self.markdown_content[j].strip():  # Find the next non-empty line
+                            next_non_empty_line = self.markdown_content[j].strip()
+                            break
+                    
+                    # If the next non-empty line is a heading or not starting with '#', split paragraph
+                    if next_non_empty_line and (self.is_heading(next_non_empty_line) or not next_non_empty_line.startswith('#')) and len(current_paragraph) > 0:
+                        # Add the paragraph with the current hierarchy
+                        self.sections.append("\n".join(current_hierarchy + ["\n".join(current_paragraph)]))
+                        current_paragraph = []  # Reset for the next paragraph
+
                 i += 1
                 continue
             
@@ -478,7 +481,15 @@ class DocumentIndexer:
             except:
                 return None
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False):
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None):
+        """
+        Index all text files in the root folder.
+        
+        :param allow_chunks: Whether to chunk large documents.
+        :param no_chunking_confirmation: Skip confirmation for chunking.
+        :param split_paragraphs: Whether to split markdown content into paragraphs.
+        :param additional_metadata: Optional dictionary to pass additional metadata by file name.
+        """
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
             on_print("Large documents will be chunked into smaller pieces for indexing.")
@@ -486,9 +497,8 @@ class DocumentIndexer:
 
         if allow_chunks:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
-        """
-        Index all text files in the root folder.
-        """
+
+        # Get the list of text files
         text_files = self.get_text_files()
 
         if allow_chunks:
@@ -504,14 +514,18 @@ class DocumentIndexer:
 
                 document_id = os.path.splitext(os.path.basename(file_path))[0]
                 
+                # Add any additional metadata for the file
+                file_metadata = {'filename': file_path}
+                if additional_metadata and file_path in additional_metadata:
+                    file_metadata.update(additional_metadata[file_path])
+
                 if allow_chunks:
                     chunks = []
-                    # If input file is a Markdown file, split it into sections using MarkdownSplitter
+                    # Split Markdown files into sections if needed
                     if is_markdown(file_path):
-                        markdown_splitter = MarkdownSplitter(content)
+                        markdown_splitter = MarkdownSplitter(content, split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
                     else:
-                        # Split the content using langchain text splitter
                         chunks = text_splitter.split_text(content)
                     
                     for i, chunk in enumerate(chunks):
@@ -519,61 +533,57 @@ class DocumentIndexer:
                         
                         # Embed the content
                         embedding = None
-
                         if self.model:
-                            # generate an embedding for the chunk
                             response = ollama.embeddings(
                                 prompt=chunk,
                                 model=self.model
                             )
                             embedding = response["embedding"]
                         
-                        # Add the content to the collection
+                        # Upsert the chunk with additional metadata if available
                         if embedding:
                             self.collection.upsert(
                                 documents=[chunk],
-                                metadatas=[{'filename': file_path}],
+                                metadatas=[file_metadata],
                                 ids=[chunk_id],
                                 embeddings=[embedding]
                             )
                         else:
                             self.collection.upsert(
                                 documents=[chunk],
-                                metadatas=[{'filename': file_path}],
+                                metadatas=[file_metadata],
                                 ids=[chunk_id]
                             )
                         on_print(f"Added chunk {chunk_id} to the collection", Fore.WHITE + Style.DIM)
                 else:
-                    # Embed the content
+                    # Embed the whole document
                     embedding = None
-
                     if self.model:
-                        # generate an embedding for the document
                         response = ollama.embeddings(
                             prompt=content,
                             model=self.model
                         )
                         embedding = response["embedding"]
 
-                    # Add the content to the collection
+                    # Upsert the document with additional metadata if available
                     if embedding:
                         self.collection.upsert(
                             documents=[content],
-                            metadatas=[{'filename': file_path}],
+                            metadatas=[file_metadata],
                             ids=[document_id],
                             embeddings=[embedding]
                         )
                     else:
                         self.collection.upsert(
                             documents=[content],
-                            metadatas=[{'filename': file_path}],
+                            metadatas=[file_metadata],
                             ids=[document_id]
                         )
                     on_print(f"Added document {document_id} to the collection", Fore.WHITE + Style.DIM)
             except KeyboardInterrupt:
                 break
 
-def web_search(query=None, n_results=5, web_cache_collection="web_cache", web_embedding_model="nomic-embed-text"):
+def web_search(query=None, n_results=3, web_cache_collection="web_cache", web_embedding_model="nomic-embed-text"):
     global current_model
     global verbose_mode
     global plugins
@@ -592,7 +602,7 @@ def web_search(query=None, n_results=5, web_cache_collection="web_cache", web_em
     
     # Try to search the vector database first
     set_current_collection(web_cache_collection)
-    search_results = query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, answer_distance_threshold=5, query_embeddings_model=web_embedding_model)
+    search_results = query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, answer_distance_threshold=150, query_embeddings_model=web_embedding_model)
     if search_results:
         return search_results
 
@@ -620,6 +630,7 @@ def web_search(query=None, n_results=5, web_cache_collection="web_cache", web_em
     # Save articles to temporary files, before indexing them in the vector database
     # Create a random folder to store the temporary files, in the OS temp directory
     temp_folder = tempfile.mkdtemp()
+    additional_metadata = {}
     for i, article in enumerate(articles):
         # Compute the file path for the article, using the url as the filename, removing invalid characters
         temp_file_name = re.sub(r'[<>:"/\\|?*]', '', article['url'])
@@ -627,10 +638,12 @@ def web_search(query=None, n_results=5, web_cache_collection="web_cache", web_em
         temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}.txt")
         with open(temp_file_path, 'w', encoding='utf-8') as f:
             f.write(article['text'])
+            additional_metadata[temp_file_path] = {'url': article['url']}
 
     # Index the articles in the vector database
     document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model)
-    document_indexer.index_documents(no_chunking_confirmation=True)
+    print(additional_metadata)
+    document_indexer.index_documents(no_chunking_confirmation=True, additional_metadata=additional_metadata)
 
     # Remove the temporary folder and its contents
     for file in os.listdir(temp_folder):
