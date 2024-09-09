@@ -1432,9 +1432,11 @@ def run():
     parser.add_argument('--disable-system-role', type=bool, help='Specify if the selected model does not support the system role, like Google Gemma models', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--prompt-template', type=str, help='Prompt template to use for Llama-CPP', default=None)
     parser.add_argument('--additional-chatbots', type=str, help='Path to a JSON file containing additional chatbots', default=None)
+    parser.add_argument('--chatbot', type=str, help='Preferred chatbot personality', default=None)
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
+    parser.add_argument('--prompt', type=str, help='User prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default=None)
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
@@ -1442,6 +1444,8 @@ def run():
     parser.add_argument('--index-documents', type=str, help='Root folder to index text files', default=None)
     parser.add_argument('--interactive', type=bool, help='Use interactive mode', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--plugins-folder', type=str, default=None, help='Path to the plugins folder')
+    parser.add_argument('--stream', type=bool, help='Use stream mode for Ollama API', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--output', type=str, help='Output file path', default=None)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1462,6 +1466,26 @@ def run():
     interactive_mode = args.interactive
     embeddings_model = args.embeddings_model
     plugins_folder = args.plugins_folder
+    user_prompt = args.prompt
+    stream_active = args.stream
+    output_file = args.output
+
+    # If output file already exists, ask user for confirmation to overwrite
+    if output_file and os.path.exists(output_file):
+        if interactive_mode:
+            confirmation = on_user_input(f"Output file '{output_file}' already exists. Overwrite? (y/n): ").lower()
+            if confirmation != 'y' and confirmation != 'yes':
+                on_print("Output file not overwritten.")
+                output_file = None
+            else:
+                # Delete the existing file
+                os.remove(output_file)
+        else:
+            # Delete the existing file
+            os.remove(output_file)
+
+    if verbose_mode and user_prompt:
+        on_print(f"User prompt: {user_prompt}", Fore.WHITE + Style.DIM)
 
     plugins = discover_plugins(plugins_folder)
 
@@ -1471,14 +1495,24 @@ def run():
     # Load additional chatbots from a JSON file
     load_additional_chatbots(additional_chatbots_file)
 
+    chatbot = None
+    if args.chatbot:
+        for bot in chatbots:
+            if bot["name"] == args.chatbot:
+                chatbot = bot
+        if verbose_mode:
+            on_print(f"Using chatbot: {chatbot['name']}", Fore.WHITE + Style.DIM)
+    
+    if chatbot is None:
+        # Load the default chatbot
+        chatbot = chatbots[0]
+
     if args.index_documents:
         load_chroma_client()
         document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
         document_indexer.index_documents()
 
     if not use_openai:
-        # Load the default chatbot
-        chatbot = chatbots[0]
         system_prompt = chatbot["system_prompt"]
         default_model = chatbot["preferred_model"]
 
@@ -1534,13 +1568,22 @@ def run():
         conversation = []
 
     current_model = selected_model
+
+    answer_and_exit = False
+    if not interactive_mode and user_prompt:
+        answer_and_exit = True
     
     while True:
         try:
             if interactive_mode:
                 on_prompt("\nYou: ", Fore.YELLOW + Style.NORMAL)
-            
-            user_input = on_user_input()
+
+            if user_prompt:
+                user_input = user_prompt
+                user_prompt = None
+            else:
+                user_input = on_user_input()
+
             if user_input.strip().startswith('"""'):
                 multi_line_input = [user_input[3:]]  # Keep the content after the first """
                 on_stdout_write("... ")  # Prompt continuation line
@@ -1747,11 +1790,11 @@ def run():
             conversation.append({"role": "user", "content": user_input})
 
         # Generate response
-        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools)
+        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active)
 
         alternate_bot_response = None
         if alternate_model:
-            alternate_bot_response = ask_ollama_with_conversation(conversation, alternate_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN)
+            alternate_bot_response = ask_ollama_with_conversation(conversation, alternate_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN, stream_active=stream_active)
         
         bot_response_handled_by_plugin = False
         for plugin in plugins:
@@ -1774,6 +1817,15 @@ def run():
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
+
+        if output_file:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(bot_response)
+                if verbose_mode:
+                    on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
+
+        if answer_and_exit:
+            break
 
     # Stop plugins, calling on_exit if available
     for plugin in plugins:
