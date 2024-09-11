@@ -955,6 +955,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
     else:
         tools = None
 
+    completion_done = False
     completion = openai_client.chat.completions.create(
         messages=conversation,
         model=selected_model,
@@ -989,17 +990,34 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         if not stream_active:
             bot_response = completion.choices[0].message.content
             on_print(bot_response, Fore.WHITE + Style.DIM)
+
+            if completion.choices[0].finish_reason == 'stop':
+                completion_done = True
         else:
             bot_response = ""
-            for chunk in completion:
-                delta = chunk.choices[0].delta.content
+            try:
+                for chunk in completion:
+                    delta = chunk.choices[0].delta.content
 
-                if not delta is None:
-                    on_llm_token_response(delta, Style.RESET_ALL)
-                    on_stdout_flush()
-                    bot_response += delta
+                    if not delta is None:
+                        on_llm_token_response(delta, Style.RESET_ALL)
+                        on_stdout_flush()
+                        bot_response += delta
+                    
+                    if chunk.choices[0].finish_reason == 'stop':
+                        completion_done = True
+                        break
+            except KeyboardInterrupt:
+                completion.close()
+            except Exception as e:
+                on_print(f"Error during streaming completion: {e}", Fore.RED)
+                bot_response = ""
+                bot_response_is_tool_calls = False
 
-    return bot_response, bot_response_is_tool_calls
+    if not completion_done and not bot_response_is_tool_calls:
+        conversation.append({"role": "assistant", "content": bot_response})
+
+    return bot_response, bot_response_is_tool_calls, completion_done
 
 def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools):
     # Iterate over each function call in the bot response
@@ -1119,15 +1137,18 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     model_support_tools = True
 
     if use_openai:
-        bot_response, bot_response_is_tool_calls = ask_openai_with_conversation(conversation, model, temperature, prompt_template, stream_active, tools)
-        if bot_response and bot_response_is_tool_calls:
-            # Convert bot_response list of objects to a list of dict
-            bot_response = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in bot_response]
+        completion_done = False
 
-            if verbose_mode:
-                on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
+        while not completion_done:
+            bot_response, bot_response_is_tool_calls, completion_done = ask_openai_with_conversation(conversation, model, temperature, prompt_template, stream_active, tools)
+            if bot_response and bot_response_is_tool_calls:
+                # Convert bot_response list of objects to a list of dict
+                bot_response = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in bot_response]
 
-            bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
+                if verbose_mode:
+                    on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
+
+                bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
 
         return bot_response.strip()
 
@@ -1589,8 +1610,10 @@ def run():
         document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
         document_indexer.index_documents()
 
+    system_prompt = chatbot["system_prompt"]
+    use_openai = use_openai or chatbot["use_openai"]
+
     if not use_openai:
-        system_prompt = chatbot["system_prompt"]
         default_model = chatbot["preferred_model"]
 
         if preferred_model:
@@ -1627,11 +1650,12 @@ def run():
         if preferred_model:
             selected_model = preferred_model
 
-        if no_system_role:
-            on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
-            system_prompt = ""
-        else:
-            system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
+        if not system_prompt:
+            if no_system_role:
+                on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
+                system_prompt = ""
+            else:
+                system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
 
     user_name = get_personal_info()["user_name"]
 
@@ -1719,26 +1743,6 @@ def run():
                 user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
                 if user_input_from_plugin:
                     user_input = user_input_from_plugin
-
-        image_path = None
-        # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
-        if "/file" in user_input:
-            file_path = user_input.split("/file")[1].strip()
-            file_path = file_path.strip("'\"")
-            
-            # Check if the file is an image
-            _, ext = os.path.splitext(file_path)
-            if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
-                try:
-                    with open(file_path, 'r') as file:
-                        user_input = user_input.replace("/file", "")
-                        user_input += "\n" + file.read()
-                except FileNotFoundError:
-                    on_print("File not found. Please try again.", Fore.RED)
-                    continue
-            else:
-                user_input = user_input.split("/file")[0].strip()
-                image_path = file_path
 
         if "/index" in user_input:
             if not chroma_client:
@@ -1871,6 +1875,26 @@ def run():
                 clipboard_content = pyperclip.paste()
             user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
             on_print("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
+
+        image_path = None
+        # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
+        if "/file" in user_input:
+            file_path = user_input.split("/file")[1].strip()
+            file_path = file_path.strip("'\"")
+            
+            # Check if the file is an image
+            _, ext = os.path.splitext(file_path)
+            if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
+                try:
+                    with open(file_path, 'r') as file:
+                        user_input = user_input.replace("/file", "")
+                        user_input += "\n" + file.read()
+                except FileNotFoundError:
+                    on_print("File not found. Please try again.", Fore.RED)
+                    continue
+            else:
+                user_input = user_input.split("/file")[0].strip()
+                image_path = file_path
 
         # Add user input to conversation history
         if image_path:
