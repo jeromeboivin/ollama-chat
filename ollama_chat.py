@@ -137,7 +137,7 @@ def get_available_tools():
                 "type": "object",
                 "properties": {
                     "query": {
-                        "type": "str",
+                        "type": "string",
                         "description": "The search query"
                     }
                 },
@@ -156,7 +156,7 @@ def get_available_tools():
                 "type": "object",
                 "properties": {
                     "question": {
-                        "type": "str",
+                        "type": "string",
                         "description": "The question to search for"
                     }
                 },
@@ -293,7 +293,7 @@ class SimpleWebCrawler:
         user_input = content + "\n\n" + user_input
         return ask_ollama(system_prompt=self.system_prompt, 
                           user_input=user_input, 
-                          selected_model=self.selected_model, 
+                          selected_model=self.selected_model,
                           temperature=self.temperature, 
                           prompt_template=None, 
                           tools=[], 
@@ -903,12 +903,9 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
 
     return '\n\n'.join(answers)
 
-def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", temperature=0.1, prompt_template=None):
+def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
     global openai_client
     global verbose_mode
-
-    if prompt_template and verbose_mode:
-        on_print("Using OpenAI API with prompt template: " + prompt_template, Fore.WHITE + Style.DIM)
 
     if prompt_template == "ChatML":
         # Modify conversation to match prompt template: ChatML
@@ -953,15 +950,140 @@ def ask_openai_with_conversation(conversation, selected_model="gpt-3.5-turbo", t
         # Add assistant message to the end of the conversation
         conversation.append({"role": "assistant", "content": "### Response:\n"})
 
+    if len(tools) > 0:
+        stream_active = False
+    else:
+        tools = None
+
     completion = openai_client.chat.completions.create(
         messages=conversation,
         model=selected_model,
-        stream=False,
-        temperature=temperature
+        stream=stream_active,
+        temperature=temperature,
+        tools=tools
     )
 
-    bot_response = completion.choices[0].message.content
-    return bot_response.strip()
+    bot_response_is_tool_calls = False
+    tool_calls = []
+
+    if verbose_mode:
+        on_print("OpenAI Chat Completion:", Fore.WHITE + Style.DIM)
+        on_print(completion, Fore.WHITE + Style.DIM)
+
+    if hasattr(completion, 'choices') and len(completion.choices) > 0 and hasattr(completion.choices[0], 'message') and hasattr(completion.choices[0].message, 'tool_calls'):
+        tool_calls = completion.choices[0].message.tool_calls
+
+        # Test if tool_calls is a list
+        if not isinstance(tool_calls, list):
+            tool_calls = []
+
+    if len(tool_calls) > 0:
+        conversation.append(completion.choices[0].message)
+
+        if verbose_mode:
+            on_print(f"Tool calls: {tool_calls}", Fore.WHITE + Style.DIM)
+        bot_response = tool_calls
+        bot_response_is_tool_calls = True
+
+    else:
+        if not stream_active:
+            bot_response = completion.choices[0].message.content
+            on_print(bot_response, Fore.WHITE + Style.DIM)
+        else:
+            bot_response = ""
+            for chunk in completion:
+                delta = chunk.choices[0].delta.content
+
+                if not delta is None:
+                    on_llm_token_response(delta, Style.RESET_ALL)
+                    on_stdout_flush()
+                    bot_response += delta
+
+    return bot_response, bot_response_is_tool_calls
+
+def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools):
+    # Iterate over each function call in the bot response
+    tool_found = False
+    for tool_call in bot_response:
+        if not 'function' in tool_call or not 'name' in tool_call['function']:
+            continue
+
+        tool_name = tool_call['function']['name']
+        # Iterate over the available tools
+        for tool in tools:
+            if 'type' in tool and tool['type'] == 'function' and 'function' in tool and 'name' in tool['function'] and tool['function']['name'] == tool_name:
+                # Test if tool_call['function'] as arguments
+                if 'arguments' in tool_call:
+                    # Extract parameters for the tool function
+                    parameters = tool_call.get('arguments', {})  # Update: get parameters from the 'arguments' key
+                else:
+                    # Call the tool function with the parameters
+                    parameters = tool_call['function'].get('arguments', {})
+
+                tool_response = None
+
+                # if parameters is a string, convert it to a dictionary
+                if isinstance(parameters, str):
+                    try:
+                        parameters = json.loads(parameters)
+                    except:
+                        parameters = {}
+
+                # Check if the tool is a globally defined function
+                if tool_name in globals():
+                    if verbose_mode:
+                        on_print(f"Calling tool function: {tool_name} with parameters: {parameters}", Fore.WHITE + Style.DIM)
+                    try:
+                        # Call the global function with extracted parameters
+                        tool_response = globals()[tool_name](**parameters)
+                        if verbose_mode:
+                            on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
+                        tool_found = True
+                    except Exception as e:
+                        on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
+                else:
+                    if verbose_mode:
+                        on_print(f"Trying to find plugin with function '{tool_name}'...", Fore.WHITE + Style.DIM)
+                    # Search for the tool function in plugins
+                    for plugin in plugins:
+                        if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
+                            tool_found = True
+                            if verbose_mode:
+                                on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__}", Fore.WHITE + Style.DIM)
+
+                            try:
+                                # Call the plugin's tool function with parameters
+                                tool_response = getattr(plugin, tool_name)(**parameters)
+                                if verbose_mode:
+                                    on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
+                                break
+                            except Exception as e:
+                                on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
+
+                if tool_response:
+                    # If the tool response is a string, append it to the conversation
+                    tool_role = "tool"
+                    tool_call_id = tool_call.get('id', 0)
+
+                    if not model_support_tools:
+                        tool_role = "user"
+                    if isinstance(tool_response, str):
+                        if not model_support_tools:
+                            tool_response += "\n" + find_latest_user_message(conversation)
+                        conversation.append({"role": tool_role, "content": tool_response, "tool_call_id": tool_call_id})
+                    else:
+                        # Convert the tool response to a string
+                        tool_response_str = json.dumps(tool_response, indent=4)
+                        if not model_support_tools:
+                            tool_response_str += "\n" + find_latest_user_message(conversation)
+                        conversation.append({"role": tool_role, "content": tool_response_str, "tool_call_id": tool_call_id})
+    if tool_found:
+        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True)
+    else:
+        on_print(f"Tools not found", Fore.RED)
+        return None
+    
+    return bot_response
 
 def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None):
     global no_system_role
@@ -970,6 +1092,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     global verbose_mode
     global plugins
     global alternate_model
+    global use_openai
 
     # Some models do not support the "system" role, merge the system message with the first user message
     if no_system_role and len(conversation) > 1 and conversation[0]["role"] == "system":
@@ -977,7 +1100,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         conversation = conversation[1:]
 
     if use_openai:
-        return ask_openai_with_conversation(conversation, model, temperature, prompt_template)
+        if verbose_mode:
+            on_print("Using OpenAI API for conversation generation.", Fore.WHITE + Style.DIM)
 
     if not syntax_highlighting:
         if interactive_mode and not no_bot_prompt:
@@ -992,13 +1116,27 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                 on_stdout_write("", Style.RESET_ALL)
         on_stdout_flush()
 
+    model_support_tools = True
+
+    if use_openai:
+        bot_response, bot_response_is_tool_calls = ask_openai_with_conversation(conversation, model, temperature, prompt_template, stream_active, tools)
+        if bot_response and bot_response_is_tool_calls:
+            # Convert bot_response list of objects to a list of dict
+            bot_response = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in bot_response]
+
+            if verbose_mode:
+                on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
+
+            bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
+
+        return bot_response.strip()
+
     # If tools are selected, deactivate the stream to get the full response
     if len(tools) > 0:
         stream_active = False
 
     bot_response = ""
     bot_response_is_tool_calls = False
-    model_support_tools = True
 
     try:
         stream = ollama.chat(
@@ -1079,77 +1217,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             return ""
 
     if bot_response and bot_response_is_tool_calls:
-        # Iterate over each function call in the bot response
-        tool_found = False
-        for tool_call in bot_response:
-            if not 'function' in tool_call or not 'name' in tool_call['function']:
-                continue
-
-            tool_name = tool_call['function']['name']
-            # Iterate over the available tools
-            for tool in tools:
-                if 'type' in tool and tool['type'] == 'function' and 'function' in tool and 'name' in tool['function'] and tool['function']['name'] == tool_name:
-                    # Test if tool_call['function'] as arguments
-                    if 'arguments' in tool_call:
-                        # Extract parameters for the tool function
-                        parameters = tool_call.get('arguments', {})  # Update: get parameters from the 'arguments' key
-                    else:
-                        # Call the tool function with the parameters
-                        parameters = tool_call['function'].get('arguments', {})
-
-                    tool_response = None
-
-                    # Check if the tool is a globally defined function
-                    if tool_name in globals():
-                        if verbose_mode:
-                            on_print(f"Calling tool function: {tool_name} with parameters: {parameters}", Fore.WHITE + Style.DIM)
-                        try:
-                            # Call the global function with extracted parameters
-                            tool_response = globals()[tool_name](**parameters)
-                            if verbose_mode:
-                                on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
-                            tool_found = True
-                        except Exception as e:
-                            on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
-                    else:
-                        if verbose_mode:
-                            on_print(f"Trying to find plugin with function '{tool_name}'...", Fore.WHITE + Style.DIM)
-                        # Search for the tool function in plugins
-                        for plugin in plugins:
-                            if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
-                                tool_found = True
-                                if verbose_mode:
-                                    on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__}", Fore.WHITE + Style.DIM)
-
-                                try:
-                                    # Call the plugin's tool function with parameters
-                                    tool_response = getattr(plugin, tool_name)(**parameters)
-                                    if verbose_mode:
-                                        on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
-                                    break
-                                except Exception as e:
-                                    on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
-
-                    if tool_response:
-                        # If the tool response is a string, append it to the conversation
-                        tool_role = "tool"
-                        if not model_support_tools:
-                            tool_role = "user"
-                        if isinstance(tool_response, str):
-                            if not model_support_tools:
-                                tool_response += "\n" + find_latest_user_message(conversation)
-                            conversation.append({"role": tool_role, "content": tool_response})
-                        else:
-                            # Convert the tool response to a string
-                            tool_response_str = json.dumps(tool_response, indent=4)
-                            if not model_support_tools:
-                                tool_response_str += "\n" + find_latest_user_message(conversation)
-                            conversation.append({"role": tool_role, "content": tool_response_str})
-        if tool_found:
-            bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True)
-        else:
-            on_print(f"Tools not found", Fore.RED)
-            return None
+        bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
 
     return bot_response.strip()
 
@@ -1539,15 +1607,25 @@ def run():
             return
     else:
         from openai import OpenAI
-        openai_client = OpenAI(
-            base_url="http://127.0.0.1:8080",
-            api_key="none"
-        )
+
+        # Get API key from environment variable
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            if verbose_mode:
+                on_print("No OpenAI API key found in the environment variables, calling local OpenAI API.", Fore.WHITE + Style.DIM)
+            openai_client = OpenAI(
+                base_url="http://127.0.0.1:8080",
+                api_key="none"
+            )
+        else:
+            if verbose_mode:
+                on_print("OpenAI API key found in the environment variables, redirecting to OpenAI API.", Fore.WHITE + Style.DIM)
+            openai_client = OpenAI(
+                api_key=api_key
+            )
 
         if preferred_model:
             selected_model = preferred_model
-        else:
-            selected_model = "gpt-3.5-turbo"
 
         if no_system_role:
             on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
