@@ -1561,6 +1561,8 @@ def run():
         system_prompt += f"\nYou are talking with {user_name}"
 
     if len(system_prompt) > 0:
+        if verbose_mode:
+            on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
         initial_message = {"role": "system", "content": system_prompt}
         conversation = [initial_message]
     else:
