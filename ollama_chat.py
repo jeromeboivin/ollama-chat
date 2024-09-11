@@ -1232,6 +1232,15 @@ def extract_json(garbage_str):
     
     if json_str:
         json_str = json_str.strip()
+        lines = json_str.splitlines()
+        stripped_lines = [line.strip() for line in lines if line.strip()]  # Strip blanks and ignore empty lines
+        json_str = ''.join(stripped_lines)  # Join lines into a single string
+        # Use a regular expression to find missing commas between adjacent }{, "}{" or "" 
+        json_str = re.sub(r'"\s*"', '","', json_str)  # Add comma between adjacent quotes
+        json_str = re.sub(r'"\s*{', '",{', json_str)  # Add comma between "{
+        json_str = re.sub(r'}\s*"', '},"', json_str)  # Add comma between }"
+
+
         # Attempt to load the JSON to verify it's correct
         if verbose_mode:
             on_print(f"Extracted JSON: '{json_str}'", Fore.WHITE + Style.DIM)
