@@ -992,7 +992,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
             on_print(bot_response, Fore.WHITE + Style.DIM)
 
             # Check if the completion is done based on the finish reason
-            if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter':
+            if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter' or completion.choices[0].finish_reason == 'tool_calls':
                 completion_done = True
         else:
             bot_response = ""
@@ -1006,7 +1006,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
                         bot_response += delta
                     
                     # Check if the completion is done based on the finish reason
-                    if chunk.choices[0].finish_reason == 'stop' or chunk.choices[0].finish_reason == 'function_call' or chunk.choices[0].finish_reason == 'content_filter':
+                    if chunk.choices[0].finish_reason == 'stop' or chunk.choices[0].finish_reason == 'function_call' or chunk.choices[0].finish_reason == 'content_filter' or chunk.choices[0].finish_reason == 'tool_calls':
                         completion_done = True
                         break
             except KeyboardInterrupt:
@@ -1151,6 +1151,9 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                     on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
 
                 bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
+
+                # Consider completion done
+                completion_done = True
 
         return bot_response.strip()
 
