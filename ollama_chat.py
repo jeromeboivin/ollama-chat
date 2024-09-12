@@ -1545,6 +1545,9 @@ def get_personal_info():
 
 def save_conversation_to_file(conversation, file_path):
     with open(file_path, 'w', encoding="utf8") as f:
+        # Convert conversation list of objects to a list of dict
+        conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
+
         for message in conversation:
             # Skip empty messages or system messages
             if not message["content"] or message["role"] == "system":
