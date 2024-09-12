@@ -991,7 +991,8 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
             bot_response = completion.choices[0].message.content
             on_print(bot_response, Fore.WHITE + Style.DIM)
 
-            if completion.choices[0].finish_reason == 'stop':
+            # Check if the completion is done based on the finish reason
+            if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter':
                 completion_done = True
         else:
             bot_response = ""
@@ -1004,7 +1005,8 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
                         on_stdout_flush()
                         bot_response += delta
                     
-                    if chunk.choices[0].finish_reason == 'stop':
+                    # Check if the completion is done based on the finish reason
+                    if chunk.choices[0].finish_reason == 'stop' or chunk.choices[0].finish_reason == 'function_call' or chunk.choices[0].finish_reason == 'content_filter':
                         completion_done = True
                         break
             except KeyboardInterrupt:
