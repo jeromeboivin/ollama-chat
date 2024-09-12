@@ -1413,15 +1413,14 @@ def select_openai_model_if_available(model_name):
         return None
 
     try:
-        models = openai_client.models.list()["data"]
+        models = openai_client.models.list().data
+        print(models)
     except Exception as e:
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
 
     for model in models:
-        if model["id"] == model_name:
-            selected_model = model
-
+        if model.id == model_name:
             if verbose_mode:
                 on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
             return model_name
@@ -1435,7 +1434,7 @@ def prompt_for_openai_model(default_model):
 
     # List available OpenAI models
     try:
-        models = openai_client.models.list()["data"]
+        models = openai_client.models.list().data
     except Exception as e:
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
@@ -1443,14 +1442,14 @@ def prompt_for_openai_model(default_model):
     # Display available models
     on_print("Available OpenAI models:\n", Style.RESET_ALL)
     for i, model in enumerate(models):
-        star = " *" if model['id'] == default_model else ""
-        on_stdout_write(f"{i}. {model['id']}{star}\n")
+        star = " *" if model.id == default_model else ""
+        on_stdout_write(f"{i}. {model.id}{star}\n")
     on_stdout_flush()
 
     # Default choice index for default_model
     default_choice_index = None
     for i, model in enumerate(models):
-        if model['id'] == default_model:
+        if model.id == default_model:
             default_choice_index = i
             break
 
@@ -1461,7 +1460,7 @@ def prompt_for_openai_model(default_model):
     choice = int(on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
 
     # Select the chosen model
-    selected_model = models[choice]['id']
+    selected_model = models[choice].id
 
     if verbose_mode:
         on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
@@ -1738,7 +1737,8 @@ def run():
         system_prompt = initial_system_prompt
 
     if not no_system_role and len(user_name) > 0:
-        system_prompt += f"\nYou are talking with {user_name}"
+        first_name = user_name.split()[0]
+        system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary."
 
     if len(system_prompt) > 0:
         if verbose_mode:
@@ -1924,7 +1924,8 @@ def run():
             system_prompt = chatbot["system_prompt"]
             # Initial system message
             if len(user_name) > 0:
-                system_prompt += f"\nYou are talking with {user_name}"
+                first_name = user_name.split()[0]
+                system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary."
 
             if len(system_prompt) > 0:
                 initial_message = {"role": "system", "content": system_prompt}
