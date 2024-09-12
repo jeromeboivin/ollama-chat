@@ -1417,6 +1417,9 @@ def select_openai_model_if_available(model_name):
     except Exception as e:
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
+    
+    # Remove non-chat models from the list
+    models = [model for model in models if model.id.startswith("gpt-")]
 
     for model in models:
         if model.id == model_name:
@@ -1437,6 +1440,9 @@ def prompt_for_openai_model(default_model):
     except Exception as e:
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
+    
+    # Remove non-chat models from the list
+    models = [model for model in models if model.id.startswith("gpt-")]
 
     # Display available models
     on_print("Available OpenAI models:\n", Style.RESET_ALL)
