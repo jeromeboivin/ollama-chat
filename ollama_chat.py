@@ -906,6 +906,8 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
 def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
     global openai_client
     global verbose_mode
+    global syntax_highlighting
+    global interactive_mode
 
     if prompt_template == "ChatML":
         # Modify conversation to match prompt template: ChatML
@@ -997,18 +999,24 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         else:
             bot_response = ""
             try:
+                chunk_count = 0
                 for chunk in completion:
                     delta = chunk.choices[0].delta.content
 
                     if not delta is None:
-                        on_llm_token_response(delta, Style.RESET_ALL)
-                        on_stdout_flush()
+                        if syntax_highlighting and interactive_mode:
+                            print_spinning_wheel(chunk_count)
+                        else:
+                            on_llm_token_response(delta, Style.RESET_ALL)
+                            on_stdout_flush()
                         bot_response += delta
                     
                     # Check if the completion is done based on the finish reason
                     if chunk.choices[0].finish_reason == 'stop' or chunk.choices[0].finish_reason == 'function_call' or chunk.choices[0].finish_reason == 'content_filter' or chunk.choices[0].finish_reason == 'tool_calls':
                         completion_done = True
                         break
+
+                    chunk_count += 1
             except KeyboardInterrupt:
                 completion.close()
             except Exception as e:
