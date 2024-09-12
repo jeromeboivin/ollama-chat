@@ -1550,7 +1550,7 @@ def save_conversation_to_file(conversation, file_path):
 
         for message in conversation:
             # Skip empty messages or system messages
-            if not message["content"] or message["role"] == "system":
+            if not message["content"] or message["role"] == "system" or message["role"] == "tool":
                 continue
 
             role = message["role"]
