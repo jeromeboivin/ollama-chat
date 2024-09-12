@@ -1414,7 +1414,6 @@ def select_openai_model_if_available(model_name):
 
     try:
         models = openai_client.models.list().data
-        print(models)
     except Exception as e:
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
