@@ -1405,6 +1405,68 @@ def select_ollama_model_if_available(model_name):
     on_print(f"Model {model_name} not found.", Fore.RED)
     return None
 
+def select_openai_model_if_available(model_name):
+    global verbose_mode
+    global openai_client
+
+    if not model_name:
+        return None
+
+    try:
+        models = openai_client.models.list().data
+        print(models)
+    except Exception as e:
+        on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
+        return None
+
+    for model in models:
+        if model.id == model_name:
+            if verbose_mode:
+                on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
+            return model_name
+
+    on_print(f"Model {model_name} not found.", Fore.RED)
+    return None
+
+def prompt_for_openai_model(default_model):
+    global verbose_mode
+    global openai_client
+
+    # List available OpenAI models
+    try:
+        models = openai_client.models.list().data
+    except Exception as e:
+        on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
+        return None
+
+    # Display available models
+    on_print("Available OpenAI models:\n", Style.RESET_ALL)
+    for i, model in enumerate(models):
+        star = " *" if model.id == default_model else ""
+        on_stdout_write(f"{i}. {model.id}{star}\n")
+    on_stdout_flush()
+
+    # Default choice index for default_model
+    default_choice_index = None
+    for i, model in enumerate(models):
+        if model.id == default_model:
+            default_choice_index = i
+            break
+
+    if default_choice_index is None:
+        default_choice_index = 0
+
+    # Prompt user to choose a model
+    choice = int(on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
+
+    # Select the chosen model
+    selected_model = models[choice].id
+
+    if verbose_mode:
+        on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
+
+    return selected_model
+
 def prompt_for_ollama_model(default_model):
     global no_system_role
     global verbose_mode
@@ -1445,6 +1507,14 @@ def prompt_for_ollama_model(default_model):
     if verbose_mode:
         on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
     return selected_model
+
+def prompt_for_model(default_model):
+    global use_openai
+
+    if use_openai:
+        return prompt_for_openai_model(default_model)
+    else:
+        return prompt_for_ollama_model(default_model)
 
 def get_personal_info():
     personal_info = {}
@@ -1611,23 +1681,17 @@ def run():
         document_indexer.index_documents()
 
     system_prompt = chatbot["system_prompt"]
-    use_openai = use_openai or chatbot["use_openai"]
+    use_openai = use_openai or (hasattr(chatbot, 'use_openai') and getattr(chatbot, 'use_openai'))
+    default_model = chatbot["preferred_model"]
+    if preferred_model:
+        default_model = preferred_model
 
     if not use_openai:
-        default_model = chatbot["preferred_model"]
-
-        if preferred_model:
-            default_model = preferred_model
-
-            # If default model does not contain ":", append ":latest" to the model name
-            if ":" not in default_model:
-                default_model += ":latest"
+        # If default model does not contain ":", append ":latest" to the model name
+        if ":" not in default_model:
+            default_model += ":latest"
 
         selected_model = select_ollama_model_if_available(default_model)
-        if selected_model is None:
-            selected_model = prompt_for_ollama_model(default_model)
-        if selected_model is None:
-            return
     else:
         from openai import OpenAI
 
@@ -1647,15 +1711,19 @@ def run():
                 api_key=api_key
             )
 
-        if preferred_model:
-            selected_model = preferred_model
+        selected_model = select_openai_model_if_available(default_model)
 
-        if not system_prompt:
-            if no_system_role:
-                on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
-                system_prompt = ""
-            else:
-                system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
+    if selected_model is None:
+        selected_model = prompt_for_model(default_model)
+        if selected_model is None:
+            return
+
+    if not system_prompt:
+        if no_system_role:
+            on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
+            system_prompt = ""
+        else:
+            system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
 
     user_name = get_personal_info()["user_name"]
 
@@ -1669,7 +1737,8 @@ def run():
         system_prompt = initial_system_prompt
 
     if not no_system_role and len(user_name) > 0:
-        system_prompt += f"\nYou are talking with {user_name}"
+        first_name = user_name.split()[0]
+        system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary."
 
     if len(system_prompt) > 0:
         if verbose_mode:
@@ -1798,12 +1867,12 @@ def run():
                     on_print(user_input, Fore.WHITE + Style.DIM)
 
         if user_input == "/model":
-            selected_model = prompt_for_ollama_model(default_model)
+            selected_model = prompt_for_model(default_model)
             current_model = selected_model
             continue
 
         if user_input == "/model2":
-            alternate_model = prompt_for_ollama_model(default_model)
+            alternate_model = prompt_for_model(default_model)
             continue
 
         if "/tools" in user_input:
@@ -1855,7 +1924,8 @@ def run():
             system_prompt = chatbot["system_prompt"]
             # Initial system message
             if len(user_name) > 0:
-                system_prompt += f"\nYou are talking with {user_name}"
+                first_name = user_name.split()[0]
+                system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary."
 
             if len(system_prompt) > 0:
                 initial_message = {"role": "system", "content": system_prompt}
