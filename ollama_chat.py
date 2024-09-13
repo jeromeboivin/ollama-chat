@@ -1969,7 +1969,7 @@ def run():
             _, ext = os.path.splitext(file_path)
             if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
                 try:
-                    with open(file_path, 'r') as file:
+                    with open(file_path, 'r', encoding='utf-8') as file:
                         user_input = user_input.replace("/file", "")
                         user_input += "\n" + file.read()
                 except FileNotFoundError:
