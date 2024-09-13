@@ -47,6 +47,11 @@ selected_tools = []  # Initially no tools selected
 current_model = None
 alternate_model = None
 
+other_instance_url = None
+listening_port = None
+initial_message = None
+user_prompt = None
+
 # Default ChromaDB client host and port
 chroma_client_host = "localhost"
 chroma_client_port = 8000
@@ -393,6 +398,9 @@ def select_tools(available_tools, selected_tools):
 
 def discover_plugins(plugin_folder=None):
     global verbose_mode
+    global other_instance_url
+    global listening_port
+    global user_prompt
 
     if plugin_folder is None:
         # Get the directory of the current script (main program)
@@ -415,13 +423,23 @@ def discover_plugins(plugin_folder=None):
             spec.loader.exec_module(module)
             
             for name, obj in inspect.getmembers(module):
-                if inspect.isclass(obj):
+                if inspect.isclass(obj) and "plugin" in name.lower():
                     if verbose_mode:
                         on_print(f"Discovered class: {name}", Fore.WHITE + Style.DIM)
 
                     plugin = obj()
                     if hasattr(obj, 'set_web_crawler') and callable(getattr(obj, 'set_web_crawler')):
                         plugin.set_web_crawler(SimpleWebCrawler)
+
+                    if other_instance_url and hasattr(obj, 'set_other_instance_url') and callable(getattr(obj, 'set_other_instance_url')):
+                        plugin.set_other_instance_url(other_instance_url)  # URL of the other instance to communicate with
+                    
+                    if listening_port and hasattr(obj, 'set_listening_port') and callable(getattr(obj, 'set_listening_port')):
+                        plugin.set_listening_port(listening_port)  # Port for this instance to listen on for communication with the other instance
+                    
+                    if user_prompt and hasattr(obj, 'set_initial_message') and callable(getattr(obj, 'set_initial_message')):
+                        plugin.set_initial_message(user_prompt) # Initial message to send to the other instance
+
                     plugins.append(plugin)
                     if verbose_mode:
                         on_print(f"Discovered plugin: {name}", Fore.WHITE + Style.DIM)
@@ -1612,6 +1630,9 @@ def run():
     global selected_tools
     global current_model
     global alternate_model
+    global user_prompt
+    global other_instance_url
+    global listening_port
 
     prompt_template = None
 
@@ -1639,6 +1660,9 @@ def run():
     parser.add_argument('--plugins-folder', type=str, default=None, help='Path to the plugins folder')
     parser.add_argument('--stream', type=bool, help='Use stream mode for Ollama API', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--output', type=str, help='Output file path', default=None)
+    parser.add_argument('--other-instance-url', type=str, help=f"URL of another {__name__} instance to connect to", default=None)
+    parser.add_argument('--listening-port', type=int, help=f"Listening port for the current {__name__} instance", default=8000)
+    parser.add_argument('--user-name', type=str, help='User name', default=None)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1662,6 +1686,9 @@ def run():
     user_prompt = args.prompt
     stream_active = args.stream
     output_file = args.output
+    other_instance_url = args.other_instance_url
+    listening_port = args.listening_port
+    custom_user_name = args.user_name
 
     # Get today's date
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
@@ -1753,7 +1780,7 @@ def run():
         else:
             system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
 
-    user_name = get_personal_info()["user_name"]
+    user_name = custom_user_name or get_personal_info()["user_name"]
 
     # Set the current collection
     set_current_collection(current_collection_name)
@@ -1789,7 +1816,11 @@ def run():
                 on_prompt("\nYou: ", Fore.YELLOW + Style.NORMAL)
 
             if user_prompt:
-                user_input = user_prompt
+                if other_instance_url:
+                    conversation.append({"role": "assistant", "content": user_prompt})
+                    user_input = on_user_input(user_prompt)
+                else:
+                    user_input = user_prompt
                 user_prompt = None
             else:
                 user_input = on_user_input()
@@ -1823,7 +1854,7 @@ def run():
             continue
         
         # Exit condition
-        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye']:
+        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop']:
             on_print("Goodbye!", Style.RESET_ALL)
             break
 
@@ -2034,6 +2065,11 @@ def run():
                 f.write(bot_response)
                 if verbose_mode:
                     on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
+
+        # Exit condition
+        if bot_response.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop']:
+            on_print("Goodbye!", Style.RESET_ALL)
+            break
 
         if answer_and_exit:
             break
