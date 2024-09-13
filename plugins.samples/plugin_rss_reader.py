@@ -2,7 +2,7 @@ import requests
 import os
 from xml.etree.ElementTree import XML
 
-class RssFeedLoader:
+class RssFeedLoaderPlugin:
     def __init__(self, rss_file='rss_feed.txt'):
         self.rss_file = rss_file
 
