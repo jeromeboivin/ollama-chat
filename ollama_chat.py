@@ -18,6 +18,7 @@ import json
 import datetime
 import importlib.util
 import inspect
+from datetime import date
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
@@ -604,7 +605,7 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
     # Try to search the vector database first
     set_current_collection(web_cache_collection)
     search_results = query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, answer_distance_threshold=150, query_embeddings_model=web_embedding_model)
-    if search_results:
+    if search_results and len(search_results) >= 5:
         return search_results
 
     search = DDGS()
@@ -624,8 +625,7 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
         on_print(urls, Fore.WHITE + Style.DIM)
 
     webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins)
-    # webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
-    webCrawler.crawl()
+    webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
     articles = webCrawler.get_articles()
 
     # Save articles to temporary files, before indexing them in the vector database
@@ -639,6 +639,10 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
         temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}.txt")
         with open(temp_file_path, 'w', encoding='utf-8') as f:
             f.write(article['text'])
+            additional_metadata[temp_file_path] = {'url': article['url']}
+        temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}_llm_result.txt")
+        with open(temp_file_path, 'w', encoding='utf-8') as f:
+            f.write(article['llm_result'])
             additional_metadata[temp_file_path] = {'url': article['url']}
 
     # Index the articles in the vector database
@@ -906,6 +910,8 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
 def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
     global openai_client
     global verbose_mode
+    global syntax_highlighting
+    global interactive_mode
 
     if prompt_template == "ChatML":
         # Modify conversation to match prompt template: ChatML
@@ -997,18 +1003,24 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         else:
             bot_response = ""
             try:
+                chunk_count = 0
                 for chunk in completion:
                     delta = chunk.choices[0].delta.content
 
                     if not delta is None:
-                        on_llm_token_response(delta, Style.RESET_ALL)
-                        on_stdout_flush()
+                        if syntax_highlighting and interactive_mode:
+                            print_spinning_wheel(chunk_count)
+                        else:
+                            on_llm_token_response(delta, Style.RESET_ALL)
+                            on_stdout_flush()
                         bot_response += delta
                     
                     # Check if the completion is done based on the finish reason
                     if chunk.choices[0].finish_reason == 'stop' or chunk.choices[0].finish_reason == 'function_call' or chunk.choices[0].finish_reason == 'content_filter' or chunk.choices[0].finish_reason == 'tool_calls':
                         completion_done = True
                         break
+
+                    chunk_count += 1
             except KeyboardInterrupt:
                 completion.close()
             except Exception as e:
@@ -1651,6 +1663,9 @@ def run():
     stream_active = args.stream
     output_file = args.output
 
+    # Get today's date
+    today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
+
     # If output file already exists, ask user for confirmation to overwrite
     if output_file and os.path.exists(output_file):
         if interactive_mode:
@@ -1751,7 +1766,7 @@ def run():
 
     if not no_system_role and len(user_name) > 0:
         first_name = user_name.split()[0]
-        system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary."
+        system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
 
     if len(system_prompt) > 0:
         if verbose_mode:
@@ -1938,7 +1953,7 @@ def run():
             # Initial system message
             if len(user_name) > 0:
                 first_name = user_name.split()[0]
-                system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary."
+                system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
 
             if len(system_prompt) > 0:
                 initial_message = {"role": "system", "content": system_prompt}
