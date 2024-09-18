@@ -1099,7 +1099,7 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                         if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
                             tool_found = True
                             if verbose_mode:
-                                on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__}", Fore.WHITE + Style.DIM)
+                                on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__} with arguments {parameters}", Fore.WHITE + Style.DIM)
 
                             try:
                                 # Call the plugin's tool function with parameters
@@ -1650,6 +1650,7 @@ def run():
     parser.add_argument('--verbose', type=bool, help='Enable verbose mode', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--embeddings-model', type=str, help='Sentence embeddings model to use for vector database queries', default=None)
     parser.add_argument('--system-prompt', type=str, help='System prompt message', default=None)
+    parser.add_argument('--system-prompt-placeholders-json', type=str, help='A JSON file containing a dictionary of key-value pairs to fill system prompt placeholders', default=None)
     parser.add_argument('--prompt', type=str, help='User prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default=None)
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
@@ -1676,6 +1677,7 @@ def run():
     additional_chatbots_file = args.additional_chatbots
     verbose_mode = args.verbose
     initial_system_prompt = args.system_prompt
+    system_prompt_placeholders_json = args.system_prompt_placeholders_json
     preferred_model = args.model
     conversations_folder = args.conversations_folder
     auto_save = args.auto_save
@@ -1692,6 +1694,11 @@ def run():
 
     # Get today's date
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
+
+    system_prompt_placeholders = {}
+    if os.path.exists(system_prompt_placeholders_json):
+        with open(system_prompt_placeholders_json, 'r', encoding="utf8") as f:
+            system_prompt_placeholders = json.load(f)
 
     # If output file already exists, ask user for confirmation to overwrite
     if output_file and os.path.exists(output_file):
@@ -1802,6 +1809,10 @@ def run():
         system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
 
     if len(system_prompt) > 0:
+        # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+        for key, value in system_prompt_placeholders.items():
+            system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
         if verbose_mode:
             on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
         initial_message = {"role": "system", "content": system_prompt}
@@ -1993,6 +2004,13 @@ def run():
                 system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
 
             if len(system_prompt) > 0:
+                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+                for key, value in system_prompt_placeholders.items():
+                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
+                if verbose_mode:
+                    on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
+
                 initial_message = {"role": "system", "content": system_prompt}
                 conversation = [initial_message]
             else:
