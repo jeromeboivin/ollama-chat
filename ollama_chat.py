@@ -1720,10 +1720,16 @@ def run():
 
     chatbot = None
     if args.chatbot:
+        # Trim the chatbot name to remove any leading or trailing spaces, single or double quotes
+        args.chatbot = args.chatbot.strip().strip('\'').strip('\"')
         for bot in chatbots:
             if bot["name"] == args.chatbot:
                 chatbot = bot
-        if verbose_mode:
+                break
+        if chatbot is None:
+            on_print(f"Chatbot '{args.chatbot}' not found.", Fore.RED)
+            
+        if verbose_mode and chatbot and 'name' in chatbot:
             on_print(f"Using chatbot: {chatbot['name']}", Fore.WHITE + Style.DIM)
     
     if chatbot is None:
@@ -2061,7 +2067,7 @@ def run():
         conversation.append({"role": "assistant", "content": bot_response})
 
         if output_file:
-            with open(output_file, 'w', encoding='utf-8') as f:
+            with open(output_file, 'a', encoding='utf-8') as f:
                 f.write(bot_response)
                 if verbose_mode:
                     on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
