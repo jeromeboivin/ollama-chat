@@ -1696,7 +1696,7 @@ def run():
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
 
     system_prompt_placeholders = {}
-    if os.path.exists(system_prompt_placeholders_json):
+    if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
         with open(system_prompt_placeholders_json, 'r', encoding="utf8") as f:
             system_prompt_placeholders = json.load(f)
 
@@ -1957,10 +1957,19 @@ def run():
 
         if "/save" in user_input:
             # If the user input contains /save and followed by a filename, save the conversation to that file
-            if re.search(r'/save\s+\S+', user_input):
-                file_path = re.search(r'/save\s+(\S+)', user_input).group(1)
+            file_path = user_input.split("/save")[1].strip()
+            # Remove any leading or trailing spaces, single or double quotes
+            file_path = file_path.strip().strip('\'').strip('\"')
 
-                if conversations_folder:
+            if file_path:
+                # Check if the filename contains a folder path (use os path separator to check)
+                if os.path.sep in file_path:
+                    # Get the folder path and filename
+                    folder_path, _ = os.path.split(file_path)
+                    # Create the folder if it doesn't exist
+                    if not os.path.exists(folder_path):
+                        os.makedirs(folder_path)
+                elif conversations_folder:
                     file_path = os.path.join(conversations_folder, file_path)
 
                 save_conversation_to_file(conversation, file_path)
