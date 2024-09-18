@@ -1664,6 +1664,7 @@ def run():
     parser.add_argument('--other-instance-url', type=str, help=f"URL of another {__name__} instance to connect to", default=None)
     parser.add_argument('--listening-port', type=int, help=f"Listening port for the current {__name__} instance", default=8000)
     parser.add_argument('--user-name', type=str, help='User name', default=None)
+    parser.add_argument('--anonymous', help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1691,6 +1692,7 @@ def run():
     other_instance_url = args.other_instance_url
     listening_port = args.listening_port
     custom_user_name = args.user_name
+    no_user_name = args.anonymous
 
     # Get today's date
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
@@ -1794,6 +1796,10 @@ def run():
             system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
 
     user_name = custom_user_name or get_personal_info()["user_name"]
+    if no_user_name:
+        user_name = ""
+        if verbose_mode:
+            on_print("User name not used.", Fore.WHITE + Style.DIM)
 
     # Set the current collection
     set_current_collection(current_collection_name)
@@ -1871,7 +1877,7 @@ def run():
             continue
         
         # Exit condition
-        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop']:
+        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
             on_print("Goodbye!", Style.RESET_ALL)
             break
 
@@ -2008,7 +2014,7 @@ def run():
             chatbot = prompt_for_chatbot()
             system_prompt = chatbot["system_prompt"]
             # Initial system message
-            if len(user_name) > 0:
+            if not no_system_role and len(user_name) > 0:
                 first_name = user_name.split()[0]
                 system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
 
@@ -2099,8 +2105,8 @@ def run():
                 if verbose_mode:
                     on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
 
-        # Exit condition
-        if bot_response.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop']:
+        # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
+        if re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
             on_print("Goodbye!", Style.RESET_ALL)
             break
 
