@@ -8,6 +8,7 @@ import sounddevice as sd
 
 # Download the NLTK tokenizer data for sentence splitting
 nltk.download('punkt')
+nltk.download('punkt_tab')
 
 class TextToSpeechPlugin:
     def __init__(self, *args, **kwargs):
