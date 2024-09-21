@@ -169,7 +169,7 @@ class EcoleDirecteAPI:
         self.linked_accounts = []
         self.token = None
         self.renew_token = False
-        self.base_url = f'https://api.ecoledirecte.com/v3/Eleves/{student_id}/cahierdetexte.awp'
+        self.base_url = 'https://api.ecoledirecte.com/v3'
         
         self.credentials = self.load_credentials(login, password)
         self.token = self.login()
@@ -217,7 +217,7 @@ class EcoleDirecteAPI:
         }
 
         payload = f'data={json.dumps(login_data)}'
-        login_url = 'https://api.ecoledirecte.com/v3/login.awp?v=4.60.5'
+        login_url = f'{self.base_url}/login.awp?v=4.60.5'
 
         try:
             response = requests.post(login_url, headers=self.build_headers(), data=payload)
@@ -244,7 +244,7 @@ class EcoleDirecteAPI:
 
     def renew_token_for_linked_account(self, id_login):
         """Renew the token for a linked account using idLogin."""
-        renew_url = 'https://api.ecoledirecte.com/v3/renewtoken.awp?verbe=post&v=4.60.5'
+        renew_url = f'{self.base_url}/renewtoken.awp?verbe=post&v=4.60.5'
         payload = {
             "idUser": id_login,
             "uuid": ""
@@ -303,7 +303,8 @@ class EcoleDirecteAPI:
         self.check_linked_account()
         params = {'verbe': 'get', 'v': '4.60.5'}
         try:
-            response = requests.post(self.base_url, headers=self.headers, data=self.payload, params=params)
+            url = f'{self.base_url}/Eleves/{self.student_id}/cahierdetexte.awp'
+            response = requests.post(url, headers=self.headers, data=self.payload, params=params)
             response.raise_for_status()
             # Update token from the response headers
             self.update_token_from_response(response.headers)
@@ -311,6 +312,123 @@ class EcoleDirecteAPI:
         except requests.exceptions.RequestException as e:
             print(f"An error occurred: {e}")
             return None
+
+    def get_family_id(self):
+        for account in self.linked_accounts:
+            # Check if the student_id exists in the 'eleves' array inside the 'profile' property
+            for eleve in account.get('profile', {}).get('eleves', []):
+                if str(self.student_id) == str(eleve.get('id')):  # Compare with 'id' in 'eleves'
+                    return account['id']
+
+        return None
+
+    def compute_annee_messages(self):
+        current_date = datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+
+        if current_month >= 9:  # From September to December
+            return f"{current_year}-{current_year + 1}"
+        else:  # From January to August
+            return f"{current_year - 1}-{current_year}"
+
+    def get_received_messages(self, latest_n=10):
+        """
+        Fetches the latest received messages and their details.
+        :param latest_n: Number of latest messages to retrieve.
+        :return: List of detailed message objects with decoded content.
+        """
+        self.check_linked_account()
+
+        # Fetch the list of received messages
+        url = f"{self.base_url}/familles/{self.get_family_id()}/messages.awp"
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'content-type': 'application/x-www-form-urlencoded',
+            'x-token': self.token,
+        }
+        data = {
+            "anneeMessages": self.compute_annee_messages()
+        }
+        params = {
+            'force': 'false',
+            'typeRecuperation': 'received',
+            'idClasseur': '0',
+            'orderBy': 'date',
+            'order': 'desc',
+            'query': '',
+            'onlyRead': '',
+            'page': '0',
+            'itemsPerPage': '100',
+            'getAll': '0',
+            'verbe': 'get',
+            'v': '4.60.5'
+        }
+
+        response = requests.post(url, headers=self.headers, data={"data": json.dumps(data)}, params=params)
+        response.raise_for_status()
+        # Update token from the response headers
+        self.update_token_from_response(response.headers)
+
+        if response.status_code == 200:
+            # Retrieve the latest received messages (limited by latest_n)
+            messages = response.json().get('data', {}).get('messages', {}).get('received', [])
+            message_ids = [msg['id'] for msg in messages[:latest_n]]
+            
+            # Fetch detailed information for each message
+            return self.get_message_details(message_ids)
+        else:
+            raise Exception("Failed to retrieve messages.")
+
+    def get_message_details(self, message_ids):
+        """
+        Retrieves details for each message based on the provided message_ids.
+        Decodes the content field from base64.
+        :param message_ids: List of message IDs to retrieve.
+        :return: List of detailed message objects with decoded content.
+        """
+        self.check_linked_account()
+
+        message_details = []
+        base_url = f"{self.base_url}/familles/{self.get_family_id()}/messages"
+        
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'content-type': 'application/x-www-form-urlencoded',
+            'x-token': self.token,
+        }
+
+        for message_id in message_ids:
+            try:
+                url = f"{base_url}/{message_id}.awp?verbe=get&mode=destinataire&v=4.61.0"
+                data = {
+                    "anneeMessages": self.compute_annee_messages()
+                }
+
+                response = requests.post(url, headers=self.headers, data={"data": json.dumps(data)})
+                response.raise_for_status()
+                # Update token from the response headers
+                self.update_token_from_response(response.headers)
+
+                # Parse the JSON response
+                message_data = response.json()
+
+                if message_data.get('code') == 200:
+                    detailed_message = message_data.get('data', {})
+                    # Decode base64 content if present
+                    content_encoded = detailed_message.get('content', '')
+                    if content_encoded:
+                        content_decoded = base64.b64decode(content_encoded).decode('utf-8')
+                        detailed_message['content'] = content_decoded
+                    
+                    message_details.append(detailed_message)
+                else:
+                    print(f"Failed to retrieve message {message_id}: {message_data.get('message', 'Unknown error')}")
+
+            except requests.exceptions.RequestException as e:
+                print(f"An error occurred while retrieving message {message_id}: {e}")
+        
+        return message_details
 
     def check_linked_account(self):
         if self.renew_token:
@@ -331,7 +449,7 @@ class EcoleDirecteAPI:
     def get_homework_details_for_date(self, due_date: str):
         """Fetches detailed homework for a specific due date."""
         self.check_linked_account()
-        url = f'https://api.ecoledirecte.com/v3/Eleves/{self.student_id}/cahierdetexte/{due_date}.awp'
+        url = f'{self.base_url}/Eleves/{self.student_id}/cahierdetexte/{due_date}.awp'
         params = {'verbe': 'get', 'v': '4.60.5'}
         try:
             response = requests.post(url, headers=self.headers, data=self.payload, params=params)
@@ -472,3 +590,102 @@ class EcoleDirecteHomeworkPlugin:
             due_date_obj = datetime.strptime(due_date, "%Y-%m-%d")
             return due_date_obj <= datetime.now()  # Homework is overdue if the due date is in the past
         return False
+
+class EcoleDirecteMessagesPlugin:
+    def __init__(self):
+        # Load data from ecoledirecte_2fa_data.json
+        self.load_student_data()
+
+        # Create instances of EcoleDirecteAPI for each student
+        self.api_instances = {student_id: EcoleDirecteAPI(int(student_id)) for student_id in self.students}
+
+    def load_student_data(self):
+        """
+        Loads student data from the ecoledirecte_2fa_data.json file.
+        """
+        file_path = os.path.join(os.path.dirname(__file__), 'ecoledirecte_2fa_data.json')
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            self.students = data[0]['students']  # Load the "students" section
+
+    def get_tool_definition(self):
+        """
+        Defines the plugin's available functions for retrieving messages.
+        """
+        return {
+            'type': 'function',
+            'function': {
+                'name': 'get_messages_from_ecoledirecte',
+                'description': 'Retrieve the latest messages for a specified child or for all children if no name is provided, from www.ecoledirecte.com.',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'kid_name': {
+                            'type': 'string',
+                            'description': 'The name of the kid',
+                            'enum': list(self.students.values()),  # restrict to the names loaded from JSON
+                            'optional': True  # This allows it to be omitted
+                        },
+                        'latest_n': {
+                            'type': 'integer',
+                            'description': 'The number of latest messages to retrieve (default is 10).',
+                            'default': 10,
+                            'optional': True
+                        }
+                    },
+                },
+            }
+        }
+
+    def on_user_input_done(self, user_input, verbose_mode=False):
+        return None
+
+    def get_messages_from_ecoledirecte(self, kid_name=None, latest_n=10):
+        """
+        Retrieves the latest messages for the specified child or for all students if no name is provided.
+        """
+        if kid_name is None:
+            # Fetch messages for all students
+            message_results = {name: self.get_messages_by_kid(name, latest_n) for name in self.students.values()}
+            return message_results
+        else:
+            # Fetch messages for the specified student
+            return self.get_messages_by_kid(kid_name, latest_n)
+
+    def get_messages_by_kid(self, kid_name=None, latest_n=10):
+        """
+        Retrieves the latest messages for a specified student by name.
+        """
+        for student_id, name in self.students.items():
+            if name.lower() == kid_name.lower():
+                # Fetch messages for the matched student
+                api_instance = self.api_instances[student_id]
+                response = api_instance.get_received_messages(latest_n)
+                if response:
+                    return self.parse_and_return_messages(api_instance, response)
+                else:
+                    return json.dumps(f"No message data found for {name}.")
+        return json.dumps("Invalid kid name provided.")
+
+    def parse_and_return_messages(self, api, response):
+        """
+        Parses the response data and returns a list of formatted messages.
+        """
+        message_details = api.get_message_details([msg['id'] for msg in response])
+        message_list = []
+
+        for message in message_details:
+            if message:
+                message_dict = {
+                    "subject": message.get("subject"),
+                    "content": message.get("content"),
+                    "date": message.get("date"),
+                    "sender": message.get("from", {}).get("name")
+                }
+                message_list.append(message_dict)
+
+        if message_list:
+            # Return messages as JSON string
+            return json.dumps(message_list, indent=4)
+        else:
+            return json.dumps("No recent messages found.")
