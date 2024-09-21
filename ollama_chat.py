@@ -1664,6 +1664,7 @@ def run():
     parser.add_argument('--other-instance-url', type=str, help=f"URL of another {__name__} instance to connect to", default=None)
     parser.add_argument('--listening-port', type=int, help=f"Listening port for the current {__name__} instance", default=8000)
     parser.add_argument('--user-name', type=str, help='User name', default=None)
+    parser.add_argument('--anonymous', help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1691,12 +1692,13 @@ def run():
     other_instance_url = args.other_instance_url
     listening_port = args.listening_port
     custom_user_name = args.user_name
+    no_user_name = args.anonymous
 
     # Get today's date
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
 
     system_prompt_placeholders = {}
-    if os.path.exists(system_prompt_placeholders_json):
+    if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
         with open(system_prompt_placeholders_json, 'r', encoding="utf8") as f:
             system_prompt_placeholders = json.load(f)
 
@@ -1727,10 +1729,16 @@ def run():
 
     chatbot = None
     if args.chatbot:
+        # Trim the chatbot name to remove any leading or trailing spaces, single or double quotes
+        args.chatbot = args.chatbot.strip().strip('\'').strip('\"')
         for bot in chatbots:
             if bot["name"] == args.chatbot:
                 chatbot = bot
-        if verbose_mode:
+                break
+        if chatbot is None:
+            on_print(f"Chatbot '{args.chatbot}' not found.", Fore.RED)
+            
+        if verbose_mode and chatbot and 'name' in chatbot:
             on_print(f"Using chatbot: {chatbot['name']}", Fore.WHITE + Style.DIM)
     
     if chatbot is None:
@@ -1788,6 +1796,10 @@ def run():
             system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
 
     user_name = custom_user_name or get_personal_info()["user_name"]
+    if no_user_name:
+        user_name = ""
+        if verbose_mode:
+            on_print("User name not used.", Fore.WHITE + Style.DIM)
 
     # Set the current collection
     set_current_collection(current_collection_name)
@@ -1865,7 +1877,7 @@ def run():
             continue
         
         # Exit condition
-        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop']:
+        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
             on_print("Goodbye!", Style.RESET_ALL)
             break
 
@@ -1951,10 +1963,19 @@ def run():
 
         if "/save" in user_input:
             # If the user input contains /save and followed by a filename, save the conversation to that file
-            if re.search(r'/save\s+\S+', user_input):
-                file_path = re.search(r'/save\s+(\S+)', user_input).group(1)
+            file_path = user_input.split("/save")[1].strip()
+            # Remove any leading or trailing spaces, single or double quotes
+            file_path = file_path.strip().strip('\'').strip('\"')
 
-                if conversations_folder:
+            if file_path:
+                # Check if the filename contains a folder path (use os path separator to check)
+                if os.path.sep in file_path:
+                    # Get the folder path and filename
+                    folder_path, _ = os.path.split(file_path)
+                    # Create the folder if it doesn't exist
+                    if not os.path.exists(folder_path):
+                        os.makedirs(folder_path)
+                elif conversations_folder:
                     file_path = os.path.join(conversations_folder, file_path)
 
                 save_conversation_to_file(conversation, file_path)
@@ -1993,7 +2014,7 @@ def run():
             chatbot = prompt_for_chatbot()
             system_prompt = chatbot["system_prompt"]
             # Initial system message
-            if len(user_name) > 0:
+            if not no_system_role and len(user_name) > 0:
                 first_name = user_name.split()[0]
                 system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
 
@@ -2079,13 +2100,13 @@ def run():
         conversation.append({"role": "assistant", "content": bot_response})
 
         if output_file:
-            with open(output_file, 'w', encoding='utf-8') as f:
+            with open(output_file, 'a', encoding='utf-8') as f:
                 f.write(bot_response)
                 if verbose_mode:
                     on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
 
-        # Exit condition
-        if bot_response.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop']:
+        # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
+        if re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
             on_print("Goodbye!", Style.RESET_ALL)
             break
 
