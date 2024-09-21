@@ -395,7 +395,7 @@ class EcoleDirecteHomeworkPlugin:
             'type': 'function',
             'function': {
                 'name': 'get_homework_from_ecoledirecte',
-                'description': 'Retrieve homework for a specified child or for both if no name is provided, from French web site www.ecoledirecte.com.',
+                'description': 'Retrieve homework for a specified child or for all children if no name is provided, from French web site www.ecoledirecte.com.',
                 'parameters': {
                     'type': 'object',
                     'properties': {
