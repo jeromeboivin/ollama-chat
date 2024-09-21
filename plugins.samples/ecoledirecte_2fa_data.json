@@ -1,0 +1,17 @@
+[
+    {
+        "students": {},
+        "student_ids": [],
+        "linked_accounts": [],
+        "identifiant": "",
+        "motdepasse": "",
+        "isReLogin": false,
+        "uuid": "",
+        "fa": [
+            {
+                "cn": "",
+                "cv": ""
+            }
+        ]
+    }
+]
