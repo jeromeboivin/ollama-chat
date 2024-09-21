@@ -3,6 +3,7 @@ from datetime import datetime
 import os
 import requests
 import base64
+from bs4 import BeautifulSoup
 
 '''
 For the EcoleDirecteHomeworkPlugin to work correctly, create a JSON file located in the same directory.
@@ -164,20 +165,29 @@ class Homework:
         }
 
 class EcoleDirecteAPI:
-    def __init__(self, student_id: int, login=None, password=None):
+    def __init__(self, student_id: int):
         self.student_id = student_id
         self.linked_accounts = []
         self.token = None
         self.renew_token = False
-        self.base_url = 'https://api.ecoledirecte.com/v3'
+        self.base_url = None
         
-        self.credentials = self.load_credentials(login, password)
-        self.token = self.login()
-        self.headers = self.build_headers()
+        self.credentials = None
+        self.token = None
+        self.headers = None
         self.payload = 'data={}'
         self.verbose = False
 
-    def load_credentials(self, login, password):
+    def get_base_url(self):
+        if not self.base_url:
+            self.base_url = 'https://api.ecoledirecte.com/v3'
+            self.credentials = self.load_credentials()
+            self.token = self.login()
+            self.headers = self.build_headers()
+
+        return self.base_url
+
+    def load_credentials(self):
         """Loads credentials from the ecoledirecte_2fa_data.json file or from input."""
         try:
             auth_file = 'ecoledirecte_2fa_data.json'
@@ -193,15 +203,6 @@ class EcoleDirecteAPI:
                         if str(self.student_id) in linked_account['student_ids']:
                             self.renew_token = True
                             return entry
-                # If login and password provided explicitly, use them
-                if login and password:
-                    return {
-                        "identifiant": login,
-                        "motdepasse": password,
-                        "isReLogin": False,
-                        "uuid": "",
-                        "fa": []  # Assuming you pass the FA manually or modify this
-                    }
         except FileNotFoundError:
             raise FileNotFoundError("ecoledirecte_2fa_data.json not found.")
         raise ValueError(f"Credentials for student ID {self.student_id} not found.")
@@ -244,7 +245,7 @@ class EcoleDirecteAPI:
 
     def renew_token_for_linked_account(self, id_login):
         """Renew the token for a linked account using idLogin."""
-        renew_url = f'{self.base_url}/renewtoken.awp?verbe=post&v=4.60.5'
+        renew_url = f'{self.get_base_url()}/renewtoken.awp?verbe=post&v=4.60.5'
         payload = {
             "idUser": id_login,
             "uuid": ""
@@ -300,10 +301,10 @@ class EcoleDirecteAPI:
 
     def get_homework(self):
         """Fetches the homework for the student."""
+        url = f'{self.get_base_url()}/Eleves/{self.student_id}/cahierdetexte.awp'
         self.check_linked_account()
         params = {'verbe': 'get', 'v': '4.60.5'}
         try:
-            url = f'{self.base_url}/Eleves/{self.student_id}/cahierdetexte.awp'
             response = requests.post(url, headers=self.headers, data=self.payload, params=params)
             response.raise_for_status()
             # Update token from the response headers
@@ -332,16 +333,17 @@ class EcoleDirecteAPI:
         else:  # From January to August
             return f"{current_year - 1}-{current_year}"
 
-    def get_received_messages(self, latest_n=10):
+    def get_received_messages(self, latest_n=5):
         """
         Fetches the latest received messages and their details.
         :param latest_n: Number of latest messages to retrieve.
         :return: List of detailed message objects with decoded content.
         """
+        base_url = self.get_base_url()
         self.check_linked_account()
 
         # Fetch the list of received messages
-        url = f"{self.base_url}/familles/{self.get_family_id()}/messages.awp"
+        url = f"{base_url}/familles/{self.get_family_id()}/messages.awp"
         headers = {
             'accept': 'application/json, text/plain, */*',
             'content-type': 'application/x-www-form-urlencoded',
@@ -387,10 +389,11 @@ class EcoleDirecteAPI:
         :param message_ids: List of message IDs to retrieve.
         :return: List of detailed message objects with decoded content.
         """
+        base_url = self.get_base_url()
         self.check_linked_account()
 
         message_details = []
-        base_url = f"{self.base_url}/familles/{self.get_family_id()}/messages"
+        base_url = f"{base_url}/familles/{self.get_family_id()}/messages"
         
         headers = {
             'accept': 'application/json, text/plain, */*',
@@ -419,7 +422,11 @@ class EcoleDirecteAPI:
                     content_encoded = detailed_message.get('content', '')
                     if content_encoded:
                         content_decoded = base64.b64decode(content_encoded).decode('utf-8')
-                        detailed_message['content'] = content_decoded
+                        # Convert the decoded content from HTML to raw text using BeautifulSoup
+                        soup = BeautifulSoup(content_decoded, 'html.parser')
+                        content_text = soup.get_text(strip=True)  # Get raw text, removing excessive whitespace
+
+                        detailed_message['content'] = content_text
                     
                     message_details.append(detailed_message)
                 else:
@@ -448,8 +455,8 @@ class EcoleDirecteAPI:
 
     def get_homework_details_for_date(self, due_date: str):
         """Fetches detailed homework for a specific due date."""
+        url = f'{self.get_base_url()}/Eleves/{self.student_id}/cahierdetexte/{due_date}.awp'
         self.check_linked_account()
-        url = f'{self.base_url}/Eleves/{self.student_id}/cahierdetexte/{due_date}.awp'
         params = {'verbe': 'get', 'v': '4.60.5'}
         try:
             response = requests.post(url, headers=self.headers, data=self.payload, params=params)
@@ -628,8 +635,8 @@ class EcoleDirecteMessagesPlugin:
                         },
                         'latest_n': {
                             'type': 'integer',
-                            'description': 'The number of latest messages to retrieve (default is 10).',
-                            'default': 10,
+                            'description': 'The number of latest messages to retrieve (default is 5).',
+                            'default': 5,
                             'optional': True
                         }
                     },
@@ -640,7 +647,7 @@ class EcoleDirecteMessagesPlugin:
     def on_user_input_done(self, user_input, verbose_mode=False):
         return None
 
-    def get_messages_from_ecoledirecte(self, kid_name=None, latest_n=10):
+    def get_messages_from_ecoledirecte(self, kid_name=None, latest_n=5):
         """
         Retrieves the latest messages for the specified child or for all students if no name is provided.
         """
@@ -652,7 +659,7 @@ class EcoleDirecteMessagesPlugin:
             # Fetch messages for the specified student
             return self.get_messages_by_kid(kid_name, latest_n)
 
-    def get_messages_by_kid(self, kid_name=None, latest_n=10):
+    def get_messages_by_kid(self, kid_name=None, latest_n=5):
         """
         Retrieves the latest messages for a specified student by name.
         """
@@ -662,16 +669,15 @@ class EcoleDirecteMessagesPlugin:
                 api_instance = self.api_instances[student_id]
                 response = api_instance.get_received_messages(latest_n)
                 if response:
-                    return self.parse_and_return_messages(api_instance, response)
+                    return self.parse_and_return_messages(response)
                 else:
                     return json.dumps(f"No message data found for {name}.")
         return json.dumps("Invalid kid name provided.")
 
-    def parse_and_return_messages(self, api, response):
+    def parse_and_return_messages(self, message_details):
         """
         Parses the response data and returns a list of formatted messages.
         """
-        message_details = api.get_message_details([msg['id'] for msg in response])
         message_list = []
 
         for message in message_details:
@@ -680,7 +686,9 @@ class EcoleDirecteMessagesPlugin:
                     "subject": message.get("subject"),
                     "content": message.get("content"),
                     "date": message.get("date"),
-                    "sender": message.get("from", {}).get("name")
+                    "sender": message.get("from", {}).get("name"),
+                    "read": message.get("read"),
+                    "answered": message.get("answered")
                 }
                 message_list.append(message_dict)
 
