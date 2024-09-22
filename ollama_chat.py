@@ -15,10 +15,9 @@ import re
 import os
 import sys
 import json
-import datetime
 import importlib.util
 import inspect
-from datetime import date
+from datetime import date, datetime
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
@@ -58,6 +57,7 @@ chroma_client_port = 8000
 
 custom_tools = []
 web_cache_collection_name = "web_cache"
+memory_collection_name = "memory"
 
 def on_user_input(input_prompt=None):
     for plugin in plugins:
@@ -472,6 +472,223 @@ def is_markdown(file_path):
     # If no Markdown features are found, assume it's a regular text file
     return False
 
+class MemoryManager:
+    def __init__(self, collection_name, chroma_client, selected_model, embedding_model_name, verbose=False):
+        """
+        Initialize the MemoryManager with a specific ChromaDB collection.
+
+        :param collection_name: The name of the ChromaDB collection used to store memory.
+        :param chroma_client: The ChromaDB client instance.
+        :param selected_model: The model used in ask_ollama for generating responses and embeddings.
+        :param embedding_model_name: The name of the embedding model for generating embeddings.
+        """
+        self.collection_name = collection_name
+        self.client = chroma_client
+        self.selected_model = selected_model
+        self.embedding_model_name = embedding_model_name
+        self.collection = self.client.get_or_create_collection(name=self.collection_name)
+        self.verbose = verbose
+
+    def preprocess_conversation(self, conversation):
+        """
+        Preprocess the conversation to filter out tool or function role entries, and then summarize key points.
+
+        :param conversation: The conversation array (list of role/content dictionaries).
+        :return: Summarized key points for the conversation.
+        """
+        # Filter out tool/function roles
+        filtered_conversation = [entry for entry in conversation if entry['role'] not in ['system', 'tool', 'function']]
+
+        if len(filtered_conversation) == 0:
+            return ""
+
+        # Concatenate the filtered conversation into a single input
+        user_input = "\n".join([f"{entry['role']}: {entry['content']}" for entry in filtered_conversation])
+
+        # Define an elaborated system prompt for the LLM to generate a high-quality summary
+        system_prompt = """
+        You are a memory assistant tasked with summarizing conversations for future reference. 
+        Your goal is to identify the key points, user intents, important questions, decisions made, and any personal information shared by the user.
+        Focus on gathering and summarizing:
+        - Core ideas and user questions
+        - Notable responses from the assistant or system
+        - Personal details shared by the user (e.g., family, life, location, occupation, interests)
+        - Any decisions, action points, or follow-up tasks
+
+        When capturing personal details, organize them clearly for future context (e.g., 'User mentioned living in X city' or 'User has a family with two children').
+        Avoid excessive technical details, irrelevant tool-related content, or repetition.
+
+        Conversation:
+        """
+
+        # Use the ask_ollama function to summarize key points
+        summary = ask_ollama(system_prompt, user_input, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False)
+        
+        return summary
+
+    def generate_embedding(self, text):
+        """
+        Generate embeddings for a given text using the specified embedding model.
+        
+        :param text: The input text to generate embeddings for.
+        :return: The embedding vector.
+        """
+        embedding = None
+        if self.embedding_model_name:
+            response = ollama.embeddings(
+                prompt=text,
+                model=self.embedding_model_name
+            )
+            embedding = response["embedding"]
+        return embedding
+
+    def add_memory(self, conversation, metadata=None):
+        """
+        Preprocess and store a conversation in memory by summarizing it and storing the summary.
+
+        :param conversation: The conversation array (list of role/content dictionaries).
+        :param metadata: Additional metadata to store with the memory (e.g., timestamp, user info).
+        """
+        conversation_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        # Preprocess the conversation to summarize the key points
+        summarized_conversation = self.preprocess_conversation(conversation)
+
+        if len(summarized_conversation) == 0:
+            if self.verbose:
+                on_print("Empty conversation. No memory added.", Fore.WHITE + Style.DIM)
+            return False
+        
+        # Create metadata if none is provided
+        if metadata is None:
+            # Format the metadata with a timestamp in a human-readable format (July 1, 2022, 12:00 PM)
+            timestamp = datetime.now().strftime("%B %d, %Y, %I:%M %p")
+            metadata = {'timestamp': timestamp}
+
+        # Generate an embedding for the summarized conversation
+        embedding = self.generate_embedding(summarized_conversation)
+
+        # Store the summarized conversation in the ChromaDB collection
+        self.collection.upsert(
+            documents=[summarized_conversation],
+            metadatas=[metadata],
+            ids=[conversation_id],
+            embeddings=[embedding]
+        )
+        
+        if self.verbose:
+            on_print(f"Memory for conversation {conversation_id} added. Summary: {summarized_conversation}", Fore.WHITE + Style.DIM)
+
+        return True
+
+    def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=500):
+        """
+        Retrieve the most relevant memories based on the given query.
+
+        :param query_text: The query or question for which relevant memories should be retrieved.
+        :param top_k: Number of relevant memories to retrieve.
+        :return: A list of the top-k most relevant memories.
+        """
+        # Generate an embedding for the query
+        query_embedding = self.generate_embedding(query_text)
+
+        # Query the memory collection for relevant memories
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k
+        )
+
+        documents = results["documents"][0]
+        distances = results["distances"][0]
+        metadatas = results["metadatas"][0]
+
+        # Filter the results based on the answer distance threshold
+        filtered_results = {
+            'documents': [],
+            'metadatas': []
+        }
+        for metadata, answer_distance, document in zip(metadatas, distances, documents):
+            if answer_distance_threshold > 0 and answer_distance > answer_distance_threshold:
+                continue
+
+            if self.verbose:
+                on_print(f"Answer distance: {answer_distance}", Fore.WHITE + Style.DIM)
+                on_print(f"Memory: {document}", Fore.WHITE + Style.DIM)
+                on_print(f"Metadata: {metadata}", Fore.WHITE + Style.DIM)
+
+            filtered_results['documents'].append(document)
+            filtered_results['metadatas'].append(metadata)
+        
+        return filtered_results['documents'], filtered_results['metadatas']
+
+    def handle_user_query(self, conversation, query=None):
+        """
+        Handle a user query by updating the 'system' part of the conversation with relevant memories in XML markup.
+        
+        :param conversation: The current conversation array (list of role/content dictionaries).
+        :return: Updated conversation with a modified system prompt containing memory placeholders in XML format.
+        """
+        import json
+
+        # Find the latest user input from the conversation (role 'user')
+        user_input = query
+        for entry in reversed(conversation):
+            if entry['role'] == 'user':
+                user_input = entry['content']
+                break
+
+        if not user_input:
+            raise ValueError("No user input found in the conversation")
+
+        # Retrieve relevant memories based on the current user query
+        relevant_memories, memory_metadata = self.retrieve_relevant_memory(user_input)
+
+        # Find the existing 'system' prompt in the conversation
+        system_prompt_entry = None
+        for entry in conversation:
+            if entry['role'] == 'system':
+                system_prompt_entry = entry
+                break
+
+        if system_prompt_entry:
+            # Keep the initial system prompt unchanged and remove the old memory section
+            original_system_prompt = system_prompt_entry['content']
+
+            # Define the memory section using XML-style tags
+            memory_start_tag = "<memory>"
+            memory_end_tag = "</memory>"
+            
+            # Remove any previous memory section if it exists
+            if memory_start_tag in original_system_prompt:
+                original_system_prompt = original_system_prompt.split(memory_start_tag)[0].strip()
+
+            # Format the new memory content in XML markup, including metadata serialization
+            memory_text = ""
+            for i, memory in enumerate(relevant_memories):
+                metadata_str = json.dumps(memory_metadata[i], indent=2) if i < len(memory_metadata) else "{}"
+                memory_text += f"Memory {i+1}:\n{memory}\nMetadata: {metadata_str}\n\n"
+
+            if memory_text:
+                memory_section = f"{memory_start_tag}\nIn the past we talked about...\n{memory_text.strip()}\n{memory_end_tag}"
+
+                # Update the system prompt with the new memory section
+                system_prompt_entry['content'] = f"{original_system_prompt}\n\n{memory_section}"
+
+                if self.verbose:
+                    on_print(f"System prompt updated with relevant memories:\n{system_prompt_entry['content']}", Fore.WHITE + Style.DIM)
+            else:
+                if self.verbose:
+                    on_print("No relevant memories found for the user query.", Fore.WHITE + Style.DIM)
+                system_prompt_entry['content'] = original_system_prompt
+
+        else:
+            # If no system prompt exists, raise an exception (or create one, depending on desired behavior)
+            raise ValueError("No system prompt found in the conversation")
+
+        # The conversation is now updated with relevant memories included in the system prompt.
+        return conversation, relevant_memories
+
+
 class DocumentIndexer:
     def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
         self.root_folder = root_folder
@@ -768,6 +985,7 @@ def prompt_for_chatbot():
 def prompt_for_vector_database_collection(prompt_create_new=True):
     global chroma_client
     global web_cache_collection_name
+    global memory_collection_name
 
     load_chroma_client()
 
@@ -783,7 +1001,7 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
         return on_user_input("Enter a new collection to create: ")
 
     # Filter out the web_cache_collection_name
-    filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name]
+    filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name and collection.name != memory_collection_name]
 
     if not filtered_collections:
         on_print("No collections found", Fore.RED)
@@ -1665,6 +1883,7 @@ def run():
     parser.add_argument('--listening-port', type=int, help=f"Listening port for the current {__name__} instance", default=8000)
     parser.add_argument('--user-name', type=str, help='User name', default=None)
     parser.add_argument('--anonymous', help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--memory', type=str, help='Use memory manager for context management', default=True, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1693,9 +1912,12 @@ def run():
     listening_port = args.listening_port
     custom_user_name = args.user_name
     no_user_name = args.anonymous
+    use_memory_manager = args.memory
 
     # Get today's date
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
+
+    memory_manager = None
 
     system_prompt_placeholders = {}
     if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
@@ -1832,6 +2054,14 @@ def run():
     answer_and_exit = False
     if not interactive_mode and user_prompt:
         answer_and_exit = True
+
+    if use_memory_manager:
+        load_chroma_client()
+        memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
+
+        # Use the memory manager to retrieve context from the past conversations and update the conversation system prompt
+        search_in_memory_query = f"Personal information: {user_name}"
+        memory_manager.handle_user_query(conversation, query=search_in_memory_query)
     
     while True:
         try:
@@ -1879,6 +2109,10 @@ def run():
         # Exit condition
         if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
             on_print("Goodbye!", Style.RESET_ALL)
+            if memory_manager:
+                on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
+                if memory_manager.add_memory(conversation):
+                    on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
             break
 
         if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
@@ -1951,6 +2185,10 @@ def run():
         if user_input == "/model":
             selected_model = prompt_for_model(default_model)
             current_model = selected_model
+
+            if use_memory_manager:
+                load_chroma_client()
+                memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
             continue
 
         if user_input == "/model2":
@@ -1981,7 +2219,7 @@ def run():
                 save_conversation_to_file(conversation, file_path)
             else:
                 # Save the conversation to a file, use current timestamp as the filename
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 if conversations_folder:
                     save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
@@ -1992,6 +2230,17 @@ def run():
         if "/collection" in user_input:
             collection_name = prompt_for_vector_database_collection()
             set_current_collection(collection_name)
+            continue
+
+        if memory_manager and "/memory" in user_input or "/remember" in user_input or "/memorize" in user_input:
+            on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
+            if memory_manager.add_memory(conversation):
+                on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
+            continue
+
+        if memory_manager and "/forget" in user_input:
+            # Remove memory collection
+            delete_collection(memory_collection_name)
             continue
 
         if "/rmcollection" in user_input or "/deletecollection" in user_input:
@@ -2070,6 +2319,9 @@ def run():
         else:
             conversation.append({"role": "user", "content": user_input})
 
+        if memory_manager:
+            memory_manager.handle_user_query(conversation)
+
         # Generate response
         bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active)
 
@@ -2119,7 +2371,7 @@ def run():
             getattr(plugin, "on_exit")()
     
     if auto_save:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         if conversations_folder:
             save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
