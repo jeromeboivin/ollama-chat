@@ -496,6 +496,9 @@ class MemoryManager:
         :param conversation: The conversation array (list of role/content dictionaries).
         :return: Summarized key points for the conversation.
         """
+        # Convert conversation list of objects to a list of dict
+        conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
+
         # Filter out tool/function roles
         filtered_conversation = [entry for entry in conversation if entry['role'] not in ['system', 'tool', 'function']]
 
@@ -2057,11 +2060,13 @@ def run():
 
     if use_memory_manager:
         load_chroma_client()
-        memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
 
-        # Use the memory manager to retrieve context from the past conversations and update the conversation system prompt
-        search_in_memory_query = f"Personal information: {user_name}"
-        memory_manager.handle_user_query(conversation, query=search_in_memory_query)
+        if chroma_client:
+            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
+
+            # Use the memory manager to retrieve context from the past conversations and update the conversation system prompt
+            search_in_memory_query = f"Personal information: {user_name}"
+            memory_manager.handle_user_query(conversation, query=search_in_memory_query)
     
     while True:
         try:
