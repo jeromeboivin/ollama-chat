@@ -134,6 +134,8 @@ def on_stdout_flush():
         sys.stdout.flush()
 
 def get_available_tools():
+    global custom_tools
+
     default_tools = [{
         'type': 'function',
         'function': {
@@ -592,6 +594,9 @@ class MemoryManager:
         :param top_k: Number of relevant memories to retrieve.
         :return: A list of the top-k most relevant memories.
         """
+        if self.verbose:
+            on_print(f"Retrieving relevant memories for query: {query_text}", Fore.WHITE + Style.DIM)
+
         # Generate an embedding for the query
         query_embedding = self.generate_embedding(query_text)
 
@@ -612,6 +617,8 @@ class MemoryManager:
         }
         for metadata, answer_distance, document in zip(metadatas, distances, documents):
             if answer_distance_threshold > 0 and answer_distance > answer_distance_threshold:
+                if self.verbose:
+                    on_print(f"Answer distance: {answer_distance} > {answer_distance_threshold}. Skipping memory.", Fore.WHITE + Style.DIM)
                 continue
 
             if self.verbose:
@@ -744,7 +751,13 @@ class DocumentIndexer:
         if allow_chunks:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
+        from tqdm import tqdm
+        # Progress bar for indexing
+        progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
+
         for file_path in text_files:
+            progress_bar.update(1)
+
             try:
                 content = self.read_file(file_path)
 
@@ -794,7 +807,6 @@ class DocumentIndexer:
                                 metadatas=[file_metadata],
                                 ids=[chunk_id]
                             )
-                        on_print(f"Added chunk {chunk_id} to the collection", Fore.WHITE + Style.DIM)
                 else:
                     # Embed the whole document
                     embedding = None
@@ -819,7 +831,6 @@ class DocumentIndexer:
                             metadatas=[file_metadata],
                             ids=[document_id]
                         )
-                    on_print(f"Added document {document_id} to the collection", Fore.WHITE + Style.DIM)
             except KeyboardInterrupt:
                 break
 
@@ -863,7 +874,8 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
         on_print(urls, Fore.WHITE + Style.DIM)
 
     webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins)
-    webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
+    # webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
+    webCrawler.crawl()
     articles = webCrawler.get_articles()
 
     # Save articles to temporary files, before indexing them in the vector database
@@ -878,10 +890,10 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
         with open(temp_file_path, 'w', encoding='utf-8') as f:
             f.write(article['text'])
             additional_metadata[temp_file_path] = {'url': article['url']}
-        temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}_llm_result.txt")
-        with open(temp_file_path, 'w', encoding='utf-8') as f:
-            f.write(article['llm_result'])
-            additional_metadata[temp_file_path] = {'url': article['url']}
+        #temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}_llm_result.txt")
+        #with open(temp_file_path, 'w', encoding='utf-8') as f:
+            #f.write(article['llm_result'])
+            #additional_metadata[temp_file_path] = {'url': article['url']}
 
     # Index the articles in the vector database
     document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model)
@@ -942,7 +954,7 @@ chatbots = [
         "name": "basic",
         "preferred_model": "",
         "description": "Basic chatbot",
-        "system_prompt": "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
+        "system_prompt": "You are a helpful assistant."
     }
 ]
 
@@ -2063,10 +2075,6 @@ def run():
 
         if chroma_client:
             memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
-
-            # Use the memory manager to retrieve context from the past conversations and update the conversation system prompt
-            search_in_memory_query = f"Personal information: {user_name}"
-            memory_manager.handle_user_query(conversation, query=search_in_memory_query)
     
     while True:
         try:

@@ -14,3 +14,4 @@ PyPDF2
 chardet
 langchain-text-splitters
 openai
+tqdm
