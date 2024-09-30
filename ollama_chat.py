@@ -2201,7 +2201,11 @@ def run():
 
             if use_memory_manager:
                 load_chroma_client()
-                memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
+
+                if chroma_client:
+                    memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
+                else:
+                    use_memory_manager = False
             continue
 
         if user_input == "/model2":
