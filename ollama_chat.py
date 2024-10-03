@@ -27,6 +27,7 @@ from markdownify import MarkdownConverter
 import requests
 from PyPDF2 import PdfReader
 import chardet
+from rank_bm25 import BM25Okapi
 
 use_openai = False
 no_system_role=False
@@ -58,6 +59,8 @@ chroma_client_port = 8000
 custom_tools = []
 web_cache_collection_name = "web_cache"
 memory_collection_name = "memory"
+
+stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"]
 
 def on_user_input(input_prompt=None):
     for plugin in plugins:
@@ -241,7 +244,7 @@ class MarkdownSplitter:
         return self.sections
 
 class SimpleWebCrawler:
-    def __init__(self, urls, llm_enabled=False, system_prompt='', selected_model='', temperature=0.1, verbose=False, plugins=[]):
+    def __init__(self, urls, llm_enabled=False, system_prompt='', selected_model='', temperature=0.1, verbose=False, plugins=[], num_ctx=None):
         self.urls = urls
         self.articles = []
         self.llm_enabled = llm_enabled
@@ -250,6 +253,7 @@ class SimpleWebCrawler:
         self.temperature = temperature
         self.verbose = verbose
         self.plugins = plugins
+        self.num_ctx = num_ctx
 
     def fetch_page(self, url):
         try:
@@ -306,7 +310,8 @@ class SimpleWebCrawler:
                           prompt_template=None, 
                           tools=[], 
                           no_bot_prompt=True, 
-                          stream_active=self.verbose)
+                          stream_active=self.verbose,
+                          num_ctx=self.num_ctx)
 
     def decode_content(self, content):
         # Detect encoding
@@ -475,7 +480,7 @@ def is_markdown(file_path):
     return False
 
 class MemoryManager:
-    def __init__(self, collection_name, chroma_client, selected_model, embedding_model_name, verbose=False):
+    def __init__(self, collection_name, chroma_client, selected_model, embedding_model_name, verbose=False, num_ctx=None):
         """
         Initialize the MemoryManager with a specific ChromaDB collection.
 
@@ -490,6 +495,7 @@ class MemoryManager:
         self.embedding_model_name = embedding_model_name
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self.verbose = verbose
+        self.num_ctx = num_ctx
 
     def preprocess_conversation(self, conversation):
         """
@@ -527,7 +533,7 @@ class MemoryManager:
         """
 
         # Use the ask_ollama function to summarize key points
-        summary = ask_ollama(system_prompt, user_input, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False)
+        summary = ask_ollama(system_prompt, user_input, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx)
         
         return summary
 
@@ -834,7 +840,7 @@ class DocumentIndexer:
             except KeyboardInterrupt:
                 break
 
-def web_search(query=None, n_results=3, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text"):
+def web_search(query=None, n_results=3, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
     global current_model
     global verbose_mode
     global plugins
@@ -846,7 +852,7 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
     # This can be useful for web search queries
     if verbose_mode:
         on_print("Expanding query using Ollama...", Fore.WHITE + Style.DIM)
-    expanded_query = ask_ollama("", f"Write a short passage about '{query}' in no more than 1 paragraph.", selected_model=current_model, no_bot_prompt=True, stream_active=False)
+    expanded_query = ask_ollama("", f"Write a short passage about '{query}' in no more than 1 paragraph.", selected_model=current_model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
     if verbose_mode:
         on_print("Expanded query:", Fore.WHITE + Style.DIM)
         on_print(expanded_query, Fore.WHITE + Style.DIM)
@@ -873,7 +879,7 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
         on_print("Web Search Results:", Fore.WHITE + Style.DIM)
         on_print(urls, Fore.WHITE + Style.DIM)
 
-    webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins)
+    webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins, num_ctx=num_ctx)
     # webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
     webCrawler.crawl()
     articles = webCrawler.get_articles()
@@ -1079,6 +1085,29 @@ def delete_collection(collection_name):
     except:
         on_print(f"Collection {collection_name} not found.", Fore.RED)
 
+def preprocess_text(text):
+    global stop_words
+
+    # If text is empty, return empty list
+    if not text or len(text) == 0:
+        return []
+
+    # Convert text to lowercase
+    text = text.lower()
+    # Replace punctuation with spaces, excepting dots
+    text = re.sub(r'[^\w\s.,]', ' ', text)
+    # Replace '. ' and ', ' with space
+    text = re.sub(r'\. |, ', ' ', text)
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text)
+    # Tokenize the text
+    words = text.split()
+    # Remove dot from the end of words
+    words = [word[:-1] if word.endswith('.') else word for word in words]
+    # Remove stop words
+    words = [word for word in words if word not in stop_words]
+
+    return words
 
 def query_vector_database(question, n_results=number_of_documents_to_return_from_vector_db, collection_name=current_collection_name, answer_distance_threshold=0, query_embeddings_model=None):
     global collection
@@ -1100,7 +1129,7 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
     if query_embeddings_model is None:
         result = collection.query(
             query_texts=[question],
-            n_results=n_results
+            n_results=25
         )
     else:
         # generate an embedding for the question and retrieve the most relevant doc
@@ -1110,7 +1139,7 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
         )
         result = collection.query(
             query_embeddings=[response["embedding"]],
-            n_results=n_results
+            n_results=25
         )
 
     documents = result["documents"][0]
@@ -1124,17 +1153,32 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
 
     metadatas = result["metadatas"][0]
 
+    # Preprocess and re-rank using BM25
+    preprocessed_query = preprocess_text(question)
+    preprocessed_docs = [preprocess_text(doc) for doc in documents]
+
+    # Apply BM25 re-ranking
+    bm25 = BM25Okapi(preprocessed_docs)
+    bm25_scores = bm25.get_scores(preprocessed_query)
+
+    # Get top rerank_n documents based on BM25 score
+    reranked_results = sorted(
+        enumerate(zip(metadatas, distances, documents, bm25_scores)),
+        key=lambda x: x[1][3],  # Sort by BM25 score
+        reverse=True
+    )[:n_results]
+
     # Join all possible answers into one string
     answers = []
     answer_index = 0
-    for metadata, answer_distance, document in zip(metadatas, distances, documents):
-        if answer_distance_threshold > 0 and answer_distance > answer_distance_threshold:
+    for idx, (metadata, distance, document, bm25_score) in reranked_results:
+        if answer_distance_threshold > 0 and distance > answer_distance_threshold:
             if verbose_mode:
-                on_print("Skipping answer with distance: " + str(answer_distance), Fore.WHITE + Style.DIM)
+                on_print("Skipping answer with distance: " + str(distance), Fore.WHITE + Style.DIM)
             continue
 
         if verbose_mode:
-            on_print("Answer distance: " + str(answer_distance), Fore.WHITE + Style.DIM)
+            on_print("Answer distance: " + str(distance), Fore.WHITE + Style.DIM)
         answer_index += 1
         
         # Format the answer with the title, content, and URL
@@ -1284,7 +1328,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
 
     return bot_response, bot_response_is_tool_calls, completion_done
 
-def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools):
+def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=None):
     # Iterate over each function call in the bot response
     tool_found = False
     for tool_call in bot_response:
@@ -1361,14 +1405,14 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                             tool_response_str += "\n" + find_latest_user_message(conversation)
                         conversation.append({"role": tool_role, "content": tool_response_str, "tool_call_id": tool_call_id})
     if tool_found:
-        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True)
+        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, num_ctx=num_ctx)
     else:
         on_print(f"Tools not found", Fore.RED)
         return None
     
     return bot_response
 
-def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None):
+def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None, num_ctx=None):
     global no_system_role
     global syntax_highlighting
     global interactive_mode
@@ -1413,7 +1457,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                 if verbose_mode:
                     on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
 
-                bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
+                bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=num_ctx)
 
                 # Consider completion done
                 completion_done = True
@@ -1426,18 +1470,21 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     bot_response = ""
     bot_response_is_tool_calls = False
+    ollama_options = {"temperature": temperature}
+    if num_ctx:
+        ollama_options["num_ctx"] = num_ctx
 
     try:
         stream = ollama.chat(
             model=model,
             messages=conversation,
             stream=stream_active,
-            options={"temperature": temperature},
+            options=ollama_options,
             tools=tools
         )
     except ollama.ResponseError as e:
         if "does not support tools" in str(e):
-            tool_response = generate_tool_response(find_latest_user_message(conversation), tools, model, temperature, prompt_template)
+            tool_response = generate_tool_response(find_latest_user_message(conversation), tools, model, temperature, prompt_template, num_ctx=num_ctx)
             
             if not tool_response is None and len(tool_response) > 0:
                 bot_response = tool_response
@@ -1506,13 +1553,13 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             return ""
 
     if bot_response and bot_response_is_tool_calls:
-        bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools)
+        bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=num_ctx)
 
     return bot_response.strip()
 
-def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True):
+def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, num_ctx=None):
     conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
-    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active)
+    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active, num_ctx=num_ctx)
 
 def find_latest_user_message(conversation):
     # Iterate through the conversation list in reverse order
@@ -1613,7 +1660,7 @@ def extract_json(garbage_str):
     
     return []
 
-def generate_tool_response(user_input, tools, selected_model, temperature=0.1, prompt_template=None):
+def generate_tool_response(user_input, tools, selected_model, temperature=0.1, prompt_template=None, num_ctx=None):
     """Generate a response using Ollama that suggests function calls based on the user input."""
     global verbose_mode
 
@@ -1633,7 +1680,7 @@ If no tool is relevant to answer, simply return an empty array: [].
 """
 
     # Call the existing ask_ollama function
-    tool_response = ask_ollama(system_prompt, user_input, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False)
+    tool_response = ask_ollama(system_prompt, user_input, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
 
     if verbose_mode:
         on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
@@ -1899,6 +1946,7 @@ def run():
     parser.add_argument('--user-name', type=str, help='User name', default=None)
     parser.add_argument('--anonymous', help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--memory', type=str, help='Use memory manager for context management', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--context-window', type=int, help='Ollama context window size, if not specified, the default value is used, which is 2048 tokens', default=None) 
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1928,6 +1976,10 @@ def run():
     custom_user_name = args.user_name
     no_user_name = args.anonymous
     use_memory_manager = args.memory
+    num_ctx = args.context_window
+
+    if verbose_mode and num_ctx:
+        on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
 
     # Get today's date
     today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
@@ -2074,7 +2126,7 @@ def run():
         load_chroma_client()
 
         if chroma_client:
-            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
+            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx)
     
     while True:
         try:
@@ -2184,7 +2236,7 @@ def run():
                     on_print(user_input, Fore.WHITE + Style.DIM)
         elif "/web" in user_input:
             user_input = user_input.replace("/web", "").strip()
-            web_search_response = web_search(user_input)
+            web_search_response = web_search(user_input, num_ctx=num_ctx)
             if web_search_response:
                 initial_user_input = user_input
                 user_input += "Context: " + web_search_response
@@ -2201,7 +2253,7 @@ def run():
 
             if use_memory_manager:
                 load_chroma_client()
-                memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode)
+                memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx)
             continue
 
         if user_input == "/model2":
@@ -2336,11 +2388,11 @@ def run():
             memory_manager.handle_user_query(conversation)
 
         # Generate response
-        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active)
+        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active, num_ctx=num_ctx)
 
         alternate_bot_response = None
         if alternate_model:
-            alternate_bot_response = ask_ollama_with_conversation(conversation, alternate_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN, stream_active=stream_active)
+            alternate_bot_response = ask_ollama_with_conversation(conversation, alternate_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN, stream_active=stream_active, num_ctx=num_ctx)
         
         bot_response_handled_by_plugin = False
         for plugin in plugins:
