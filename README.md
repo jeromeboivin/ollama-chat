@@ -2,13 +2,14 @@
 
 **Ollama-Chat** is a powerful, customizable Python CLI tool that interacts with local Language Models (LLMs) via `Ollama` and `Llama-Cpp` servers. Designed with flexibility and **privacy** in mind, this tool ensures that all LLMs run locally on your machine, meaning your data never leaves your environment. It also integrates seamlessly with a local or distant `ChromaDB` vector database, providing efficient Retrieval-Augmented Generation (RAG) capabilities to enhance response accuracy.
 
-The real magic of **Ollama-Chat** lies in its **extensibility**: you can build and integrate your own plugins, tailoring the tool to your specific workflows and creative projects.
+**Extensibility**: you can build and integrate your own plugins, tailoring the tool to your specific workflows and creative projects.
 
 ## Key Features
 - **Local and Private LLM Integration:** Interact with local LLMs through `Ollama` and `Llama-Cpp` for high-performance AI without sacrificing privacy—your data stays on your machine.
 - **RAG Support:** Harness Retrieval-Augmented Generation (RAG) with ChromaDB to provide more contextually relevant answers by integrating vectorized data.
 - **Custom Plugins:** Easily add custom plugins that extend the model’s capabilities, making the tool adaptable to your personal or team workflows.
 - **Web Search:** Use the `/web` command or web_search tool to search the web, chunk articles, and store them in ChromaDB for generating insightful answers.
+- **Conversation Memory:** Remembering topics discussed across all chats saves you from having to repeat information and makes future conversations more helpful.
 
 ## Why Ollama-Chat?
 Ollama-Chat is more than just another AI interface—it's a privacy-first, customizable platform built for developers who want full control over their LLM interactions. Whether you're developing new workflows, refining business strategies, or exploring creative projects, Ollama-Chat makes it easy to add custom logic and behaviors, ensuring the tool works exactly as you need it to—all while keeping your data secure.
@@ -129,6 +130,10 @@ Here's a step-by-step guide on how to use it:
 
 15. **Index a local folder to the current ChromaDB collection**: Use the `--index-documents` to specify the root folder containing text files to index.
 
+16. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
+
+17. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ### Multiline input
@@ -165,11 +170,15 @@ The Ollama client supports several special switches to enhance your interaction 
 
 10. `/save <path of saved conversation>`: Saves the conversation to a specified file path.
 
-11. `/verbose`: This command toggles verbose mode on or off.
+11. `/remember` or `/memory`: Saves summary of the conversation to memory.
 
-12. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+12. `/forget`: Erase memory content.
 
-13. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
+13. `/verbose`: This command toggles verbose mode on or off.
+
+14. `/reset`, `/clear`, `/restart`: These commands reset the conversation, clearing all previous inputs and responses.
+
+15. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
 
 Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.
 
