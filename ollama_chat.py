@@ -654,7 +654,7 @@ class MemoryManager:
                 break
 
         if not user_input:
-            raise ValueError("No user input found in the conversation")
+            return
 
         # Retrieve relevant memories based on the current user query
         relevant_memories, memory_metadata = self.retrieve_relevant_memory(user_input)
@@ -700,9 +700,6 @@ class MemoryManager:
         else:
             # If no system prompt exists, raise an exception (or create one, depending on desired behavior)
             raise ValueError("No system prompt found in the conversation")
-
-        # The conversation is now updated with relevant memories included in the system prompt.
-        return conversation, relevant_memories
 
 
 class DocumentIndexer:
@@ -1944,9 +1941,10 @@ def run():
     parser.add_argument('--other-instance-url', type=str, help=f"URL of another {__name__} instance to connect to", default=None)
     parser.add_argument('--listening-port', type=int, help=f"Listening port for the current {__name__} instance", default=8000)
     parser.add_argument('--user-name', type=str, help='User name', default=None)
-    parser.add_argument('--anonymous', help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--anonymous', type=bool, help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--memory', type=str, help='Use memory manager for context management', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--context-window', type=int, help='Ollama context window size, if not specified, the default value is used, which is 2048 tokens', default=None) 
+    parser.add_argument('--auto-start', type=bool, help="Start the conversation automatically", default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -1977,6 +1975,7 @@ def run():
     no_user_name = args.anonymous
     use_memory_manager = args.memory
     num_ctx = args.context_window
+    auto_start_conversation = args.auto_start
 
     if verbose_mode and num_ctx:
         on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
@@ -2101,7 +2100,7 @@ def run():
 
     if not no_system_role and len(user_name) > 0:
         first_name = user_name.split()[0]
-        system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
+        system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
 
     if len(system_prompt) > 0:
         # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
@@ -2129,49 +2128,52 @@ def run():
             memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx)
         else:
             use_memory_manager = False
+
+    user_input = ""
     
     while True:
-        try:
-            if interactive_mode:
-                on_prompt("\nYou: ", Fore.YELLOW + Style.NORMAL)
+        if not auto_start_conversation:
+            try:
+                if interactive_mode:
+                    on_prompt("\nYou: ", Fore.YELLOW + Style.NORMAL)
 
-            if user_prompt:
-                if other_instance_url:
-                    conversation.append({"role": "assistant", "content": user_prompt})
-                    user_input = on_user_input(user_prompt)
-                else:
-                    user_input = user_prompt
-                user_prompt = None
-            else:
-                user_input = on_user_input()
-
-            if user_input.strip().startswith('"""'):
-                multi_line_input = [user_input[3:]]  # Keep the content after the first """
-                on_stdout_write("... ")  # Prompt continuation line
-                
-                while True:
-                    line = on_user_input()
-                    if line.strip().endswith('"""') and len(line.strip()) > 3:
-                        # Handle if the line contains content before """
-                        multi_line_input.append(line[:-3])
-                        break
-                    elif line.strip().endswith('"""'):
-                        break
+                if user_prompt:
+                    if other_instance_url:
+                        conversation.append({"role": "assistant", "content": user_prompt})
+                        user_input = on_user_input(user_prompt)
                     else:
-                        multi_line_input.append(line)
-                        on_stdout_write("... ")  # Prompt continuation line
-                
-                user_input = "\n".join(multi_line_input)
-            
-        except EOFError:
-            break
-        except KeyboardInterrupt:
-            auto_save = False
-            on_print("\nGoodbye!", Style.RESET_ALL)
-            break
+                        user_input = user_prompt
+                    user_prompt = None
+                else:
+                    user_input = on_user_input()
 
-        if len(user_input.strip()) == 0:
-            continue
+                if user_input.strip().startswith('"""'):
+                    multi_line_input = [user_input[3:]]  # Keep the content after the first """
+                    on_stdout_write("... ")  # Prompt continuation line
+                    
+                    while True:
+                        line = on_user_input()
+                        if line.strip().endswith('"""') and len(line.strip()) > 3:
+                            # Handle if the line contains content before """
+                            multi_line_input.append(line[:-3])
+                            break
+                        elif line.strip().endswith('"""'):
+                            break
+                        else:
+                            multi_line_input.append(line)
+                            on_stdout_write("... ")  # Prompt continuation line
+                    
+                    user_input = "\n".join(multi_line_input)
+                
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                auto_save = False
+                on_print("\nGoodbye!", Style.RESET_ALL)
+                break
+
+            if len(user_input.strip()) == 0:
+                continue
         
         # Exit condition
         if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
@@ -2336,7 +2338,7 @@ def run():
             # Initial system message
             if not no_system_role and len(user_name) > 0:
                 first_name = user_name.split()[0]
-                system_prompt += f"\nThe user's name is {user_name}. Address him as {first_name} when necessary. {today}"
+                system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
 
             if len(system_prompt) > 0:
                 # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
@@ -2387,7 +2389,7 @@ def run():
         # Add user input to conversation history
         if image_path:
             conversation.append({"role": "user", "content": user_input, "images": [image_path]})
-        else:
+        elif len(user_input.strip()) > 0:
             conversation.append({"role": "user", "content": user_input})
 
         if memory_manager:
@@ -2421,6 +2423,9 @@ def run():
 
         # Add bot response to conversation history
         conversation.append({"role": "assistant", "content": bot_response})
+
+        if auto_start_conversation:
+            auto_start_conversation = False
 
         if output_file:
             with open(output_file, 'a', encoding='utf-8') as f:

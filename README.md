@@ -134,6 +134,8 @@ Here's a step-by-step guide on how to use it:
 
 17. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
 
+18. **Start the conversation automatically**: Use the `--auto-start` argument to start the conversation immediately without requiring user input.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ### Multiline input
