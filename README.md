@@ -350,6 +350,8 @@ Use the `--additional-chatbots` to specify the path to a JSON file containing ad
 
 4. **system_prompt**: This is the initial prompt that the chatbot uses to start a conversation. It should be a string that describes the chatbot's role and provides some context for the conversation. It can also include a list of possible prompt commands that the chatbot can use.
 
+5. **tools**: An optional array of tool names to be activated automatically for this chatbot.
+
 **Note**: special token `{possible_prompt_commands}` in the system prompt will be replaced by the possible commands automatically (see [How to Use Special Switches] section above).
 
 Here is an example of a JSON file that specifies custom chatbot personalities:
@@ -360,13 +362,15 @@ Here is an example of a JSON file that specifies custom chatbot personalities:
         "description": "Chatbot for code-related questions",
         "name": "code",
         "preferred_model": "wizardlm2:latest",
-        "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}"
+        "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}",
+        "tools": []
     },
 	{
         "description": "Ideas generator",
         "name": "Ideas generator",
         "preferred_model": "",
-        "system_prompt": "You are an idea-generating assistant. The user will provide a subject or a topic, and your task is to suggest a variety of creative, practical, or innovative ideas related to that subject. You should:\r\n\r\n- Provide a range of ideas that span from common solutions to more out-of-the-box thinking.\r\n- Ensure the ideas are useful and tailored to the specific subject given.\r\n- Offer a balance of simplicity and complexity, so users with different needs can find value.\r\n- Feel free to suggest actionable steps, project ideas, or thought-provoking concepts.\r\n- Avoid overly technical jargon unless the subject specifically calls for it.\r\n\r\nBe clear, concise, and aim to inspire creativity!"
+        "system_prompt": "You are an idea-generating assistant. The user will provide a subject or a topic, and your task is to suggest a variety of creative, practical, or innovative ideas related to that subject. You should:\r\n\r\n- Provide a range of ideas that span from common solutions to more out-of-the-box thinking.\r\n- Ensure the ideas are useful and tailored to the specific subject given.\r\n- Offer a balance of simplicity and complexity, so users with different needs can find value.\r\n- Feel free to suggest actionable steps, project ideas, or thought-provoking concepts.\r\n- Avoid overly technical jargon unless the subject specifically calls for it.\r\n\r\nBe clear, concise, and aim to inspire creativity!",
+        "tools": []
     }
 ]
 ```
