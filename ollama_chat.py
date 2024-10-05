@@ -573,7 +573,7 @@ class MemoryManager:
         # Create metadata if none is provided
         if metadata is None:
             # Format the metadata with a timestamp in a human-readable format (July 1, 2022, 12:00 PM)
-            timestamp = datetime.now().strftime("%B %d, %Y, %I:%M %p")
+            timestamp = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
             metadata = {'timestamp': timestamp}
 
         # Generate an embedding for the summarized conversation
@@ -605,6 +605,9 @@ class MemoryManager:
 
         # Generate an embedding for the query
         query_embedding = self.generate_embedding(query_text)
+
+        if query_embedding is None:
+            return [], []
 
         # Query the memory collection for relevant memories
         results = self.collection.query(
@@ -653,7 +656,7 @@ class MemoryManager:
                 user_input = entry['content']
                 break
 
-        if not user_input:
+        if not user_input or len(user_input.strip()) == 0:
             return
 
         # Retrieve relevant memories based on the current user query
@@ -1981,7 +1984,7 @@ def run():
         on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
 
     # Get today's date
-    today = f"Today's date is {date.today().strftime('%B %d, %Y')}"
+    today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
 
     memory_manager = None
 
