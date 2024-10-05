@@ -2193,6 +2193,9 @@ def run():
                 conversation = [initial_message]
             else:
                 conversation = []
+
+            auto_start_conversation = args.auto_start
+            user_input = ""
             continue
 
         for plugin in plugins:
@@ -2356,6 +2359,8 @@ def run():
             else:
                 conversation = []
             on_print("Conversation reset.", Style.RESET_ALL)
+            auto_start_conversation = args.auto_start
+            user_input = ""
             continue
 
         if "/cb" in user_input:
