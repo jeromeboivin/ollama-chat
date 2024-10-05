@@ -374,8 +374,7 @@ def select_tools(available_tools, selected_tools):
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
             status = "[X]" if tool in selected_tools else "[ ]"
-            on_stdout_write(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}\n")
-        on_stdout_flush()
+            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}\n")
 
     while True:
         display_tool_options()
@@ -401,6 +400,19 @@ def select_tools(available_tools, selected_tools):
         except ValueError:
             on_print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
 
+    return selected_tools
+
+def select_tool_by_name(available_tools, selected_tools, target_tool_name):
+    for tool in available_tools:
+        if tool['function']['name'].lower() == target_tool_name.lower():
+            if tool not in selected_tools:
+                selected_tools.append(tool)
+                on_print(f"Tool '{target_tool_name}' selected.\n")
+            else:
+                on_print(f"Tool '{target_tool_name}' is already selected.\n")
+            return selected_tools
+
+    on_print(f"Tool '{target_tool_name}' not found.\n")
     return selected_tools
 
 def discover_plugins(plugin_folder=None):
@@ -840,7 +852,7 @@ class DocumentIndexer:
             except KeyboardInterrupt:
                 break
 
-def web_search(query=None, n_results=3, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
+def web_search(query=None, n_results=5, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
     global current_model
     global verbose_mode
     global plugins
@@ -896,14 +908,9 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
         with open(temp_file_path, 'w', encoding='utf-8') as f:
             f.write(article['text'])
             additional_metadata[temp_file_path] = {'url': article['url']}
-        #temp_file_path = os.path.join(temp_folder, f"{temp_file_name}_{i}_llm_result.txt")
-        #with open(temp_file_path, 'w', encoding='utf-8') as f:
-            #f.write(article['llm_result'])
-            #additional_metadata[temp_file_path] = {'url': article['url']}
 
     # Index the articles in the vector database
     document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model)
-    print(additional_metadata)
     document_indexer.index_documents(no_chunking_confirmation=True, additional_metadata=additional_metadata)
 
     # Remove the temporary folder and its contents
@@ -913,7 +920,7 @@ def web_search(query=None, n_results=3, web_cache_collection=web_cache_collectio
     os.rmdir(temp_folder)
 
     # Search the vector database for the query
-    return query_vector_database(expanded_query, n_results=20, collection_name=web_cache_collection, query_embeddings_model=web_embedding_model)
+    return query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, query_embeddings_model=web_embedding_model)
 
 def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
@@ -961,6 +968,15 @@ chatbots = [
         "preferred_model": "",
         "description": "Basic chatbot",
         "system_prompt": "You are a helpful assistant."
+    },
+    {
+        "description": "An AI-powered search engine that answers user questions ",
+        "name": "search engine",
+        "preferred_model": "",
+        "system_prompt": "You are an AI-powered search engine that answers user questions with clear, concise, and fact-based responses. Your task is to:\n\n1. **Answer queries directly and accurately** using information sourced from the web.\n2. **Always provide citations** by referencing the web sources where you found the information.\n3. If multiple sources are used, compile the relevant data from them into a cohesive answer.\n4. Handle follow-up questions and conversational queries by remembering the context of previous queries.\n5. When presenting an answer, follow this structure:\n   - **Direct Answer**: Begin with a short, precise answer to the query.\n   - **Details**: Expand on the answer as needed, summarizing key information.\n   - **Sources**: List the web sources used to generate the answer in a simple format (e.g., \"Source: [Website Name]\").\n\n6. If no relevant information is found, politely inform the user that the query didn't yield sufficient results from the search.\n7. Use **natural language processing** to interpret user questions and respond in an informative yet conversational manner.\n8. For multi-step queries, break down the information clearly and provide follow-up guidance if needed.",
+        "tools": [
+            "web_search"
+        ]
     }
 ]
 
@@ -1268,10 +1284,6 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
     bot_response_is_tool_calls = False
     tool_calls = []
 
-    if verbose_mode:
-        on_print("OpenAI Chat Completion:", Fore.WHITE + Style.DIM)
-        on_print(completion, Fore.WHITE + Style.DIM)
-
     if hasattr(completion, 'choices') and len(completion.choices) > 0 and hasattr(completion.choices[0], 'message') and hasattr(completion.choices[0].message, 'tool_calls'):
         tool_calls = completion.choices[0].message.tool_calls
 
@@ -1290,7 +1302,9 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
     else:
         if not stream_active:
             bot_response = completion.choices[0].message.content
-            on_print(bot_response, Fore.WHITE + Style.DIM)
+
+            if verbose_mode:
+                on_print(bot_response, Fore.WHITE + Style.DIM)
 
             # Check if the completion is done based on the finish reason
             if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter' or completion.choices[0].finish_reason == 'tool_calls':
@@ -1461,8 +1475,10 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
                 # Consider completion done
                 completion_done = True
-
-        return bot_response.strip()
+        if not bot_response is None:
+            return bot_response.strip()
+        else:
+            return None
 
     # If tools are selected, deactivate the stream to get the full response
     if len(tools) > 0:
@@ -2133,6 +2149,14 @@ def run():
             use_memory_manager = False
 
     user_input = ""
+
+    if "tools" in chatbot and len(chatbot["tools"]) > 0:
+        # Append chatbot tools to selected_tools if not already in the array
+        if selected_tools is None:
+            selected_tools = []
+        
+        for tool in chatbot["tools"]:
+            selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool)
     
     while True:
         if not auto_start_conversation:
@@ -2340,6 +2364,14 @@ def run():
 
         if "/chatbot" in user_input:
             chatbot = prompt_for_chatbot()
+            if "tools" in chatbot and len(chatbot["tools"]) > 0:
+                # Append chatbot tools to selected_tools if not already in the array
+                if selected_tools is None:
+                    selected_tools = []
+                
+                for tool in chatbot["tools"]:
+                    selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool)
+
             system_prompt = chatbot["system_prompt"]
             # Initial system message
             if not no_system_role and len(user_name) > 0:
