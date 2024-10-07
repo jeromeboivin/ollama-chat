@@ -17,6 +17,7 @@ import sys
 import json
 import importlib.util
 import inspect
+import array
 from datetime import date, datetime
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
@@ -407,7 +408,9 @@ def select_tool_by_name(available_tools, selected_tools, target_tool_name):
         if tool['function']['name'].lower() == target_tool_name.lower():
             if tool not in selected_tools:
                 selected_tools.append(tool)
-                on_print(f"Tool '{target_tool_name}' selected.\n")
+
+                if verbose_mode:
+                    on_print(f"Tool '{target_tool_name}' selected.\n")
             else:
                 on_print(f"Tool '{target_tool_name}' is already selected.\n")
             return selected_tools
@@ -1401,7 +1404,7 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                             except Exception as e:
                                 on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
 
-                if tool_response:
+                if not tool_response is None:
                     # If the tool response is a string, append it to the conversation
                     tool_role = "tool"
                     tool_call_id = tool_call.get('id', 0)
@@ -1571,7 +1574,10 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     if bot_response and bot_response_is_tool_calls:
         bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=num_ctx)
 
-    return bot_response.strip()
+    if not bot_response is None:
+        return bot_response.strip()
+    else:
+        return None
 
 def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, num_ctx=None):
     conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
@@ -2474,7 +2480,7 @@ def run():
                     on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
 
         # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
-        if re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
+        if bot_response and re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
             on_print("Goodbye!", Style.RESET_ALL)
             break
 
