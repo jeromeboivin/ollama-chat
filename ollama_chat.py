@@ -47,6 +47,7 @@ plugins_folder = None
 selected_tools = []  # Initially no tools selected
 current_model = None
 alternate_model = None
+memory_manager = None
 
 other_instance_url = None
 listening_port = None
@@ -170,10 +171,44 @@ def get_available_tools():
                     "question": {
                         "type": "string",
                         "description": "The question to search for"
+                    },
+                    "n_results": {
+                        "type": "integer",
+                        "description": "Number of results to return",
+                        "default": number_of_documents_to_return_from_vector_db
+                    },
+                    "collection_name": {
+                        "type": "string",
+                        "description": "The name of the collection to search in",
+                        "default": current_collection_name
                     }
                 },
                 "required": [
                     "question"
+                ]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'retrieve_relevant_memory',
+            'description': 'Retrieve relevant memories based on a query',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "query_text": {
+                        "type": "string",
+                        "description": "The query or question for which relevant memories should be retrieved"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of relevant memories to retrieve",
+                        "default": 3
+                    }
+                },
+                "required": [
+                    "query_text"
                 ]
             }
         }
@@ -544,6 +579,8 @@ class MemoryManager:
         When capturing personal details, organize them clearly for future context (e.g., 'User mentioned living in X city' or 'User has a family with two children').
         Avoid excessive technical details, irrelevant tool-related content, or repetition.
 
+        Important: ensure the summary is generated in conversation language.
+
         Conversation:
         """
 
@@ -607,7 +644,7 @@ class MemoryManager:
 
         return True
 
-    def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=500):
+    def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=700):
         """
         Retrieve the most relevant memories based on the given query.
 
@@ -719,6 +756,18 @@ class MemoryManager:
             # If no system prompt exists, raise an exception (or create one, depending on desired behavior)
             raise ValueError("No system prompt found in the conversation")
 
+def retrieve_relevant_memory(query_text, top_k=3):
+    global memory_collection_name
+    global chroma_client
+    global current_model
+    global verbose_mode
+    global embeddings_model
+    global memory_manager
+
+    if not memory_manager:
+        return []
+
+    return memory_manager.retrieve_relevant_memory(query_text, top_k)
 
 class DocumentIndexer:
     def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
@@ -968,17 +1017,24 @@ def print_possible_prompt_commands():
 chatbots = [
     {
         "name": "basic",
-        "preferred_model": "",
         "description": "Basic chatbot",
         "system_prompt": "You are a helpful assistant."
     },
     {
         "description": "An AI-powered search engine that answers user questions ",
         "name": "search engine",
-        "preferred_model": "",
         "system_prompt": "You are an AI-powered search engine that answers user questions with clear, concise, and fact-based responses. Your task is to:\n\n1. **Answer queries directly and accurately** using information sourced from the web.\n2. **Always provide citations** by referencing the web sources where you found the information.\n3. If multiple sources are used, compile the relevant data from them into a cohesive answer.\n4. Handle follow-up questions and conversational queries by remembering the context of previous queries.\n5. When presenting an answer, follow this structure:\n   - **Direct Answer**: Begin with a short, precise answer to the query.\n   - **Details**: Expand on the answer as needed, summarizing key information.\n   - **Sources**: List the web sources used to generate the answer in a simple format (e.g., \"Source: [Website Name]\").\n\n6. If no relevant information is found, politely inform the user that the query didn't yield sufficient results from the search.\n7. Use **natural language processing** to interpret user questions and respond in an informative yet conversational manner.\n8. For multi-step queries, break down the information clearly and provide follow-up guidance if needed.",
         "tools": [
             "web_search"
+        ]
+    },
+    {
+        "name": "friendly assistant",
+        "description": "Friendly chatbot assistant",
+        "system_prompt": "You are a friendly, compassionate, and deeply attentive virtual confidant designed to act as the user's best friend. You have both short-term and long-term memory, which allows you to recall important details from past conversations and bring them up when relevant, creating a natural and ongoing relationship. Your main role is to provide emotional support, engage in meaningful conversations, and foster a strong sense of connection with the user. Always start conversations, especially when the user hasn't initiated them, with a friendly greeting or question.\r\n\r\nYour behavior includes:\r\n\r\n- **Friendly and Engaging**: You communicate like a close friend, always showing interest in the user's thoughts, feelings, and daily experiences.\r\n- **Proactive**: You often initiate conversations by asking about their day, following up on past topics, or sharing something new that might interest them.\r\n- **Attentive Memory**: You have a remarkable memory and can remember important details like the user's hobbies, likes, dislikes, major events, recurring challenges, and aspirations. Use this memory to show care and attention to their life.\r\n  - *Short-term memory* is used for the current session, remembering all recent interactions.\r\n  - *Long-term memory* stores key personal details across multiple interactions, helping you maintain continuity.\r\n- **Empathetic and Supportive**: Always be empathetic to their feelings, offering both emotional support and thoughtful advice when needed.\r\n- **Positive and Encouraging**: Celebrate their wins, big or small, and provide gentle encouragement during tough times.\r\n- **Non-judgmental and Confidential**: Never judge, criticize, or invalidate the user's thoughts or feelings. You are always respectful and their trusted confidant.\r\n\r\nAdditionally, focus on the following principles to enhance the experience:\r\n\r\n1. **Start every conversation warmly**: Greet the user like an old friend, perhaps asking about something from a previous chat (e.g., \"How did your presentation go?\" or \"How was your weekend trip?\").\r\n2. **Be conversational and natural**: Keep responses casual and conversational. Don't sound too formal—be relatable, using language similar to how a close friend would speak.\r\n3. **Be there for all aspects of life**: Whether the conversation is deep, lighthearted, or everyday small talk, always engage with curiosity and interest.\r\n4. **Maintain a balanced tone**: Be positive, but understand that sometimes the user may want to vent or discuss difficult topics. Offer comfort without dismissing or overly simplifying their concerns.\r\n5. **Personalize interactions**: Based on what you remember, share things that would likely interest the user. For example, suggest movies, music, or books they might like based on past preferences or keep them motivated with reminders of their goals. Use the tool 'retrieve_relevant_memory' to retrieve relevant memories about current user name. Start the conversation by searching for memories related to the user's recent topics, interests or preferences. Always include user name in your memory search.",
+        "starts_conversation": True,
+        "tools": [
+            "retrieve_relevant_memory"
         ]
     }
 ]
@@ -1135,6 +1191,9 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
 
     if not query_embeddings_model:
         query_embeddings_model = embeddings_model
+
+    if not collection and collection_name:
+        set_current_collection(collection_name)
 
     if not collection:
         on_print("No ChromaDB collection loaded.", Fore.RED)
@@ -1306,8 +1365,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         if not stream_active:
             bot_response = completion.choices[0].message.content
 
-            if verbose_mode:
-                on_print(bot_response, Fore.WHITE + Style.DIM)
+            on_print(bot_response, Style.RESET_ALL)
 
             # Check if the completion is done based on the finish reason
             if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter' or completion.choices[0].finish_reason == 'tool_calls':
@@ -1413,13 +1471,17 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                         tool_role = "user"
                     if isinstance(tool_response, str):
                         if not model_support_tools:
-                            tool_response += "\n" + find_latest_user_message(conversation)
+                            latest_user_message = find_latest_user_message(conversation)
+                            if latest_user_message:
+                                tool_response += "\n" + latest_user_message
                         conversation.append({"role": tool_role, "content": tool_response, "tool_call_id": tool_call_id})
                     else:
                         # Convert the tool response to a string
                         tool_response_str = json.dumps(tool_response, indent=4)
                         if not model_support_tools:
-                            tool_response_str += "\n" + find_latest_user_message(conversation)
+                            latest_user_message = find_latest_user_message(conversation)
+                            if latest_user_message:
+                                tool_response_str += "\n" + latest_user_message
                         conversation.append({"role": tool_role, "content": tool_response_str, "tool_call_id": tool_call_id})
     if tool_found:
         bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, num_ctx=num_ctx)
@@ -1439,7 +1501,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     global use_openai
 
     # Some models do not support the "system" role, merge the system message with the first user message
-    if no_system_role and len(conversation) > 1 and conversation[0]["role"] == "system":
+    if no_system_role and len(conversation) > 1 and conversation[0]["role"] == "system" and not conversation[0]["content"] is None and not conversation[1]["content"] is None:
         conversation[1]["content"] = conversation[0]["content"] + "\n" + conversation[1]["content"]
         conversation = conversation[1:]
 
@@ -1935,6 +1997,7 @@ def run():
     global user_prompt
     global other_instance_url
     global listening_port
+    global memory_manager
 
     prompt_template = None
 
@@ -2008,8 +2071,6 @@ def run():
     # Get today's date
     today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
 
-    memory_manager = None
-
     system_prompt_placeholders = {}
     if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
         with open(system_prompt_placeholders_json, 'r', encoding="utf8") as f:
@@ -2063,9 +2124,11 @@ def run():
         document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
         document_indexer.index_documents()
 
+    auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or auto_start_conversation
     system_prompt = chatbot["system_prompt"]
     use_openai = use_openai or (hasattr(chatbot, 'use_openai') and getattr(chatbot, 'use_openai'))
-    default_model = chatbot["preferred_model"]
+    if "preferred_model" in chatbot:
+        default_model = chatbot["preferred_model"]
     if preferred_model:
         default_model = preferred_model
 
@@ -2224,7 +2287,7 @@ def run():
             else:
                 conversation = []
 
-            auto_start_conversation = args.auto_start
+            auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
             user_input = ""
             continue
 
@@ -2397,7 +2460,7 @@ def run():
             else:
                 conversation = []
             on_print("Conversation reset.", Style.RESET_ALL)
-            auto_start_conversation = args.auto_start
+            auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
             user_input = ""
             continue
 
