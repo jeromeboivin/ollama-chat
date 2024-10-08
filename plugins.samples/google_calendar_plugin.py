@@ -58,13 +58,18 @@ class GoogleCalendarBase:
 
 
 class GoogleCalendarReaderPlugin(GoogleCalendarBase):
-    def get_upcoming_events(self, max_results=10):
+    def get_upcoming_events(self, max_results=10, calendarId='primary'):
         """Fetches the upcoming events from the user's primary calendar"""
         # Use timezone-aware datetime object to represent UTC time
         now = datetime.datetime.now(datetime.UTC).isoformat()
-        events_result = self.service.events().list(
-            calendarId='primary', timeMin=now, maxResults=max_results, singleEvents=True,
-            orderBy='startTime').execute()
+        try:
+            events_result = self.service.events().list(
+                calendarId=calendarId, timeMin=now, maxResults=max_results, singleEvents=True,
+                orderBy='startTime').execute()
+        except Exception as e:
+            print(f"An error occurred while fetching events: {e}")
+            return []
+
         events = events_result.get('items', [])
 
         if not events:
@@ -90,7 +95,33 @@ class GoogleCalendarReaderPlugin(GoogleCalendarBase):
                 print(f"Start Time: {event['start']}")
                 print(f"Location: {event['location']}")
                 print('-' * 30)
+    
+    def get_tool_definition(self):
+        """
+        Provide a custom tool definition for the plugin.
 
+        :return: A dictionary representing the tool definition.
+        """
+        return {
+            'type': 'function',
+            'function': {
+                'name': 'get_upcoming_events',
+                'description': 'Get upcoming events from the user\'s Google Calendar',
+                'parameters': {
+                    "type": "object",
+                    "properties": {
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of upcoming events to retrieve"
+                        },
+                        "calendarId": {
+                            "type": "string",
+                            "description": "ID of the calendar to retrieve events from (default: primary)"
+                        }
+                    }
+                }
+            }
+        }
 
 class GoogleCalendarWriterPlugin(GoogleCalendarBase):
     def add_event(self, summary, start_time, end_time, description=None, location=None):
@@ -111,6 +142,50 @@ class GoogleCalendarWriterPlugin(GoogleCalendarBase):
         
         created_event = self.service.events().insert(calendarId='primary', body=event).execute()
         return f"Event created: {created_event.get('htmlLink')}"
+    
+    def get_tool_definition(self):
+        """
+        Provide a custom tool definition for the plugin.
+
+        :return: A dictionary representing the tool definition.
+        """
+        return {
+            'type': 'function',
+            'function': {
+                'name': 'add_event',
+                'description': 'Add an event to the user\'s Google Calendar',
+                'parameters': {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Title of the event"
+                        },
+                        "start_time": {
+                            "type": "string",
+                            "description": "Start time of the event in ISO format (e.g., 2024-10-09T10:00:00Z)"
+                        },
+                        "end_time": {
+                            "type": "string",
+                            "description": "End time of the event in ISO format (e.g., 2024-10-09T11:00:00Z)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the event (optional)"
+                        },
+                        "location": {
+                            "type": "string",
+                            "description": "Location of the event (optional)"
+                        }
+                    },
+                    "required": [
+                        "summary",
+                        "start_time",
+                        "end_time"
+                    ]
+                }
+            }
+        }
 
 
 # Usage Example:
