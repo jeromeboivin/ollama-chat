@@ -1488,19 +1488,22 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         # Add assistant message to the end of the conversation
         conversation.append({"role": "assistant", "content": "### Response:\n"})
 
-    if len(tools) > 0:
-        stream_active = False
-    else:
+    if len(tools) == 0:
         tools = None
 
     completion_done = False
-    completion = openai_client.chat.completions.create(
-        messages=conversation,
-        model=selected_model,
-        stream=stream_active,
-        temperature=temperature,
-        tools=tools
-    )
+    completion = None
+    try:
+        completion = openai_client.chat.completions.create(
+            messages=conversation,
+            model=selected_model,
+            stream=stream_active,
+            temperature=temperature,
+            tools=tools
+        )
+    except Exception as e:
+        on_print(f"Error during OpenAI completion: {e}", Fore.RED)
+        return "", False, completion_done
 
     bot_response_is_tool_calls = False
     tool_calls = []
@@ -1524,6 +1527,9 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         if not stream_active:
             bot_response = completion.choices[0].message.content
 
+            if verbose_mode:
+                on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
+
             # Check if the completion is done based on the finish reason
             if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter' or completion.choices[0].finish_reason == 'tool_calls':
                 completion_done = True
@@ -1541,6 +1547,13 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
                             on_llm_token_response(delta, Style.RESET_ALL)
                             on_stdout_flush()
                         bot_response += delta
+                    elif isinstance(chunk.choices[0].delta.tool_calls, list) and len(chunk.choices[0].delta.tool_calls) > 0:
+                        if isinstance(bot_response, str) and not bot_response_is_tool_calls:
+                            bot_response = chunk.choices[0].delta.tool_calls
+                            bot_response_is_tool_calls = True
+                        elif isinstance(bot_response, list) and bot_response_is_tool_calls:
+                            for tool_call, tool_call_index in zip(chunk.choices[0].delta.tool_calls, range(len(chunk.choices[0].delta.tool_calls))):
+                                bot_response[tool_call_index].function.arguments += tool_call.function.arguments
                     
                     # Check if the completion is done based on the finish reason
                     if chunk.choices[0].finish_reason == 'stop' or chunk.choices[0].finish_reason == 'function_call' or chunk.choices[0].finish_reason == 'content_filter' or chunk.choices[0].finish_reason == 'tool_calls':
@@ -1548,6 +1561,10 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
                         break
 
                     chunk_count += 1
+
+                if bot_response_is_tool_calls:
+                    conversation.append({"role": "assistant", "tool_calls": bot_response})
+
             except KeyboardInterrupt:
                 completion.close()
             except Exception as e:
@@ -1560,7 +1577,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
 
     return bot_response, bot_response_is_tool_calls, completion_done
 
-def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=None):
+def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=None):
     # Iterate over each function call in the bot response
     tool_found = False
     for tool_call in bot_response:
@@ -1641,7 +1658,7 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                                 tool_response_str += "\n" + latest_user_message
                         conversation.append({"role": tool_role, "content": tool_response_str, "tool_call_id": tool_call_id})
     if tool_found:
-        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, num_ctx=num_ctx)
+        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, stream_active=stream_active, num_ctx=num_ctx)
     else:
         on_print(f"Tools not found", Fore.RED)
         return None
@@ -1693,7 +1710,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                 if verbose_mode:
                     on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
 
-                bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=num_ctx)
+                bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
                 # Consider completion done
                 completion_done = True
@@ -1791,7 +1808,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             return ""
 
     if bot_response and bot_response_is_tool_calls:
-        bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, num_ctx=num_ctx)
+        bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
     if not bot_response is None:
         return bot_response.strip()

@@ -141,18 +141,8 @@ class SpeechToTextPlugin:
         """Calculate the root mean square (RMS) level of the audio data."""
         return np.sqrt(np.mean(np.square(audio_data)))
 
-    def stop_generation(self):
+    def on_exit(self):
         """Method to stop audio capture."""
         self.listening = False
         if self.audio_capture_thread is not None:
             self.audio_capture_thread.join()
-            print("Audio capture stopped.")
-
-# Example of how to use the plugin
-if __name__ == "__main__":
-    plugin = SpeechToTextPlugin()
-    # Call on_user_input when you want to transcribe audio
-    while True:
-        input_prompt = input("Press Enter to transcribe speech...")
-        transcribed_text = plugin.on_user_input(input_prompt)
-        print(f"Transcribed Text: {transcribed_text}")
