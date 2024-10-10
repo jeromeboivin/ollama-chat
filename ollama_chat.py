@@ -1719,10 +1719,6 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         else:
             return None
 
-    # If tools are selected, deactivate the stream to get the full response
-    if len(tools) > 0:
-        stream_active = False
-
     bot_response = ""
     bot_response_is_tool_calls = False
     ollama_options = {"temperature": temperature}
@@ -1733,7 +1729,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         stream = ollama.chat(
             model=model,
             messages=conversation,
-            stream=stream_active,
+            # If tools are selected, deactivate the stream to get the full response (Ollama API limitation)
+            stream=False if len(tools) > 0 else stream_active,
             options=ollama_options,
             tools=tools
         )
@@ -1753,7 +1750,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     if not bot_response_is_tool_calls:
         try:
-            if stream_active:
+            if stream_active and len(tools) == 0:
                 if alternate_model:
                     on_print(f"Response from model: {model}\n")
                 chunk_count = 0
