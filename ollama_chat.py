@@ -2190,6 +2190,7 @@ def run():
     parser.add_argument('--memory', type=str, help='Use memory manager for context management', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--context-window', type=int, help='Ollama context window size, if not specified, the default value is used, which is 2048 tokens', default=None) 
     parser.add_argument('--auto-start', type=bool, help="Start the conversation automatically", default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--tools', type=str, help="List of tools to activate and use in the conversation, separated by commas", default=None)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -2391,6 +2392,12 @@ def run():
         for tool in chatbot["tools"]:
             selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool)
     
+    selected_tool_names = args.tools.split(',') if args.tools else []
+    for tool_name in selected_tool_names:
+        # Strip any leading or trailing spaces, single or double quotes
+        tool_name = tool_name.strip().strip('\'').strip('\"')
+        selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool_name)
+
     while True:
         if not auto_start_conversation:
             try:
