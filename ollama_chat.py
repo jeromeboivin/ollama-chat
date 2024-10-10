@@ -647,7 +647,13 @@ class MemoryManager:
         if self.verbose:
             on_print(f"Memory for conversation {conversation_id} added. Summary: {summarized_conversation}", Fore.WHITE + Style.DIM)
 
-        self.long_term_memory_manager.process_conversation(os.getlogin(), conversation)
+        user_id = "anonymous"
+        try:
+            user_id = os.getlogin()
+        except:
+            user_id = os.environ['USER']
+
+        self.long_term_memory_manager.process_conversation(user_id, conversation)
 
         if self.verbose:
             on_print(f"Long-term memory updated.", Fore.WHITE + Style.DIM)
@@ -801,12 +807,13 @@ class LongTermMemoryManager:
         if user_id not in self.memory["users"]:
             self.memory["users"][user_id] = {}
 
-        # Update the user's memory with new info
-        for key, value in new_info.items():
-            self.memory["users"][user_id][key] = value
+        if isinstance(new_info, dict):
+            # Update the user's memory with new info
+            for key, value in new_info.items():
+                self.memory["users"][user_id][key] = value
 
-        # Save the updated memory back to the JSON file
-        self._save_memory()
+            # Save the updated memory back to the JSON file
+            self._save_memory()
 
     def process_conversation(self, user_id, conversation):
         """
@@ -833,7 +840,7 @@ class LongTermMemoryManager:
         # Step 2: Check for contradictions with existing memory
         existing_memory = self.memory["users"].get(user_id, {})
         system_prompt_conflict = self._get_conflict_check_prompt(existing_memory, conversation_str)
-        conflicting_info = ask_ollama(system_prompt_conflict, conversation_str, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx)
+        conflicting_info = extract_json(ask_ollama(system_prompt_conflict, conversation_str, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx))
 
         # Remove conflicting info from memory if flagged by GPT
         if conflicting_info:
@@ -901,11 +908,12 @@ class LongTermMemoryManager:
 
     def _remove_conflicting_info(self, user_id, conflicting_keys):
         """Removes conflicting keys from the user's memory."""
-        if user_id in self.memory["users"]:
-            for key in conflicting_keys:
-                if key in self.memory["users"][user_id]:
-                    del self.memory["users"][user_id][key]
-            self._save_memory()
+        if isinstance(conflicting_keys, dict):
+            if user_id in self.memory["users"]:
+                for key in conflicting_keys:
+                    if key in self.memory["users"][user_id]:
+                        del self.memory["users"][user_id][key]
+                self._save_memory()
 
 def retrieve_relevant_memory(query_text, top_k=3):
     global memory_collection_name
@@ -1515,8 +1523,6 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
     else:
         if not stream_active:
             bot_response = completion.choices[0].message.content
-
-            on_print(bot_response, Style.RESET_ALL)
 
             # Check if the completion is done based on the finish reason
             if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter' or completion.choices[0].finish_reason == 'tool_calls':
@@ -2436,6 +2442,7 @@ def run():
                 on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
                 if memory_manager.add_memory(conversation):
                     on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
+                    on_print("", Style.RESET_ALL)
             break
 
         if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
@@ -2566,6 +2573,7 @@ def run():
             on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
             if memory_manager.add_memory(conversation):
                 on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
+                on_print("", Style.RESET_ALL)
             continue
 
         if memory_manager and "/forget" in user_input:
