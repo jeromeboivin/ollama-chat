@@ -2372,7 +2372,7 @@ def run():
         else:
             use_memory_manager = False
 
-    if initial_message:
+    if initial_message and verbose_mode:
         on_print("System prompt: " + initial_message["content"], Fore.WHITE + Style.DIM)
 
     user_input = ""
