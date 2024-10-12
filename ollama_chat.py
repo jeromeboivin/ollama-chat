@@ -40,7 +40,7 @@ openai_client = None
 chroma_client = None
 current_collection_name = None
 collection = None
-number_of_documents_to_return_from_vector_db = 20
+number_of_documents_to_return_from_vector_db = 5
 temperature = 0.1
 verbose_mode = False
 embeddings_model = None
@@ -174,17 +174,16 @@ def get_available_tools():
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "The question to search for"
-                    },
-                    "n_results": {
-                        "type": "integer",
-                        "description": "Number of results to return",
-                        "default": number_of_documents_to_return_from_vector_db
+                        "description": "The question to search for, in a human-readable format, e.g., 'What is the capital of France?'"
                     },
                     "collection_name": {
                         "type": "string",
                         "description": "The name of the collection to search in",
                         "default": current_collection_name
+                    },
+                    "question_context": {
+                        "type": "string",
+                        "description": "Additional context for the question, based on the user profile or current conversation topic"
                     }
                 },
                 "required": [
@@ -568,8 +567,8 @@ class MemoryManager:
         if len(filtered_conversation) == 0:
             return ""
 
-        # Concatenate the filtered conversation into a single input
-        user_input = "\n".join([f"{entry['role']}: {entry['content']}" for entry in filtered_conversation])
+        # Concatenate the filtered conversation into a single input (make sure entries contain 'role' and 'content' keys)
+        user_input = "\n".join([f"{entry['role']}: {entry['content']}" for entry in filtered_conversation if 'role' in entry and 'content' in entry])
 
         # Define an elaborated system prompt for the LLM to generate a high-quality summary
         system_prompt = """
@@ -828,7 +827,7 @@ class LongTermMemoryManager:
         filtered_conversation = [entry for entry in conversation if entry['role'] not in ['system', 'tool', 'function']]
 
         # Convert conversation array into a string for GPT prompt
-        conversation_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in filtered_conversation])
+        conversation_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in filtered_conversation if 'role' in msg and 'content' in msg])
 
         # Step 1: Extract key-value information
         system_prompt_extract = self._get_extraction_prompt()
@@ -1082,7 +1081,7 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
     
     # Try to search the vector database first
     set_current_collection(web_cache_collection)
-    search_results = query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, answer_distance_threshold=150, query_embeddings_model=web_embedding_model)
+    search_results = query_vector_database(expanded_query, collection_name=web_cache_collection, n_results=10, answer_distance_threshold=150, query_embeddings_model=web_embedding_model)
     if search_results and len(search_results) >= 5:
         return search_results
 
@@ -1131,7 +1130,7 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
     os.rmdir(temp_folder)
 
     # Search the vector database for the query
-    return query_vector_database(expanded_query, n_results=10, collection_name=web_cache_collection, query_embeddings_model=web_embedding_model)
+    return query_vector_database(expanded_query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
 
 def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
@@ -1343,10 +1342,41 @@ def preprocess_text(text):
 
     return words
 
-def query_vector_database(question, n_results=number_of_documents_to_return_from_vector_db, collection_name=current_collection_name, answer_distance_threshold=0, query_embeddings_model=None):
+def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None):
     global collection
     global verbose_mode
     global embeddings_model
+    global current_model
+
+    # If question is empty, return empty string
+    if not question or len(question) == 0:
+        return ""
+
+    # If n_results is a string, convert it to an integer
+    if isinstance(n_results, str):
+        try:
+            n_results = int(n_results)
+        except:
+            n_results = number_of_documents_to_return_from_vector_db
+
+    # If n_results is 0, return empty string
+    if n_results == 0:
+        return ""
+    
+    # If n_results is negative, set it to the default value
+    if n_results < 0:
+        n_results = number_of_documents_to_return_from_vector_db
+
+    # If answer_distance_threshold is a string, convert it to a float
+    if isinstance(answer_distance_threshold, str):
+        try:
+            answer_distance_threshold = float(answer_distance_threshold)
+        except:
+            answer_distance_threshold = 0
+
+    # If answer_distance_threshold is negative, set it to 0
+    if answer_distance_threshold < 0:
+        answer_distance_threshold = 0
 
     if not query_embeddings_model:
         query_embeddings_model = embeddings_model
@@ -1362,6 +1392,19 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
 
     if collection_name and collection_name != current_collection_name:
         set_current_collection(collection_name)
+
+    if expand_query:
+        # Expand the query for better retrieval
+        system_prompt = "You are an assistant that helps expand and clarify user questions to improve information retrieval. When a user provides a question, your task is to write a short passage that elaborates on the query by adding relevant background information, inferred details, and related concepts that can help with retrieval. The passage should remain concise and focused, without changing the original meaning of the question.\r\nGuidelines:\r\n1. Expand the question briefly by including additional context or background, staying relevant to the user's original intent.\r\n2. Incorporate inferred details or related concepts that help clarify or broaden the query in a way that aids retrieval.\r\n3. Keep the passage short, usually no more than 2-3 sentences, while maintaining clarity and depth.\r\n4. Avoid introducing unrelated or overly specific topics. Keep the expansion concise and to the point."
+        if question_context:
+            system_prompt += f"\n\nAdditional context about the user query:\n{question_context}"
+
+        response = ask_ollama(system_prompt, question, selected_model=current_model, no_bot_prompt=True, stream_active=False)
+        if response:
+            question += "\n" + response
+            if verbose_mode:
+                on_print("Expanded query:", Fore.WHITE + Style.DIM)
+                on_print(question, Fore.WHITE + Style.DIM)
     
     if query_embeddings_model is None:
         result = collection.query(
@@ -1433,9 +1476,6 @@ def query_vector_database(question, n_results=number_of_documents_to_return_from
             formatted_answer += "\nFile Path: " + filePath
 
         answers.append(formatted_answer.strip())
-
-    # Reverse the order of the answers, so the most relevant answer is at the end
-    answers.reverse()
 
     return '\n\n'.join(answers)
 
@@ -2113,11 +2153,10 @@ def save_conversation_to_file(conversation, file_path):
         # Convert conversation list of objects to a list of dict
         conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
 
-        for message in conversation:
-            # Skip empty messages or system messages
-            if not message["content"] or message["role"] == "system" or message["role"] == "tool":
-                continue
+        # Skip empty messages or system messages
+        filtered_conversation = [entry for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"]
 
+        for message in filtered_conversation:
             role = message["role"]
 
             if role == "user":
@@ -2512,7 +2551,7 @@ def run():
                 user_input = user_input.replace("/search", "").strip()
                 n_docs_to_return = number_of_documents_to_return_from_vector_db
 
-            answer_from_vector_db = query_vector_database(user_input, n_docs_to_return, collection_name=current_collection_name)
+            answer_from_vector_db = query_vector_database(user_input, collection_name=current_collection_name, n_results=n_docs_to_return)
             if answer_from_vector_db:
                 initial_user_input = user_input
                 user_input = "Question: " + initial_user_input
