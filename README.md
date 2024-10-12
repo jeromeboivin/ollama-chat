@@ -346,9 +346,9 @@ The image was likely taken in a canal or waterway, possibly in Venice, Italy. Th
 
 Use the `--additional-chatbots` to specify the path to a JSON file containing additional pre-defined chatbots. This JSON file has to be an array of objects specifying these chatbots properties:
 
-1. **description**: This is a brief explanation of the chatbot's purpose. It should be a string that describes what the chatbot is designed to do.
+1. **name**: This is the name of the chatbot. It should be a string that uniquely identifies the chatbot.
 
-2. **name**: This is the name of the chatbot. It should be a string that uniquely identifies the chatbot.
+2. **description**: This is a brief explanation of the chatbot's purpose. It should be a string that describes what the chatbot is designed to do.
 
 3. **preferred_model**: This is the model that the chatbot uses to generate responses. It should be a string that specifies the Ollama or OpenAI model's name.
 
