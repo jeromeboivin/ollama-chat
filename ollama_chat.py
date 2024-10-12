@@ -65,6 +65,7 @@ chroma_client_port = 8000
 custom_tools = []
 web_cache_collection_name = "web_cache"
 memory_collection_name = "memory"
+long_term_memory_file = "long_term_memory.json"
 
 stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"]
 
@@ -533,7 +534,7 @@ def is_markdown(file_path):
     return False
 
 class MemoryManager:
-    def __init__(self, collection_name, chroma_client, selected_model, embedding_model_name, verbose=False, num_ctx=None):
+    def __init__(self, collection_name, chroma_client, selected_model, embedding_model_name, verbose=False, num_ctx=None, long_term_memory_file="long_term_memory.json"):
         """
         Initialize the MemoryManager with a specific ChromaDB collection.
 
@@ -549,7 +550,7 @@ class MemoryManager:
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self.verbose = verbose
         self.num_ctx = num_ctx
-        self.long_term_memory_manager = LongTermMemoryManager(selected_model, verbose, num_ctx)
+        self.long_term_memory_manager = LongTermMemoryManager(selected_model, verbose, num_ctx, memory_file=long_term_memory_file)
 
     def preprocess_conversation(self, conversation):
         """
@@ -1069,21 +1070,6 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
 
     if not query:
         return ""
-    
-    # Ask Ollama to write a short passage about the query in order to expand the context
-    # This can be useful for web search queries
-    if verbose_mode:
-        on_print("Expanding query using Ollama...", Fore.WHITE + Style.DIM)
-    expanded_query = ask_ollama("", f"Write a short passage about '{query}' in no more than 1 paragraph.", selected_model=current_model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
-    if verbose_mode:
-        on_print("Expanded query:", Fore.WHITE + Style.DIM)
-        on_print(expanded_query, Fore.WHITE + Style.DIM)
-    
-    # Try to search the vector database first
-    set_current_collection(web_cache_collection)
-    search_results = query_vector_database(expanded_query, collection_name=web_cache_collection, n_results=10, answer_distance_threshold=150, query_embeddings_model=web_embedding_model)
-    if search_results and len(search_results) >= 5:
-        return search_results
 
     search = DDGS()
     urls = []
@@ -1130,7 +1116,7 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
     os.rmdir(temp_folder)
 
     # Search the vector database for the query
-    return query_vector_database(expanded_query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
+    return query_vector_database(query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
 
 def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
@@ -2187,6 +2173,8 @@ def load_chroma_client():
 
 def run():
     global current_collection_name
+    global memory_collection_name
+    global long_term_memory_file
     global collection
     global chroma_client
     global openai_client
@@ -2244,6 +2232,8 @@ def run():
     parser.add_argument('--context-window', type=int, help='Ollama context window size, if not specified, the default value is used, which is 2048 tokens', default=None) 
     parser.add_argument('--auto-start', type=bool, help="Start the conversation automatically", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tools', type=str, help="List of tools to activate and use in the conversation, separated by commas", default=None)
+    parser.add_argument('--memory-collection-name', type=str, help="Name of the memory collection to use for context management", default=memory_collection_name)
+    parser.add_argument('--long-term-memory-file', type=str, help="Long-term memory file name", default=long_term_memory_file)
     args = parser.parse_args()
 
     preferred_collection_name = args.collection
@@ -2275,6 +2265,8 @@ def run():
     use_memory_manager = args.memory
     num_ctx = args.context_window
     auto_start_conversation = args.auto_start
+    memory_collection_name = args.memory_collection_name
+    long_term_memory_file = args.long_term_memory_file
 
     if verbose_mode and num_ctx:
         on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
@@ -2422,7 +2414,7 @@ def run():
         load_chroma_client()
 
         if chroma_client:
-            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx)
+            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
 
             if initial_message:
                 # Add long-term memory to the system prompt
@@ -2583,7 +2575,7 @@ def run():
                 load_chroma_client()
 
                 if chroma_client:
-                    memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx)
+                    memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
                 else:
                     use_memory_manager = False
             continue

@@ -136,6 +136,10 @@ Here's a step-by-step guide on how to use it:
 
 18. **Start the conversation automatically**: Use the `--auto-start` argument to start the conversation immediately without requiring user input.
 
+19. **Specify the memory collection name**: Use the `--memory-collection-name <collection name>` argument to specify the name of the memory collection to use for context management. If not specified, the default value is used.
+
+20. **Specify the long-term memory file**: Use the `--long-term-memory-file <file name>` argument to specify the long-term memory file name. If not specified, the default value is used.
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ### Multiline input
