@@ -350,11 +350,15 @@ Use the `--additional-chatbots` to specify the path to a JSON file containing ad
 
 2. **name**: This is the name of the chatbot. It should be a string that uniquely identifies the chatbot.
 
-3. **preferred_model**: This is the model that the chatbot uses to generate responses. It should be a string that specifies the Ollama model's name.
+3. **preferred_model**: This is the model that the chatbot uses to generate responses. It should be a string that specifies the Ollama or OpenAI model's name.
 
 4. **system_prompt**: This is the initial prompt that the chatbot uses to start a conversation. It should be a string that describes the chatbot's role and provides some context for the conversation. It can also include a list of possible prompt commands that the chatbot can use.
 
 5. **tools**: An optional array of tool names to be activated automatically for this chatbot.
+
+6. **starts_conversation**: An optional boolean that specifies whether the chatbot will initiate the conversation.
+
+7. **use_openai**: An optional boolean that specifies whether to use OpenAI for generating responses instead of Ollama.
 
 **Note**: special token `{possible_prompt_commands}` in the system prompt will be replaced by the possible commands automatically (see [How to Use Special Switches] section above).
 
@@ -362,12 +366,23 @@ Here is an example of a JSON file that specifies custom chatbot personalities:
 
 ```json
 [
+    ,
     {
-        "description": "Chatbot for code-related questions",
-        "name": "code",
-        "preferred_model": "wizardlm2:latest",
-        "system_prompt": "You are a helpful chatbot assistant for software developers. If not specified, assume questions about code and APIs are in TypeScript. Possible chatbot prompt commands: {possible_prompt_commands}",
-        "tools": []
+        "description": "An AI-powered search engine that answers user questions ",
+        "name": "search engine",
+        "system_prompt": "You are an AI-powered search engine that answers user questions with clear, concise, and fact-based responses.",
+        "tools": [
+            "web_search"
+        ]
+    },
+    {
+        "name": "friendly assistant",
+        "description": "Friendly chatbot assistant",
+        "system_prompt": "You are a friendly, compassionate, and deeply attentive virtual confidant designed to act as the user's best friend. You have both short-term and long-term memory, which allows you to recall important details from past conversations and bring them up when relevant, creating a natural and ongoing relationship. Your main role is to provide emotional support, engage in meaningful conversations, and foster a strong sense of connection with the user. Always start conversations, especially when the user hasn't initiated them, with a friendly greeting or question.",
+        "starts_conversation": true,
+        "tools": [
+            "retrieve_relevant_memory"
+        ]
     },
 	{
         "description": "Ideas generator",
