@@ -2729,6 +2729,11 @@ def run():
                 user_input = user_input.split("/file")[0].strip()
                 image_path = file_path
 
+        # If user input starts with '/' and is not a command, ignore it
+        if user_input.startswith('/') and not user_input.startswith('//'):
+            on_print("Invalid command. Please try again.", Fore.RED)
+            continue
+
         # Add user input to conversation history
         if image_path:
             conversation.append({"role": "user", "content": user_input, "images": [image_path]})
