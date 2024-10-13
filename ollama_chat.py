@@ -184,11 +184,12 @@ def get_available_tools():
                     },
                     "question_context": {
                         "type": "string",
-                        "description": "Additional context for the question, based on the user profile or current conversation topic"
+                        "description": "Current discussion context or topic, based on previous exchanges with the user"
                     }
                 },
                 "required": [
-                    "question"
+                    "question",
+                    "question_context"
                 ]
             }
         }
@@ -1139,6 +1140,7 @@ def colorize(input_text, language='md'):
 def print_possible_prompt_commands():
     possible_prompt_commands = """
     Possible prompt commands:
+    /cot: Help the assistant answer the user's question by forcing a Chain of Thought (COT) approach.
     /file <path of a file to load>: Read the file and append the content to user input.
     /search <number of results>: Query the vector database and append the answer to user input (RAG system).
     /web: Perform a web search using DuckDuckGo.
@@ -2529,10 +2531,24 @@ def run():
             document_indexer.index_documents()
             continue
 
-        if "/verbose" in user_input:
+        if user_input == "/verbose":
             verbose_mode = not verbose_mode
             on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
             continue
+
+        if "/cot" in user_input:
+            user_input = user_input.replace("/cot", "").strip()
+            chain_of_thoughts_system_prompt = "**Objective:**\nYour role is to assist a smaller language model (LLM) in enhancing its reasoning ability by formulating a reasoning plan (using the Chain of Thoughts method) based on the user’s question. You will not provide direct answers to the user’s query. Instead, you will guide the smaller LLM by breaking down the problem into logical steps, outlining a clear thought process to solve it.\n**Instructions:**\n1. **Restate the Question:**\nBegin by clearly restating or paraphrasing the user’s question to ensure full understanding of the problem.\n2. **Formulate a Reasoning Plan (Chain of Thoughts):**\nBreak the question down into a series of small, logical reasoning steps. Each step should progress toward a solution but should not solve the problem directly. The goal is to provide a structured outline for the smaller LLM to follow.\n3. **Highlight Key Elements:**\nIdentify important components or variables of the problem that need to be considered (e.g., numbers, relationships, or conditions). Emphasize these elements before diving into the reasoning.\n4. **Provide a Step-by-step Reasoning Outline:**\nFor each part of the problem:\n- Present a logical step or consideration.\n- Explain why this step is important for solving the problem.\n- Encourage further analysis or exploration in each step.\n5. **Avoid Final Conclusions:**\nDo not provide a direct answer to the user’s question. Instead, stop at the point where the reasoning plan is fully outlined, allowing the smaller LLM to complete the task using the structured thinking you provided.\n6. **Encourage Reflection and Follow-up Questions:**\nConclude the reasoning plan by encouraging the smaller LLM to ask follow-up questions or re-evaluate steps if something seems unclear.\n**Example Format:**\n*User Question:*\nA farmer has 5 apples. He gives 2 to his friend. How many apples does he have left?\n*Chain of Thoughts (Reasoning Plan):*\n1. **Restate the problem:**\nThe farmer initially has 5 apples and gives 2 of them to his friend. The goal is to determine how many apples are left after this action.\n2. **Identify key elements:**\n- Initial number of apples: 5\n- Number of apples given away: 2\n3. **Step-by-step reasoning:**\n- **Step 1:** Start by considering how many apples the farmer begins with.\n*Why this step?* It sets the baseline for the calculations.\n- **Step 2:** Think about what happens when 2 apples are given away. What mathematical operation can represent this action?\n*Why this step?* Understanding the operation (subtraction) is crucial for the solution.\n- **Step 3:** Set up a subtraction problem: subtract the number of apples given away from the initial number.\n*Why this step?* This will guide toward the answer without calculating it yet.\n4. **Encourage further thought:**\nWhat will happen to the total if the farmer gives away more apples in the future? What if he receives more apples instead?"
+
+            # Format the current conversation as user/assistant messages
+            formatted_conversation = "\n".join([f"{entry['role']}: {entry['content']}" for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"])
+            formatted_conversation += "\n\n" + user_input
+
+            enhanced_input = ask_ollama(chain_of_thoughts_system_prompt, formatted_conversation, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+            if enhanced_input:
+                user_input = "Question: " + user_input + "\n\n" + enhanced_input
+                if verbose_mode:
+                    on_print(f"Enhanced input: {user_input}", Fore.WHITE + Style.DIM)
 
         if "/search" in user_input:
             # If /search is followed by a number, use that number as the number of documents to return (/search can be anywhere in the prompt)
@@ -2584,7 +2600,7 @@ def run():
             alternate_model = prompt_for_model(default_model)
             continue
 
-        if "/tools" in user_input:
+        if user_input == "/tools":
             selected_tools = select_tools(get_available_tools(), selected_tools)
             continue
 
@@ -2616,19 +2632,19 @@ def run():
                     save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
             continue
 
-        if "/collection" in user_input:
+        if user_input == "/collection":
             collection_name = prompt_for_vector_database_collection()
             set_current_collection(collection_name)
             continue
 
-        if memory_manager and "/memory" in user_input or "/remember" in user_input or "/memorize" in user_input:
+        if memory_manager and user_input == "/memory" or user_input == "/remember" or user_input == "/memorize":
             on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
             if memory_manager.add_memory(conversation):
                 on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
                 on_print("", Style.RESET_ALL)
             continue
 
-        if memory_manager and "/forget" in user_input:
+        if memory_manager and user_input == "/forget":
             # Remove memory collection
             delete_collection(memory_collection_name)
             continue
@@ -2649,7 +2665,7 @@ def run():
             delete_collection(collection_name)
             continue
 
-        if "/chatbot" in user_input:
+        if user_input == "/chatbot":
             chatbot = prompt_for_chatbot()
             if "tools" in chatbot and len(chatbot["tools"]) > 0:
                 # Append chatbot tools to selected_tools if not already in the array

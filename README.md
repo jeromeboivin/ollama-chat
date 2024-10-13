@@ -186,6 +186,8 @@ The Ollama client supports several special switches to enhance your interaction 
 
 15. `/quit`, `/exit`, `/bye`: These commands exit the chatbot.
 
+16. `/cot`: This command helps the assistant answer the user's question by forcing a Chain of Thought (COT) approach.
+
 Remember to precede each command with a forward slash `(/)` and follow it with the appropriate parameters if necessary.
 
 ## Redirecting standard input from the console
