@@ -2756,12 +2756,18 @@ def run():
                 plugin_response = getattr(plugin, "on_llm_response")(bot_response)
                 bot_response_handled_by_plugin = bot_response_handled_by_plugin or plugin_response
 
-        if not bot_response_handled_by_plugin and syntax_highlighting:
-            on_print(colorize(bot_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+        if not bot_response_handled_by_plugin:
+            if syntax_highlighting:
+                on_print(colorize(bot_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
             
-            if alternate_bot_response:
-                on_print(colorize(alternate_bot_response), Fore.CYAN, "\rAlt: " if interactive_mode else "")
+                if alternate_bot_response:
+                    on_print(colorize(alternate_bot_response), Fore.CYAN, "\rAlt: " if interactive_mode else "")
+            elif not use_openai and len(selected_tools) > 0:
+                # Ollama cannot stream when tools are used
+                on_print(bot_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
 
+                if alternate_bot_response:
+                    on_print(alternate_bot_response, Fore.CYAN, "\rAlt: " if interactive_mode else "")
 
         if alternate_bot_response:
             # Ask user to select the preferred response
