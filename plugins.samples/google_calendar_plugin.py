@@ -37,7 +37,17 @@ class GoogleCalendarBase:
         self.scopes = scopes if scopes else ['https://www.googleapis.com/auth/calendar']
         self.creds = None
         self.service = None
-        self.authenticate()
+
+        try:
+            self.authenticate()
+        except Exception as e:
+            print(f"An error occurred during authentication: {e}")
+            # Remove the token file to force re-authentication
+            if os.path.exists(self.token_file):
+                os.remove(self.token_file)
+                self.creds = None
+
+                self.authenticate()
 
     def authenticate(self):
         """Authenticate the user and set up Google Calendar API service"""
