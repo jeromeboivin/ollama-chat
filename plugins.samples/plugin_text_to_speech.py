@@ -62,6 +62,15 @@ class TextToSpeechPlugin:
     def on_llm_response(self, response):
         # Ignore the response and call the on_llm_token_response method with a special <|endoftext|> token
         self.on_llm_token_response(" <|endoftext|>")
+
+        # Wait for all buffers to be processed and audio to be played
+        while not self.buffer_queue.empty() or not self.playback_queue.empty():
+            # This will ensure the method waits until both queues are empty before returning
+            threading.Event().wait(0.1)  # Add a small delay to avoid tight looping
+
+        # Ensure all playback is finished
+        sd.wait()  # Wait for any ongoing playback to complete
+
         return False
 
     def process_queue(self):
@@ -83,7 +92,7 @@ class TextToSpeechPlugin:
                     # Generate spoken response for the sentence
                     spoken_response = self.client.audio.speech.create(
                         model="tts-1-hd",
-                        voice="fable",
+                        voice="nova",
                         response_format="opus",
                         input=sentence
                     )
