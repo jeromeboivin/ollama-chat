@@ -102,43 +102,45 @@ Here's a step-by-step guide on how to use it:
 
 1. **Run the script**: You can run the script using Python. The command to run the script is `python ollama_chat.py`. This will run the script with all default settings.
 
-2. **Specify ChromaDB client host and port**: If you want to specify the ChromaDB client host and port, you can use the `--chroma-host` and `--chroma-port` arguments. For example, `python ollama_chat.py --chroma-host myhost --chroma-port 1234`.
+2. **Specify ChromaDB database path**: If you want to specify the ChromaDB database folder path, you can use the `--chroma-path` argument followed by the path to your database folder. For example: `python ollama_chat.py --chroma-path /path/to/chroma`.
 
-3. **Specify the ChromaDB collection name**: Use the `--collection` argument to specify the ChromaDB collection name. For example, `python ollama_chat.py --collection mycollection`.
+3. **Specify ChromaDB client host and port**: If you want to specify the ChromaDB client host and port, you can use the `--chroma-host` and `--chroma-port` arguments. For example, `python ollama_chat.py --chroma-host myhost --chroma-port 1234`.
 
-4. **Use Ollama or OpenAI API (Llama-CPP)**: By default, the script uses Ollama. If you want to use the OpenAI API, use the `--use-openai` argument. For example, `python ollama_chat.py --use-openai`.
+4. **Specify the ChromaDB collection name**: Use the `--collection` argument to specify the ChromaDB collection name. For example, `python ollama_chat.py --collection mycollection`.
 
-5. **Set the temperature for the model**: You can set the temperature using the `--temperature` argument. For example, `python ollama_chat.py --temperature 0.8`.
+5. **Use Ollama or OpenAI API (Llama-CPP)**: By default, the script uses Ollama. If you want to use the OpenAI API, use the `--use-openai` argument. For example, `python ollama_chat.py --use-openai`.
 
-6. **Disable the system role**: If the selected model does not support the system role, like Google Gemma models, use the `--disable-system-role` argument. For example, `python ollama_chat.py --disable-system-role`.
+6. **Set the temperature for the model**: You can set the temperature using the `--temperature` argument. For example, `python ollama_chat.py --temperature 0.8`.
 
-7. **Specify the prompt template for Llama-CPP**: Use the `--prompt-template` argument to specify the prompt template for Llama-CPP. For example, `python ollama_chat.py --prompt-template "ChatML"`.
+7. **Disable the system role**: If the selected model does not support the system role, like Google Gemma models, use the `--disable-system-role` argument. For example, `python ollama_chat.py --disable-system-role`.
 
-8. **Specify the path to a JSON file containing additional chatbots**: Use the `--additional-chatbots` argument to specify the path to a JSON file containing additional chatbots. For example, `python ollama_chat.py --additional-chatbots /path/to/chatbots.json`.
+8. **Specify the prompt template for Llama-CPP**: Use the `--prompt-template` argument to specify the prompt template for Llama-CPP. For example, `python ollama_chat.py --prompt-template "ChatML"`.
 
-9. **Enable verbose mode**: If you want to enable verbose mode, use the `--verbose` argument. For example, `python ollama_chat.py --verbose`.
+9. **Specify the path to a JSON file containing additional chatbots**: Use the `--additional-chatbots` argument to specify the path to a JSON file containing additional chatbots. For example, `python ollama_chat.py --additional-chatbots /path/to/chatbots.json`.
 
-10. **Specify the Ollama sentence embeddings model**: Use the `--embeddings-model` argument to specify the sentence embeddings model to use for vector database queries. For example, `python ollama_chat.py --embeddings-model mxbai-embed-large`.
+10. **Enable verbose mode**: If you want to enable verbose mode, use the `--verbose` argument. For example, `python ollama_chat.py --verbose`.
 
-11. **Specify a system prompt message**: Use the `--system-prompt` argument to specify a system prompt message. For example, `python ollama_chat.py --system-prompt "You are a teacher teaching physics, you must not give the answers but ask questions to guide the student in order to find the answer."`.
+11. **Specify the Ollama sentence embeddings model**: Use the `--embeddings-model` argument to specify the sentence embeddings model to use for vector database queries. For example, `python ollama_chat.py --embeddings-model mxbai-embed-large`.
 
-12. **Specify the Ollama model to use**: Use the `--model` argument to specify the Ollama model to be used. Default model: `phi3:mini`.
+12. **Specify a system prompt message**: Use the `--system-prompt` argument to specify a system prompt message. For example, `python ollama_chat.py --system-prompt "You are a teacher teaching physics, you must not give the answers but ask questions to guide the student in order to find the answer."`.
 
-13. **Specify the folder to save conversations to**: Use the `--conversations-folder <folder-path>` to specify the folder to save conversations to. If not specified, conversations will be saved in the current directory.
+13. **Specify the Ollama model to use**: Use the `--model` argument to specify the Ollama model to be used. Default model: `phi3:mini`.
 
-14. **Save the conversation automatically**: Use the `--auto-save` argument to automatically saves the conversation when exiting the program.
+14. **Specify the folder to save conversations to**: Use the `--conversations-folder <folder-path>` to specify the folder to save conversations to. If not specified, conversations will be saved in the current directory.
 
-15. **Index a local folder to the current ChromaDB collection**: Use the `--index-documents` to specify the root folder containing text files to index.
+15. **Save the conversation automatically**: Use the `--auto-save` argument to automatically saves the conversation when exiting the program.
 
-16. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
+16. **Index a local folder to the current ChromaDB collection**: Use the `--index-documents` to specify the root folder containing text files to index.
 
-17. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
+17. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
 
-18. **Start the conversation automatically**: Use the `--auto-start` argument to start the conversation immediately without requiring user input.
+18. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
 
-19. **Specify the memory collection name**: Use the `--memory-collection-name <collection name>` argument to specify the name of the memory collection to use for context management. If not specified, the default value is used.
+19. **Start the conversation automatically**: Use the `--auto-start` argument to start the conversation immediately without requiring user input.
 
-20. **Specify the long-term memory file**: Use the `--long-term-memory-file <file name>` argument to specify the long-term memory file name. If not specified, the default value is used.
+20. **Specify the memory collection name**: Use the `--memory-collection-name <collection name>` argument to specify the name of the memory collection to use for context management. If not specified, the default value is used.
+
+21. **Specify the long-term memory file**: Use the `--long-term-memory-file <file name>` argument to specify the long-term memory file name. If not specified, the default value is used.
 
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 

@@ -61,6 +61,7 @@ user_prompt = None
 # Default ChromaDB client host and port
 chroma_client_host = "localhost"
 chroma_client_port = 8000
+chroma_db_path = None
 
 custom_tools = []
 web_cache_collection_name = "web_cache"
@@ -2161,13 +2162,19 @@ def load_chroma_client():
     global verbose_mode
     global chroma_client_host
     global chroma_client_port
+    global chroma_db_path
 
     if chroma_client:
         return
 
     # Initialize the ChromaDB client
     try:
-        chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
+        if chroma_db_path:
+            chroma_client = chromadb.PersistentClient(path=chroma_db_path)
+        elif chroma_client_host and 0 < chroma_client_port:
+            chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
+        else:
+            raise ValueError("Invalid Chroma client configuration")
     except:
         if verbose_mode:
             on_print("ChromaDB client could not be initialized. Please check the host and port.", Fore.RED + Style.DIM)
@@ -2189,6 +2196,7 @@ def run():
     global interactive_mode
     global chroma_client_host
     global chroma_client_port
+    global chroma_db_path
     global plugins
     global plugins_folder
     global selected_tools
@@ -2203,6 +2211,7 @@ def run():
 
     # If specified as script named arguments, use the provided ChromaDB client host (--chroma-host) and port (--chroma-port)
     parser = argparse.ArgumentParser(description='Run the Ollama chatbot.')
+    parser.add_argument('--chroma-path', type=str, help='ChromaDB database path', default=None)
     parser.add_argument('--chroma-host', type=str, help='ChromaDB client host', default="localhost")
     parser.add_argument('--chroma-port', type=int, help='ChromaDB client port', default=8000)
     parser.add_argument('--collection', type=str, help='ChromaDB collection name', default=None)
@@ -2242,6 +2251,7 @@ def run():
     use_openai = args.use_openai
     chroma_client_host = args.chroma_host
     chroma_client_port = args.chroma_port
+    chroma_db_path = args.chroma_path
     temperature = args.temperature
     no_system_role = bool(args.disable_system_role)
     current_collection_name = preferred_collection_name
