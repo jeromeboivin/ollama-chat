@@ -2637,7 +2637,7 @@ def run():
             set_current_collection(collection_name)
             continue
 
-        if memory_manager and user_input == "/memory" or user_input == "/remember" or user_input == "/memorize":
+        if memory_manager and (user_input == "/memory" or user_input == "/remember" or user_input == "/memorize"):
             on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
             if memory_manager.add_memory(conversation):
                 on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
