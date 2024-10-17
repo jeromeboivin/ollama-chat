@@ -415,7 +415,7 @@ def select_tools(available_tools, selected_tools):
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
             status = "[X]" if tool in selected_tools else "[ ]"
-            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}\n")
+            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
 
     while True:
         display_tool_options()
