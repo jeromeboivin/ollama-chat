@@ -2030,7 +2030,7 @@ def select_openai_model_if_available(model_name):
     on_print(f"Model {model_name} not found.", Fore.RED)
     return None
 
-def prompt_for_openai_model(default_model):
+def prompt_for_openai_model(default_model, current_model):
     global verbose_mode
     global openai_client
 
@@ -2040,6 +2040,9 @@ def prompt_for_openai_model(default_model):
     except Exception as e:
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
+
+    if current_model is None:
+        current_model = default_model
     
     # Remove non-chat models from the list
     models = [model for model in models if model.id.startswith("gpt-")]
@@ -2047,14 +2050,14 @@ def prompt_for_openai_model(default_model):
     # Display available models
     on_print("Available OpenAI models:\n", Style.RESET_ALL)
     for i, model in enumerate(models):
-        star = " *" if model.id == default_model else ""
+        star = " *" if model.id == current_model else ""
         on_stdout_write(f"{i}. {model.id}{star}\n")
     on_stdout_flush()
 
-    # Default choice index for default_model
+    # Default choice index for current_model
     default_choice_index = None
     for i, model in enumerate(models):
-        if model.id == default_model:
+        if model.id == current_model:
             default_choice_index = i
             break
 
@@ -2072,7 +2075,7 @@ def prompt_for_openai_model(default_model):
 
     return selected_model
 
-def prompt_for_ollama_model(default_model):
+def prompt_for_ollama_model(default_model, current_model):
     global no_system_role
     global verbose_mode
 
@@ -2083,17 +2086,19 @@ def prompt_for_ollama_model(default_model):
         on_print("Ollama API is not running.", Fore.RED)
         return None
 
+    if current_model is None:
+        current_model = default_model
+
     # Ask user to choose a model
     on_print("Available models:\n", Style.RESET_ALL)
     for i, model in enumerate(models):
-        star = " *" if model['name'] == default_model else ""
+        star = " *" if model['name'] == current_model else ""
         on_stdout_write(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}\n")
     on_stdout_flush()
-    
-    # if stable-code:instruct is available, suggest it as the default model
+
     default_choice_index = None
     for i, model in enumerate(models):
-        if model['name'] == default_model:
+        if model['name'] == current_model:
             default_choice_index = i
             break
 
@@ -2113,13 +2118,13 @@ def prompt_for_ollama_model(default_model):
         on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
     return selected_model
 
-def prompt_for_model(default_model):
+def prompt_for_model(default_model, current_model):
     global use_openai
 
     if use_openai:
-        return prompt_for_openai_model(default_model)
+        return prompt_for_openai_model(default_model, current_model)
     else:
-        return prompt_for_ollama_model(default_model)
+        return prompt_for_ollama_model(default_model, current_model)
 
 def get_personal_info():
     personal_info = {}
@@ -2376,7 +2381,7 @@ def run():
         selected_model = select_openai_model_if_available(default_model)
 
     if selected_model is None:
-        selected_model = prompt_for_model(default_model)
+        selected_model = prompt_for_model(default_model, current_model)
         if selected_model is None:
             return
 
@@ -2610,7 +2615,7 @@ def run():
                     on_print(user_input, Fore.WHITE + Style.DIM)
 
         if user_input == "/model":
-            selected_model = prompt_for_model(default_model)
+            selected_model = prompt_for_model(default_model, current_model)
             current_model = selected_model
 
             if use_memory_manager:
@@ -2623,7 +2628,7 @@ def run():
             continue
 
         if user_input == "/model2":
-            alternate_model = prompt_for_model(default_model)
+            alternate_model = prompt_for_model(default_model, current_model)
             continue
 
         if user_input == "/tools":
