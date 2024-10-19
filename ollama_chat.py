@@ -2212,7 +2212,8 @@ def run():
     global other_instance_url
     global listening_port
     global memory_manager
-
+    
+    default_model = None
     prompt_template = None
 
     # If specified as script named arguments, use the provided ChromaDB client host (--chroma-host) and port (--chroma-port)
