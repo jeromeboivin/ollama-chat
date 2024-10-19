@@ -1150,6 +1150,7 @@ def print_possible_prompt_commands():
     /chatbot: Change the chatbot personality.
     /collection: Change the vector database collection.
     /rmcollection <collection name>: Delete the vector database collection.
+    /context <model context size>: Change the model's context window size. Default value: 2. Size must be a numeric value between 2 and 125.
     /index <folder path>: Index text files in the folder to the vector database.
     /cb: Replace /cb with the clipboard content.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
@@ -2525,6 +2526,21 @@ def run():
                 user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
                 if user_input_from_plugin:
                     user_input = user_input_from_plugin
+        
+        # Allow for /context command to be used to set the context window size
+        if user_input.startswith("/context"):
+            if re.search(r'/context\s+\d+', user_input):
+                context_window = int(re.search(r'/context\s+(\d+)', user_input).group(1))
+                max_context_length = 125 # 125 * 1024 = 128000 tokens
+                if context_window < 0 or context_window > max_context_length:
+                    on_print(f"Context window must be between 0 and {max_context_length}.", Fore.RED)
+                else:
+                    num_ctx = context_window * 1024
+                    if verbose_mode:
+                        on_print(f"Context window changed to {num_ctx} tokens.", Fore.WHITE + Style.DIM)
+            else:
+                on_print(f"Please specify context window size with /context <number>.", Fore.RED)
+            continue
 
         if "/index" in user_input:
             if not chroma_client:
