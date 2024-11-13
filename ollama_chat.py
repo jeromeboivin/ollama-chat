@@ -224,6 +224,41 @@ def get_available_tools():
     available_tools = default_tools + custom_tools
     return available_tools
 
+def md(soup, **options):
+    return MarkdownConverter(**options).convert_soup(soup)
+
+def extract_text_from_html(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # Remove all <script> tags
+    for script in soup.find_all('script'):
+        script.decompose()
+
+    # Convert the modified HTML content to Markdown
+    text = md(soup, strip=['a', 'img'], heading_style='ATX', 
+                    escape_asterisks=False, escape_underscores=False, 
+                    autolinks=False)
+    
+    # Remove extra newlines
+    text = re.sub(r'\n+', '\n', text)
+
+    return text
+
+def extract_text_from_pdf(pdf_content):
+    with open('temp.pdf', 'wb') as f:
+        f.write(pdf_content)
+
+    reader = PdfReader('temp.pdf')
+    text = ''
+    for page in reader.pages:
+        text += page.extract_text()
+
+    # Clean up by removing the temporary file
+    os.remove('temp.pdf')
+
+    # Return the extracted text, with extra newlines removed
+    return re.sub(r'\n+', '\n', text)
+
 class MarkdownSplitter:
     def __init__(self, markdown_content, split_paragraphs=False):
         self.markdown_content = markdown_content.splitlines()
@@ -307,41 +342,6 @@ class SimpleWebCrawler:
                 on_print(f"Error fetching URL {url}: {e}", Fore.RED)
             return None
 
-    def md(self, soup, **options):
-        return MarkdownConverter(**options).convert_soup(soup)
-
-    def extract_text_from_html(self, html_content):
-        soup = BeautifulSoup(html_content, 'html.parser')
-
-        # Remove all <script> tags
-        for script in soup.find_all('script'):
-            script.decompose()
-
-        # Convert the modified HTML content to Markdown
-        text = self.md(soup, strip=['a', 'img'], heading_style='ATX', 
-                       escape_asterisks=False, escape_underscores=False, 
-                       autolinks=False)
-        
-        # Remove extra newlines
-        text = re.sub(r'\n+', '\n', text)
-
-        return text
-
-    def extract_text_from_pdf(self, pdf_content):
-        with open('temp.pdf', 'wb') as f:
-            f.write(pdf_content)
-
-        reader = PdfReader('temp.pdf')
-        text = ''
-        for page in reader.pages:
-            text += page.extract_text()
-
-        # Clean up by removing the temporary file
-        os.remove('temp.pdf')
-
-        # Return the extracted text, with extra newlines removed
-        return re.sub(r'\n+', '\n', text)
-
     def ask_llm(self, content, user_input):
         # Use the provided ask_ollama function to interact with the LLM
         user_input = content + "\n\n" + user_input
@@ -390,12 +390,12 @@ class SimpleWebCrawler:
                 if url.lower().endswith('.pdf'):
                     if self.verbose:
                         on_print(f"Extracting text from PDF: {url}", Fore.WHITE + Style.DIM)
-                    extracted_text = self.extract_text_from_pdf(content)
+                    extracted_text = extract_text_from_pdf(content)
                 else:
                     if self.verbose:
                         on_print(f"Extracting text from HTML: {url}", Fore.WHITE + Style.DIM)
                     decoded_content = self.decode_content(content)
-                    extracted_text = self.extract_text_from_html(decoded_content)
+                    extracted_text = extract_text_from_html(decoded_content)
 
                 article = {'url': url, 'text': extracted_text}
                 
@@ -511,6 +511,23 @@ def discover_plugins(plugin_folder=None):
                         if verbose_mode:
                             on_print(f"Discovered tool: {name}", Fore.WHITE + Style.DIM)
     return plugins
+
+def is_html(file_path):
+    """
+    Check if the given file is an HTML file, either by its extension or content.
+    """
+    # Check for .htm and .html extensions
+    if file_path.endswith(".htm") or file_path.endswith(".html"):
+        return True
+    
+    # Check for HTML files without extensions
+    try:
+        with open(file_path, 'r') as f:
+            first_line = next((line.strip() for line in f if line.strip()), None)
+            return first_line and (first_line.lower().startswith('<!doctype html>') or first_line.lower().startswith('<html'))
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return False
 
 def is_markdown(file_path):
     if not os.path.exists(file_path):
@@ -940,13 +957,21 @@ class DocumentIndexer:
 
     def get_text_files(self):
         """
-        Recursively find all .txt and .md files in the root folder.
+        Recursively find all .txt, .md, .tex files in the root folder.
+        Also include HTML files without extensions if they start with <!DOCTYPE html> or <html.
+        Ignore empty lines at the beginning of the file and check only the first non-empty line.
         """
         text_files = []
         for root, dirs, files in os.walk(self.root_folder):
             for file in files:
+                # Check for files with extension
                 if file.endswith(".txt") or file.endswith(".md") or file.endswith(".tex"):
                     text_files.append(os.path.join(root, file))
+                else:
+                    # Check for HTML files without extensions
+                    file_path = os.path.join(root, file)
+                    if is_html(file_path):
+                        text_files.append(file_path)
         return text_files
 
     def read_file(self, file_path):
@@ -1006,7 +1031,11 @@ class DocumentIndexer:
                 if allow_chunks:
                     chunks = []
                     # Split Markdown files into sections if needed
-                    if is_markdown(file_path):
+                    if is_html(file_path):
+                        # Convert to Markdown before splitting
+                        markdown_splitter = MarkdownSplitter(extract_text_from_html(content), split_paragraphs=split_paragraphs)
+                        chunks = markdown_splitter.split()
+                    elif is_markdown(file_path):
                         markdown_splitter = MarkdownSplitter(content, split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
                     else:
@@ -2761,7 +2790,7 @@ def run():
                 user_input = user_input.split("/file")[0].strip()
                 image_path = file_path
 
-        # If user input starts with '/' and is not a command, ignore it
+        # If user input starts with '/' and is not a command, ignore it.
         if user_input.startswith('/') and not user_input.startswith('//'):
             on_print("Invalid command. Please try again.", Fore.RED)
             continue
