@@ -1163,7 +1163,14 @@ def colorize(input_text, language='md'):
         return input_text  # Unknown language, return unchanged
     
     formatter = Terminal256Formatter(style='default')
-    output = highlight(input_text, lexer, formatter)
+
+    if input_text is None:
+        return ""
+
+    try:
+        output = highlight(input_text, lexer, formatter)
+    except:
+        return input_text
 
     return output
 
