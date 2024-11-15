@@ -1834,6 +1834,16 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             on_print(f"An error occurred during the conversation: {e}", Fore.RED)
             return ""
 
+    # Check if the bot response is a tool call object
+    if not bot_response_is_tool_calls and bot_response and len(bot_response.strip()) > 0 and bot_response.strip()[0] == "{" and bot_response.strip()[-1] == "}":
+        bot_response = [extract_json(bot_response.strip())]
+        bot_response_is_tool_calls = True
+
+    # Check if the bot response is a list of tool calls
+    if not bot_response_is_tool_calls and bot_response and len(bot_response.strip()) > 0 and bot_response.strip()[0] == "[" and bot_response.strip()[-1] == "]":
+        bot_response = extract_json(bot_response.strip())
+        bot_response_is_tool_calls = True
+
     if bot_response and bot_response_is_tool_calls:
         bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
@@ -2176,6 +2186,8 @@ def load_chroma_client():
     # Initialize the ChromaDB client
     try:
         if chroma_db_path:
+            # Set environment variable ANONYMIZED_TELEMETRY to disable telemetry
+            os.environ["ANONYMIZED_TELEMETRY"] = "0"
             chroma_client = chromadb.PersistentClient(path=chroma_db_path)
         elif chroma_client_host and 0 < chroma_client_port:
             chroma_client = chromadb.HttpClient(host=chroma_client_host, port=chroma_client_port)
