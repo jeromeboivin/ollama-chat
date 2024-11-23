@@ -75,7 +75,7 @@ COMMANDS = [
     "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/rmcollection", "/deletecollection", "/chatbot",
-    "/cb", "/file"
+    "/cb", "/file", "/quit", "/exit", "/bye"
 ]
 
 def completer(text, state):
