@@ -241,6 +241,78 @@ def get_available_tools():
     available_tools = default_tools + custom_tools
     return available_tools
 
+def generate_chain_of_thoughts_system_prompt(selected_tools):
+    global current_collection_name
+
+    # Base prompt
+    prompt = """
+**Objective:**
+Your role is to assist a smaller language model (LLM) in enhancing its reasoning ability by formulating a reasoning plan (using the Chain of Thoughts method) based on the user’s question. You will not provide direct answers to the user’s query. Instead, you will guide the smaller LLM by breaking down the problem into logical steps, outlining a clear thought process to solve it. Additionally, you will help the smaller LLM identify and ignore irrelevant information that does not contribute to solving the problem.
+**Instructions:**
+1. **Restate the Question:**
+Begin by clearly restating or paraphrasing the user’s question to ensure full understanding of the problem. If there is any irrelevant information, acknowledge it and emphasize that it should be disregarded.
+2. **Formulate a Reasoning Plan (Chain of Thoughts):**
+Break the question down into a series of small, logical reasoning steps. Each step should progress toward a solution but should not solve the problem directly. The goal is to provide a structured outline for the smaller LLM to follow, ensuring it focuses only on relevant details and ignores unnecessary information.
+3. **Highlight Key Elements:**
+Identify important components or variables of the problem that need to be considered (e.g., numbers, relationships, or conditions). If there is irrelevant information, make it clear and explain why it can be disregarded.
+4. **Provide a Step-by-step Reasoning Outline:**
+For each part of the problem:
+- Present a logical step or consideration.
+- Explain why this step is important for solving the problem.
+- Encourage further analysis or exploration in each step.
+- Point out irrelevant details that should be ignored to avoid distraction.
+5. **Avoid Final Conclusions:**
+Do not provide a direct answer to the user’s question. Instead, stop at the point where the reasoning plan is fully outlined, allowing the smaller LLM to complete the task using the structured thinking you provided.
+6. **Encourage Reflection and Follow-up Questions:**
+Conclude the reasoning plan by encouraging the smaller LLM to ask follow-up questions or re-evaluate steps if something seems unclear or if irrelevant information was mistakenly considered.
+"""
+
+    # Check if tools are available and dynamically modify the prompt
+    if selected_tools:
+        tool_names = [tool['function']['name'] for tool in selected_tools]
+        tools_instruction = f"""
+**Additional Guidance:**
+The following tools are available and can be utilized if they are relevant to solving the problem: {', '.join(tool_names)}.
+When formulating the reasoning plan, consider whether any of these tools could assist in completing specific steps. If a tool is useful, include guidance on how it might be applied effectively.
+"""
+        prompt += tools_instruction
+
+        # Add specific guidance for query_vector_database if available
+        if "query_vector_database" in tool_names:
+            database_instruction = """
+Additionally, the tool `query_vector_database` is available for searching through a collection of documents.
+If the reasoning plan involves retrieving relevant information from the collection, outline how to frame the query and what information to seek.
+"""
+            prompt += database_instruction
+
+    prompt += """
+---
+**Example Format:**
+*User Question:*
+Oliver picks 44 kiwis on Friday. Then he picks 58 kiwis on Saturday. On Sunday, he picks double the number of kiwis he did on Friday, but five of them were a bit smaller than average. How many kiwis does Oliver have?
+*Chain of Thoughts (Reasoning Plan):*
+1. **Restate the problem:**
+Oliver picks kiwis over three days, and we need to calculate the total number of kiwis he picks by the end of Sunday. The statement about \"five being smaller than average\" does not affect the total and should be ignored.
+2. **Identify key elements:**
+- Number of kiwis picked on Friday: 44
+- Number of kiwis picked on Saturday: 58
+- Number of kiwis picked on Sunday: double the amount picked on Friday
+- The information about smaller kiwis is irrelevant and can be disregarded.
+3. **Step-by-step reasoning:**
+- **Step 1:** Start by considering how many kiwis Oliver picks on Friday.
+*Why this step?* It is the first number given and forms part of the total.
+- **Step 2:** Think about how many kiwis Oliver picks on Saturday. Add this number to the total from Friday.
+*Why this step?* Adding the number of kiwis picked on each day brings you closer to the solution.
+- **Step 3:** On Sunday, Oliver picks double the number he picked on Friday. Calculate how many that is and add it to the running total.
+*Why this step?* Sunday’s kiwi count is based on Friday’s, so calculating this is essential to reach the final count.
+- **Step 4:** Ignore the statement about five kiwis being smaller than average. It does not impact the total.
+*Why this step?* Focusing only on relevant information ensures that the LLM calculates the correct total.
+4. **Encourage further thought:**
+Does ignoring irrelevant details like the size of the kiwis affect the total count? What might happen if we misinterpret irrelevant information as important?
+"""
+
+    return prompt
+
 def md(soup, **options):
     return MarkdownConverter(**options).convert_soup(soup)
 
@@ -696,7 +768,7 @@ class MemoryManager:
 
         return True
 
-    def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=700):
+    def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=200):
         """
         Retrieve the most relevant memories based on the given query.
 
@@ -1208,6 +1280,8 @@ def print_possible_prompt_commands():
     /cb: Replace /cb with the clipboard content.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
+    /memory: Toggle memory assistant on or off.
+    /memorize or /remember: Store the current conversation in memory.
     reset, clear, restart: Reset the conversation.
     quit, exit, bye: Exit the chatbot.
     For multiline input, you can wrap text with triple double quotes.
@@ -2638,7 +2712,7 @@ def run():
 
         if "/cot" in user_input:
             user_input = user_input.replace("/cot", "").strip()
-            chain_of_thoughts_system_prompt = "**Objective:**\nYour role is to assist a smaller language model (LLM) in enhancing its reasoning ability by formulating a reasoning plan (using the Chain of Thoughts method) based on the user’s question. You will not provide direct answers to the user’s query. Instead, you will guide the smaller LLM by breaking down the problem into logical steps, outlining a clear thought process to solve it. Additionally, you will help the smaller LLM identify and ignore irrelevant information that does not contribute to solving the problem.\n**Instructions:**\n1. **Restate the Question:**\nBegin by clearly restating or paraphrasing the user’s question to ensure full understanding of the problem. If there is any irrelevant information, acknowledge it and emphasize that it should be disregarded.\n2. **Formulate a Reasoning Plan (Chain of Thoughts):**\nBreak the question down into a series of small, logical reasoning steps. Each step should progress toward a solution but should not solve the problem directly. The goal is to provide a structured outline for the smaller LLM to follow, ensuring it focuses only on relevant details and ignores unnecessary information.\n3. **Highlight Key Elements:**\nIdentify important components or variables of the problem that need to be considered (e.g., numbers, relationships, or conditions). If there is irrelevant information, make it clear and explain why it can be disregarded.\n4. **Provide a Step-by-step Reasoning Outline:**\nFor each part of the problem:\n- Present a logical step or consideration.\n- Explain why this step is important for solving the problem.\n- Encourage further analysis or exploration in each step.\n- Point out irrelevant details that should be ignored to avoid distraction.\n5. **Avoid Final Conclusions:**\nDo not provide a direct answer to the user’s question. Instead, stop at the point where the reasoning plan is fully outlined, allowing the smaller LLM to complete the task using the structured thinking you provided.\n6. **Encourage Reflection and Follow-up Questions:**\nConclude the reasoning plan by encouraging the smaller LLM to ask follow-up questions or re-evaluate steps if something seems unclear or if irrelevant information was mistakenly considered.\n---\n**Example Format:**\n*User Question:*\nOliver picks 44 kiwis on Friday. Then he picks 58 kiwis on Saturday. On Sunday, he picks double the number of kiwis he did on Friday, but five of them were a bit smaller than average. How many kiwis does Oliver have?\n*Chain of Thoughts (Reasoning Plan):*\n1. **Restate the problem:**\nOliver picks kiwis over three days, and we need to calculate the total number of kiwis he picks by the end of Sunday. The statement about \"five being smaller than average\" does not affect the total and should be ignored.\n2. **Identify key elements:**\n- Number of kiwis picked on Friday: 44\n- Number of kiwis picked on Saturday: 58\n- Number of kiwis picked on Sunday: double the amount picked on Friday\n- The information about smaller kiwis is irrelevant and can be disregarded.\n3. **Step-by-step reasoning:**\n- **Step 1:** Start by considering how many kiwis Oliver picks on Friday.\n*Why this step?* It is the first number given and forms part of the total.\n- **Step 2:** Think about how many kiwis Oliver picks on Saturday. Add this number to the total from Friday.\n*Why this step?* Adding the number of kiwis picked on each day brings you closer to the solution.\n- **Step 3:** On Sunday, Oliver picks double the number he picked on Friday. Calculate how many that is and add it to the running total.\n*Why this step?* Sunday’s kiwi count is based on Friday’s, so calculating this is essential to reach the final count.\n- **Step 4:** Ignore the statement about five kiwis being smaller than average. It does not impact the total.\n*Why this step?* Focusing only on relevant information ensures that the LLM calculates the correct total.\n4. **Encourage further thought:**\nDoes ignoring irrelevant details like the size of the kiwis affect the total count? What might happen if we misinterpret irrelevant information as important?"
+            chain_of_thoughts_system_prompt = generate_chain_of_thoughts_system_prompt(selected_tools)
 
             # Format the current conversation as user/assistant messages
             formatted_conversation = "\n".join([f"{entry['role']}: {entry['content']}" for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"])
@@ -2696,6 +2770,24 @@ def run():
                     use_memory_manager = False
             continue
 
+        if user_input == "/memory":
+            if use_memory_manager:
+                # Deactivate memory manager
+                memory_manager = None
+                use_memory_manager = False
+                on_print("Memory manager deactivated.", Fore.WHITE + Style.DIM)
+            else:
+                load_chroma_client()
+
+                if chroma_client:
+                    memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
+                    use_memory_manager = True
+                    on_print("Memory manager activated.", Fore.WHITE + Style.DIM)
+                else:
+                    on_print("ChromaDB client not initialized.", Fore.RED)
+
+            continue
+
         if user_input == "/model2":
             alternate_model = prompt_for_model(default_model, current_model)
             continue
@@ -2737,7 +2829,7 @@ def run():
             set_current_collection(collection_name)
             continue
 
-        if memory_manager and (user_input == "/memory" or user_input == "/remember" or user_input == "/memorize"):
+        if memory_manager and (user_input == "/remember" or user_input == "/memorize"):
             on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
             if memory_manager.add_memory(conversation):
                 on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
