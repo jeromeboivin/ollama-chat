@@ -1647,8 +1647,10 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
     # Iterate over each function call in the bot response
     tool_found = False
     for tool_call in bot_response:
-        if not 'function' in tool_call or not 'name' in tool_call['function']:
-            continue
+        if not 'function' in tool_call:
+            tool_call = { 'function': tool_call }
+            if not 'name' in tool_call['function']:
+                continue
 
         tool_name = tool_call['function']['name']
         # Iterate over the available tools
@@ -1880,6 +1882,11 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         bot_response = extract_json(bot_response.strip())
         bot_response_is_tool_calls = True
 
+    # Check if the bot response starts with <tool_call>
+    if not bot_response_is_tool_calls and bot_response and len(bot_response.strip()) > 0 and bot_response.startswith("<tool_call>"):
+        bot_response = extract_json(bot_response.strip())
+        bot_response_is_tool_calls = True
+
     if bot_response and bot_response_is_tool_calls:
         bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
@@ -1958,6 +1965,17 @@ def extract_json(garbage_str):
         # Define a regular expression pattern to match the JSON block
         pattern = r'```json\s*(\[\s*.*?\s*\])\s*```'
         
+        # Search for the pattern
+        match = re.search(pattern, garbage_str, re.DOTALL)
+        
+        if match:
+            # Extract the JSON content
+            json_str = match.group(1)
+
+    if not json_str:
+        # JSON may be enclosed between <tool_call> and </tool_call>
+        pattern = r'<tool_call>\s*(\[\s*.*?\s*\])\s*</tool_call>'
+
         # Search for the pattern
         match = re.search(pattern, garbage_str, re.DOTALL)
         
