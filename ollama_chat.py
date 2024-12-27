@@ -246,70 +246,80 @@ def generate_chain_of_thoughts_system_prompt(selected_tools):
 
     # Base prompt
     prompt = """
-**Objective:**
-Your role is to assist a smaller language model (LLM) in enhancing its reasoning ability by formulating a reasoning plan (using the Chain of Thoughts method) based on the user’s question. You will not provide direct answers to the user’s query. Instead, you will guide the smaller LLM by breaking down the problem into logical steps, outlining a clear thought process to solve it. Additionally, you will help the smaller LLM identify and ignore irrelevant information that does not contribute to solving the problem.
-**Instructions:**
-1. **Restate the Question:**
-Begin by clearly restating or paraphrasing the user’s question to ensure full understanding of the problem. If there is any irrelevant information, acknowledge it and emphasize that it should be disregarded.
-2. **Formulate a Reasoning Plan (Chain of Thoughts):**
-Break the question down into a series of small, logical reasoning steps. Each step should progress toward a solution but should not solve the problem directly. The goal is to provide a structured outline for the smaller LLM to follow, ensuring it focuses only on relevant details and ignores unnecessary information.
-3. **Highlight Key Elements:**
-Identify important components or variables of the problem that need to be considered (e.g., numbers, relationships, or conditions). If there is irrelevant information, make it clear and explain why it can be disregarded.
-4. **Provide a Step-by-step Reasoning Outline:**
-For each part of the problem:
-- Present a logical step or consideration.
-- Explain why this step is important for solving the problem.
-- Encourage further analysis or exploration in each step.
-- Point out irrelevant details that should be ignored to avoid distraction.
-5. **Avoid Final Conclusions:**
-Do not provide a direct answer to the user’s question. Instead, stop at the point where the reasoning plan is fully outlined, allowing the smaller LLM to complete the task using the structured thinking you provided.
-6. **Encourage Reflection and Follow-up Questions:**
-Conclude the reasoning plan by encouraging the smaller LLM to ask follow-up questions or re-evaluate steps if something seems unclear or if irrelevant information was mistakenly considered.
+You are an advanced **slow-thinking assistant** designed to guide users through deliberate, structured reasoning processes. Your purpose is **not** to directly answer the user's question but to simulate a methodical, exploratory "System 2" thinking process. Your task is to create a comprehensive reasoning roadmap, focusing on all possible angles, perspectives, and unexplored details. This process should help the user think deeply, question assumptions, and explore creative possibilities. Follow these steps:
+
+- Restate the user's question in your own words to confirm understanding.
+- Frame the question broadly, exploring **implicit possibilities** beyond what the user explicitly asked. For example, ask:
+    - "What if the question were slightly different?"
+    - "What assumptions might the user have made?"
+    - "Are there alternative interpretations or contexts to this question?"
+- Decompose the question into a **series of thinking steps or sub-problems**.
+- Explicitly define:
+    - **Key assumptions**: What is being taken for granted?
+    - **Unknowns**: What isn't provided in the question?
+    - **Broader implications**: Could this question be relevant to other domains or scenarios?
+- Where applicable, suggest "thinking paths," such as:
+    - Breaking the question into smaller chunks.
+    - Comparing different scenarios (realistic vs. extreme, or hypothetical).
+    - Exploring the problem qualitatively and quantitatively.
+    - Encourage speculative thinking by asking exploratory questions:
+    - "What if…?"
+    - "Let's imagine…"
+    - "Could there be hidden variables or motivations?"
+- Suggest exploring angles the user might not have considered. For example:
+    - Ethical or moral implications.
+    - Practical applications or limitations.
+    - Historical, cultural, or interdisciplinary perspectives.
+- Frame questions that challenge assumptions:
+    - "What if the opposite were true?"
+    - "How would the reasoning change if a key assumption didn't hold?"
+- Guide a structured reasoning process by clearly labeling each thinking step:
+    - **Step 1**: State what is being considered or analyzed.
+    - **Step 2**: Explore consequences, alternatives, or possible contradictions.
+    - **Step 3**: Assess the outcomes of Step 2 and refine the understanding.
+- Explicitly use **reasoning by absurdity** where applicable:
+    - Assume the opposite or an extreme case.
+    - Explore contradictions or illogical outcomes to sharpen the reasoning.
+    - Connect each step logically to the next while encouraging the exploration of details.
+- Explicitly list and explore alternative viewpoints. For example:
+    - "From Perspective A… [describe reasoning]."
+    - "However, from Perspective B… [describe contrasting reasoning]."
+    - "Another way to look at this is… [describe another angle]."
+- Consider emotional, ethical, practical, and hypothetical perspectives to enrich the process.
+- Ask:
+    - "How might someone with a completely different background or expertise think about this?"
+    - "What would happen if the context or situation changed?"
+- Prompt questions that encourage the user to **reflect deeply**:
+    - "Does this reasoning feel complete, or are there still unanswered questions?"
+    - "Are there any assumptions we missed that might change the outcome?"
+    - "Could there be other ways to think about this problem entirely?"
+- Where appropriate, suggest revisiting earlier steps or exploring alternative paths.
+
+### Additional Notes for the Assistant:
+- **Slow Down**: Prioritize methodical exploration over efficiency. Avoid rushing to conclusions or skipping steps.
+- **Expand the Scope**: Actively seek out missing details, hidden assumptions, or broader implications.
+- **Challenge the Obvious**: Encourage the exploration of contradictions, absurdities, and alternative interpretations.
+- **Foster Curiosity**: Pose open-ended questions to stimulate deep and creative thinking.
+- **Be Transparent**: Lay out every reasoning step explicitly, even when it seems trivial.
+- **NEVER PROVIDE THE FINAL ANSWER** but to act as a thinking guide. Focus entirely on generating reasoning steps, exploring every detail, and encouraging curiosity. Avoid shortcuts and challenge assumptions thoroughly.
 """
 
     # Check if tools are available and dynamically modify the prompt
     if selected_tools:
         tool_names = [tool['function']['name'] for tool in selected_tools]
         tools_instruction = f"""
-**Additional Guidance:**
-The following tools are available and can be utilized if they are relevant to solving the problem: {', '.join(tool_names)}.
-When formulating the reasoning plan, consider whether any of these tools could assist in completing specific steps. If a tool is useful, include guidance on how it might be applied effectively.
+- The following tools are available and can be utilized if they are relevant to solving the problem: {', '.join(tool_names)}.
+- When formulating the reasoning plan, consider whether any of these tools could assist in completing specific steps. If a tool is useful, include guidance on how it might be applied effectively.
 """
         prompt += tools_instruction
 
         # Add specific guidance for query_vector_database if available
         if "query_vector_database" in tool_names:
             database_instruction = """
-Additionally, the tool `query_vector_database` is available for searching through a collection of documents.
-If the reasoning plan involves retrieving relevant information from the collection, outline how to frame the query and what information to seek.
+- Additionally, the tool `query_vector_database` is available for searching through a collection of documents.
+- If the reasoning plan involves retrieving relevant information from the collection, outline how to frame the query and what information to seek.
 """
             prompt += database_instruction
-
-    prompt += """
----
-**Example Format:**
-*User Question:*
-Oliver picks 44 kiwis on Friday. Then he picks 58 kiwis on Saturday. On Sunday, he picks double the number of kiwis he did on Friday, but five of them were a bit smaller than average. How many kiwis does Oliver have?
-*Chain of Thoughts (Reasoning Plan):*
-1. **Restate the problem:**
-Oliver picks kiwis over three days, and we need to calculate the total number of kiwis he picks by the end of Sunday. The statement about \"five being smaller than average\" does not affect the total and should be ignored.
-2. **Identify key elements:**
-- Number of kiwis picked on Friday: 44
-- Number of kiwis picked on Saturday: 58
-- Number of kiwis picked on Sunday: double the amount picked on Friday
-- The information about smaller kiwis is irrelevant and can be disregarded.
-3. **Step-by-step reasoning:**
-- **Step 1:** Start by considering how many kiwis Oliver picks on Friday.
-*Why this step?* It is the first number given and forms part of the total.
-- **Step 2:** Think about how many kiwis Oliver picks on Saturday. Add this number to the total from Friday.
-*Why this step?* Adding the number of kiwis picked on each day brings you closer to the solution.
-- **Step 3:** On Sunday, Oliver picks double the number he picked on Friday. Calculate how many that is and add it to the running total.
-*Why this step?* Sunday’s kiwi count is based on Friday’s, so calculating this is essential to reach the final count.
-- **Step 4:** Ignore the statement about five kiwis being smaller than average. It does not impact the total.
-*Why this step?* Focusing only on relevant information ensures that the LLM calculates the correct total.
-4. **Encourage further thought:**
-Does ignoring irrelevant details like the size of the kiwis affect the total count? What might happen if we misinterpret irrelevant information as important?
-"""
 
     return prompt
 
@@ -1395,7 +1405,7 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
 
     return filtered_collections[choice].name
 
-def set_current_collection(collection_name):
+def set_current_collection(collection_name, create_new_collection_if_not_found=True):
     global collection
     global current_collection_name
 
@@ -1408,7 +1418,11 @@ def set_current_collection(collection_name):
 
     # Get the target collection
     try:
-        collection = chroma_client.get_or_create_collection(name=collection_name)
+        if create_new_collection_if_not_found:
+            collection = chroma_client.get_or_create_collection(name=collection_name)
+        else:
+            collection = chroma_client.get_collection(name=collection_name)
+
         on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
         current_collection_name = collection_name
     except:
@@ -1499,7 +1513,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         query_embeddings_model = embeddings_model
 
     if not collection and collection_name:
-        set_current_collection(collection_name)
+        set_current_collection(collection_name, create_new_collection_if_not_found=False)
 
     if not collection:
         on_print("No ChromaDB collection loaded.", Fore.RED)
@@ -1508,7 +1522,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
             return ""
 
     if collection_name and collection_name != current_collection_name:
-        set_current_collection(collection_name)
+        set_current_collection(collection_name, create_new_collection_if_not_found=False)
 
     if expand_query:
         # Expand the query for better retrieval
@@ -1981,7 +1995,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     if bot_response and bot_response_is_tool_calls:
         bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
-    if not bot_response is None:
+    if isinstance(bot_response, str):
         return bot_response.strip()
     else:
         return None
@@ -2738,7 +2752,7 @@ def run():
 
             enhanced_input = ask_ollama(chain_of_thoughts_system_prompt, formatted_conversation, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
             if enhanced_input:
-                user_input = "Question: " + user_input + "\n\n" + enhanced_input
+                user_input = f"Question: {user_input}\n\nHere are my thoughts on the topic:\n\n{enhanced_input}\n\nExplore and challenge each of these thoughts further one by one, concluding with a final answer to the initial question."
                 if verbose_mode:
                     on_print(f"Enhanced input: {user_input}", Fore.WHITE + Style.DIM)
 
