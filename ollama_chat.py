@@ -4,6 +4,8 @@ import tempfile
 from colorama import Fore, Style
 import chromadb
 import readline
+import base64
+import getpass
 
 if platform.system() == "Windows":
     import win32clipboard
@@ -580,6 +582,8 @@ class SimpleWebScraper:
         self.convert_to_markdown = convert_to_markdown
         self.visited = set()
         self.verbose = verbose
+        self.username = None
+        self.password = None
 
     def scrape(self, url=None, depth=0, max_depth=50):
         if url is None:
@@ -616,9 +620,23 @@ class SimpleWebScraper:
                 self._save_file(url, response.content)
 
     def _fetch(self, url):
+        headers = {}
+        if self.username and self.password:
+            credentials = f"{self.username}:{self.password}"
+            encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+            headers['Authorization'] = f"Basic {encoded_credentials}"
+        
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 401:
+                print(f"Unauthorized access to {url}. Please enter your credentials.")
+                self.username = input("Username: ")
+                self.password = getpass.getpass("Password: ")
+                credentials = f"{self.username}:{self.password}"
+                encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+                headers['Authorization'] = f"Basic {encoded_credentials}"
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
             return response
         except requests.RequestException as e:
             print(f"Failed to fetch {url}: {e}")
