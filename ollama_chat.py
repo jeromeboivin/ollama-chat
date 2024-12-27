@@ -2268,7 +2268,7 @@ def select_ollama_model_if_available(model_name):
         return None
 
     for model in models:
-        if model["name"] == model_name:
+        if model["model"] == model_name:
             selected_model = model
     
             if "gemma" in selected_model:
@@ -2369,13 +2369,13 @@ def prompt_for_ollama_model(default_model, current_model):
     # Ask user to choose a model
     on_print("Available models:\n", Style.RESET_ALL)
     for i, model in enumerate(models):
-        star = " *" if model['name'] == current_model else ""
-        on_stdout_write(f"{i}. {model['name']} ({bytes_to_gibibytes(model['size'])}){star}\n")
+        star = " *" if model['model'] == current_model else ""
+        on_stdout_write(f"{i}. {model['model']} ({bytes_to_gibibytes(model['size'])}){star}\n")
     on_stdout_flush()
 
     default_choice_index = None
     for i, model in enumerate(models):
-        if model['name'] == current_model:
+        if model['model'] == current_model:
             default_choice_index = i
             break
 
@@ -2385,7 +2385,7 @@ def prompt_for_ollama_model(default_model, current_model):
     choice = int(on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
 
     # Use the chosen model
-    selected_model = models[choice]['name']
+    selected_model = models[choice]['model']
 
     if "gemma" in selected_model:
         no_system_role=True
