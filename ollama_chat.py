@@ -24,6 +24,7 @@ from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 from markdownify import MarkdownConverter
 import requests
 from PyPDF2 import PdfReader
@@ -317,21 +318,25 @@ def md(soup, **options):
     return MarkdownConverter(**options).convert_soup(soup)
 
 def extract_text_from_html(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-
-    # Remove all <script> tags
-    for script in soup.find_all('script'):
-        script.decompose()
-
     # Convert the modified HTML content to Markdown
-    text = md(soup, strip=['a', 'img'], heading_style='ATX', 
-                    escape_asterisks=False, escape_underscores=False, 
-                    autolinks=False)
-    
-    # Remove extra newlines
-    text = re.sub(r'\n+', '\n', text)
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
 
-    return text
+        # Remove all <script> tags
+        for script in soup.find_all('script'):
+            script.decompose()
+
+        text = md(soup, strip=['a', 'img'], heading_style='ATX', 
+                        escape_asterisks=False, escape_underscores=False, 
+                        autolinks=False)
+        
+        # Remove extra newlines
+        text = re.sub(r'\n+', '\n', text)
+
+        return text
+    except Exception as e:
+        on_print(f"Failed to parse HTML content: {e}", Fore.RED)
+        return ""
 
 def extract_text_from_pdf(pdf_content):
     with open('temp.pdf', 'wb') as f:
@@ -498,6 +503,123 @@ class SimpleWebCrawler:
 
     def get_articles(self):
         return self.articles
+
+class SimpleWebScraper:
+    def __init__(self, base_url, output_dir="downloaded_site", file_types=None, restrict_to_base=True, convert_to_markdown=False, verbose=False):
+        self.base_url = base_url.rstrip('/')
+        self.output_dir = output_dir
+        self.file_types = file_types if file_types else ["html", "jpg", "jpeg", "png", "gif", "css", "js"]
+        self.restrict_to_base = restrict_to_base
+        self.convert_to_markdown = convert_to_markdown
+        self.visited = set()
+        self.verbose = verbose
+
+    def scrape(self, url=None, depth=0, max_depth=50):
+        if url is None:
+            url = self.base_url
+
+        # Prevent deep recursion
+        if depth > max_depth and self.verbose:
+            on_print(f"Max depth reached for {url}")
+            return
+
+        # Normalize the URL to avoid duplicates
+        url = self._normalize_url(url)
+
+        # Avoid revisiting URLs
+        if url in self.visited:
+            return
+        self.visited.add(url)
+
+        if self.verbose:
+            on_print(f"Scraping: {url}")
+        response = self._fetch(url)
+        if not response:
+            return
+
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" in content_type or not self._has_extension(url):
+            if self.convert_to_markdown:
+                self._save_markdown(url, response.text)
+            else:
+                self._save_html(url, response.text)
+            self._parse_and_scrape_links(response.text, url, depth + 1)
+        else:
+            if self._is_allowed_file_type(url):
+                self._save_file(url, response.content)
+
+    def _fetch(self, url):
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as e:
+            print(f"Failed to fetch {url}: {e}")
+            return None
+
+    def _save_html(self, url, html):
+        local_path = self._get_local_path(url)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "w", encoding="utf-8") as file:
+            file.write(html)
+
+    def _save_markdown(self, url, html):
+        local_path = self._get_local_path(url, markdown=True)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        markdown_content = extract_text_from_html(html)
+        with open(local_path, "w", encoding="utf-8") as file:
+            file.write(markdown_content)
+
+    def _save_file(self, url, content):
+        local_path = self._get_local_path(url)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as file:
+            file.write(content)
+
+    def _get_local_path(self, url, markdown=False):
+        parsed_url = urlparse(url)
+        local_path = os.path.join(self.output_dir, parsed_url.netloc, parsed_url.path.lstrip('/'))
+        if local_path.endswith('/') or not os.path.splitext(parsed_url.path)[1]:
+            local_path = os.path.join(local_path, "index.md" if markdown else "index.html")
+        elif markdown:
+            local_path = os.path.splitext(local_path)[0] + ".md"
+        return local_path
+
+    def _normalize_url(self, url):
+        # Remove fragments and normalize trailing slashes
+        parsed = urlparse(url)
+        normalized = parsed._replace(fragment="").geturl()
+        return normalized
+
+    def _parse_and_scrape_links(self, html, base_url, depth):
+        soup = BeautifulSoup(html, "html.parser")
+
+        for tag, attr in [("a", "href"), ("img", "src"), ("link", "href"), ("script", "src")]:
+            for element in soup.find_all(tag):
+                link = element.get(attr)
+                if link:
+                    abs_link = urljoin(base_url, link)
+                    abs_link = self._normalize_url(abs_link)
+                    if self.restrict_to_base and not self._is_same_domain(abs_link):
+                        continue
+                    if not self._is_allowed_file_type(abs_link) and self._has_extension(abs_link):
+                        continue
+                    if abs_link not in self.visited:
+                        self.scrape(abs_link, depth=depth)
+
+    def _is_same_domain(self, url):
+        base_domain = urlparse(self.base_url).netloc
+        target_domain = urlparse(url).netloc
+        return base_domain == target_domain
+
+    def _is_allowed_file_type(self, url):
+        path = urlparse(url).path
+        file_extension = os.path.splitext(path)[1].lstrip('.').lower()
+        return file_extension in self.file_types
+
+    def _has_extension(self, url):
+        path = urlparse(url).path
+        return bool(os.path.splitext(path)[1])
 
 def select_tools(available_tools, selected_tools):
     def display_tool_options():
@@ -2719,8 +2841,24 @@ def run():
                 on_print("No ChromaDB collection loaded.", Fore.RED)
                 set_current_collection(prompt_for_vector_database_collection())
 
-            document_indexer = DocumentIndexer(user_input.split("/index")[1].strip(), current_collection_name, chroma_client, embeddings_model)
+            folder_to_index = user_input.split("/index")[1].strip()
+            temp_folder = None
+            if folder_to_index.startswith("http"):
+                base_url = folder_to_index
+                temp_folder = tempfile.mkdtemp()
+                scraper = SimpleWebScraper(base_url, output_dir=temp_folder, file_types=["html", "htm"], restrict_to_base=True, convert_to_markdown=True, verbose=verbose_mode)
+                scraper.scrape()
+                folder_to_index = temp_folder
+
+            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model)
             document_indexer.index_documents()
+
+            if temp_folder:
+                # Remove the temporary folder and its contents
+                for file in os.listdir(temp_folder):
+                    file_path = os.path.join(temp_folder, file)
+                    os.remove(file_path)
+                os.rmdir(temp_folder)
             continue
 
         if user_input == "/verbose":
