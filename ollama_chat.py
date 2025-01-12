@@ -75,7 +75,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 
 # List of available commands to autocomplete
 COMMANDS = [
-    "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
+    "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/rmcollection", "/deletecollection", "/chatbot",
     "/cb", "/file", "/quit", "/exit", "/bye"
@@ -167,6 +167,18 @@ def on_stdout_flush():
 def get_available_tools():
     global custom_tools
 
+    load_chroma_client()
+
+    # List existing collections
+    available_collections = []
+    if chroma_client:
+        collections = chroma_client.list_collections()
+
+        for collection in collections:
+            if collection.name == web_cache_collection_name or collection.name == memory_collection_name:
+                continue
+            available_collections.append(collection.name)
+
     default_tools = [{
         'type': 'function',
         'function': {
@@ -190,7 +202,7 @@ def get_available_tools():
         'type': 'function',
         'function': {
             'name': 'query_vector_database',
-            'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
+            'description': f'Performs a semantic search using a knowledge base collection.',
             'parameters': {
                 "type": "object",
                 "properties": {
@@ -201,7 +213,8 @@ def get_available_tools():
                     "collection_name": {
                         "type": "string",
                         "description": "The name of the collection to search in",
-                        "default": current_collection_name
+                        "default": current_collection_name,
+                        "enum": available_collections
                     },
                     "question_context": {
                         "type": "string",
@@ -210,6 +223,7 @@ def get_available_tools():
                 },
                 "required": [
                     "question",
+                    "collection_name",
                     "question_context"
                 ]
             }
@@ -395,6 +409,34 @@ def extract_text_from_html(html_content):
         for script in soup.find_all('script'):
             script.decompose()
 
+        # Remove all <style> tags
+        for style in soup.find_all('style'):
+            style.decompose()
+
+        # Remove all <noscript> tags
+        for noscript in soup.find_all('noscript'):
+            noscript.decompose()
+
+        # Remove all <svg> tags
+        for svg in soup.find_all('svg'):
+            svg.decompose()
+
+        # Remove all <canvas> tags
+        for canvas in soup.find_all('canvas'):
+            canvas.decompose()
+        
+        # Remove all <audio> tags
+        for audio in soup.find_all('audio'):
+            audio.decompose()
+
+        # Remove all <video> tags
+        for video in soup.find_all('video'):
+            video.decompose()
+
+        # Remove all <iframe> tags
+        for iframe in soup.find_all('iframe'):
+            iframe.decompose()
+
         text = md(soup, strip=['a', 'img'], heading_style='ATX', 
                         escape_asterisks=False, escape_underscores=False, 
                         autolinks=False)
@@ -497,7 +539,7 @@ class SimpleWebCrawler:
 
     def fetch_page(self, url):
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             response.raise_for_status()  # Raise an exception for HTTP errors
             return response.content  # Return raw bytes instead of text for PDF support
         except requests.exceptions.RequestException as e:
@@ -1389,6 +1431,210 @@ class DocumentIndexer:
                         )
             except KeyboardInterrupt:
                 break
+
+class Agent:
+    # Static registry to store all agents
+    agent_registry = {}
+
+    def __init__(self, name, model, system_prompt=None, temperature=0.7, max_iterations=5, tools=None, verbose=False, num_ctx=None):
+        """
+        Initialize the Agent with a name, system prompt, tools, and other parameters.
+
+        Parameters:
+        - name: A unique identifier for this agent.
+        - system_prompt: The foundational instruction that drives the agent's behavior and personality.
+        - model: The language model used by the agent.
+        - temperature: The creativity of the responses.
+        - max_iterations: The maximum number of iterations for the task processing loop.
+        - tools: A dictionary of tools with descriptions and callable functions.
+        - verbose: Whether to print verbose output.
+        - num_ctx: The context length for the language model.
+        """
+        self.name = name
+        self.system_prompt = system_prompt or "You are a helpful assistant capable of handling complex tasks."
+        self.model = model
+        self.temperature = temperature
+        self.max_iterations = max_iterations
+        self.tools = tools or {}
+        self.verbose = verbose
+        self.num_ctx = num_ctx
+
+        # Register this agent in the global agent registry
+        Agent.agent_registry[name] = self
+
+    @staticmethod
+    def get_agent(agent_name):
+        """
+        Retrieve an agent instance by name from the registry.
+        """
+        return Agent.agent_registry.get(agent_name)
+
+    def query_llm(self, prompt, system_prompt=None, tools=[]):
+        """
+        Query the OpenAI API with the given prompt and return the response.
+        """
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+        return ask_ollama(system_prompt, prompt, self.model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+    
+    def decompose_task(self, task):
+        """
+        Decompose a task into subtasks using the system prompt for guidance.
+        """
+        prompt = f"Break down the following task into smaller, manageable subtasks:\n{task}\n\nOutput each subtask on a new line, nothing more."
+
+        response = self.query_llm(prompt)
+        print(f"Decomposed subtasks:\n{response}")
+        subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
+
+        # If among the subtasks lines of text we have numbered or bulleted lists, extract the list items and ignore the rest, otherwise return the subtasks as is
+        contains_list = any(re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask) for subtask in subtasks)
+        if contains_list:
+            # Remove non-list items that are not subtasks
+            subtasks = [subtask for subtask in subtasks if re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask)]
+
+        return subtasks
+
+    def decide_and_execute_subtask(self, main_task, subtask, result_from_previous_subtask):
+        """
+        Decide the best approach for a subtask: research, use a tool, delegate to another agent, or directly respond.
+
+        Parameters:
+        - main_task: The main task being solved.
+        - subtask: The subtask to be executed.
+        - results_from_previous_subtasks: The results from previous subtasks.
+
+        Returns:
+        - The result of the subtask execution.
+        """
+        # Prepare a list of available tools and agents with descriptions
+        tools_description = render_tools(self.tools)
+        agents_description = "\n".join([f"{name}: {agent.system_prompt}" for name, agent in Agent.agent_registry.items()])
+
+        prompt = f"""
+You are solving the subtask: "{subtask}" from the main task: "{main_task}".
+
+## Result from previous subtask:
+{result_from_previous_subtask or 'No results available.'}
+
+## Available tools:
+{tools_description or 'No tools available.'}
+
+## Other agents:
+{agents_description or 'No other agents available.'}
+
+Decide whether to:
+1. Use one of the tools above (and specify which tool to use).
+2. Perform research to gather information.
+3. Delegate the task to another agent (and specify which agent to delegate it to).
+4. Provide a direct response without using tools, research, or delegation.
+
+Explain your reasoning, and if you decide to use a tool or delegate, specify the tool name or agent.
+"""
+        thoughts = self.query_llm(prompt)
+        print(f"\nThoughts for subtask '{subtask}':\n{thoughts}")
+        prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
+
+The result from the previous subtask was:
+{result_from_previous_subtask or 'No results available.'}
+
+My initial thoughts about the subtask are:
+{thoughts}
+"""
+
+        # Parse the decision to determine next steps
+        if "delegate the task" in thoughts.lower():
+            for agent_name in Agent.agent_registry:
+                if agent_name.lower() in thoughts.lower() and agent_name != self.name:
+                    agent = Agent.get_agent(agent_name)
+                    if agent:
+                        print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...")
+                        return agent.process_task(prompt)
+
+        return self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
+
+    def self_reflect(self, results, task, subtasks):
+        """
+        Reflect on the current results and decide if additional subtasks or research are needed.
+        """
+        prompt = f"""Reflect on whether additional subtasks, adjustments, or further research are needed to fully address this task:
+{task}.
+
+You already have completed the following subtasks and gathered these results:
+        
+Subtasks:
+{', '.join(subtasks)}
+
+Results:
+{results}
+
+Provide a response. If no further actions are needed, explicitly state: "Task complete, no further actions required."
+"""
+        chain_of_thoughts_system_prompt = generate_chain_of_thoughts_system_prompt(self.tools)
+        return self.query_llm(prompt, system_prompt=chain_of_thoughts_system_prompt)
+    
+    def synthesize_results(self, task, results):
+        """
+        Use the provided results to create a detailed and comprehensive response for the given task.
+        """
+        # Clear and detailed system prompt to guide the LLM
+        system_prompt = (
+            f"You are an assistant tasked with providing a detailed and comprehensive response "
+            f"to the task: '{task}'. Use all relevant information from the provided results, "
+            f"and ensure no important details are left out."
+        )
+        
+        # User prompt that clearly presents the results and instructions
+        user_prompt = (
+            "Below are the results related to the task:\n\n"
+            + "\n\n".join(results)
+            + "\n\nUsing all the relevant information provided, write a complete and detailed response to the task. "
+            "Make sure your answer is thorough and does not omit any important points."
+        )
+        
+        # Query the LLM with the detailed instructions
+        return self.query_llm(user_prompt, system_prompt=system_prompt)
+    
+    def process_task(self, task):
+        """
+        Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
+        """
+        try:
+            subtasks = self.decompose_task(task)
+            all_results = []
+            iterations = 0
+
+            while iterations < self.max_iterations:
+                iterations += 1
+                print(f"\nIteration {iterations}:")
+
+                results = []
+                for subtask in subtasks:
+                    print(f"Executing: {subtask}")
+                    result_from_previous_subtask = results[-1] if results else None
+                    result = self.decide_and_execute_subtask(task, subtask, result_from_previous_subtask)
+                    results.append(f"Task: {subtask}\nResult: {result}\n")
+
+                all_results.append("\n".join(results))
+
+                # Synthesize results at each iteration
+                synthesized_result = self.synthesize_results(task, all_results)
+                print(f"Synthesized Result: {synthesized_result}")
+
+                # Perform self-reflection on the synthesized result
+                reflection = self.self_reflect(synthesized_result, task, subtasks)
+                print(f"Reflection: {reflection}")
+
+                if "Task complete, no further actions required" in reflection:
+                    print("Task completed successfully.")
+                    break
+
+                subtasks = self.decompose_task(reflection)
+
+            return synthesized_result
+        
+        except Exception as e:
+            return f"Error during task processing: {str(e)}"
 
 def web_search(query=None, n_results=5, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
     global current_model
@@ -2954,6 +3200,21 @@ def run():
         if user_input == "/verbose":
             verbose_mode = not verbose_mode
             on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
+            continue
+
+        if "/agent" in user_input:
+            user_input = user_input.replace("/agent", "").strip()
+            conversation.append({"role": "user", "content": user_input})
+
+            agent = Agent("Default agent", selected_model, temperature=temperature, tools=selected_tools, num_ctx=num_ctx)
+            agent_response = agent.process_task(user_input)
+            
+            if agent_response:
+                conversation.append({"role": "assistant", "content": agent_response})
+                if syntax_highlighting:
+                    on_print(colorize(agent_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+                else:
+                    on_print(agent_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
             continue
 
         if "/cot" in user_input:
