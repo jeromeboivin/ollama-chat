@@ -813,7 +813,7 @@ def is_html(file_path):
     Check if the given file is an HTML file, either by its extension or content.
     """
     # Check for .htm and .html extensions
-    if file_path.endswith(".htm") or file_path.endswith(".html"):
+    if file_path.endswith(".htm") or file_path.endswith(".html") or file_path.endswith(".xhtml"):
         return True
     
     # Check for HTML files without extensions
