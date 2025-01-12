@@ -671,7 +671,7 @@ class SimpleWebScraper:
         try:
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 401:
-                print(f"Unauthorized access to {url}. Please enter your credentials.")
+                on_print(f"Unauthorized access to {url}. Please enter your credentials.", Fore.RED)
                 self.username = input("Username: ")
                 self.password = getpass.getpass("Password: ")
                 credentials = f"{self.username}:{self.password}"
@@ -681,7 +681,7 @@ class SimpleWebScraper:
                 response.raise_for_status()
             return response
         except requests.RequestException as e:
-            print(f"Failed to fetch {url}: {e}")
+            on_print(f"Failed to fetch {url}: {e}", Fore.RED)
             return None
 
     def _save_html(self, url, html):
@@ -855,7 +855,7 @@ def is_html(file_path):
     Check if the given file is an HTML file, either by its extension or content.
     """
     # Check for .htm and .html extensions
-    if file_path.endswith(".htm") or file_path.endswith(".html"):
+    if file_path.endswith(".htm") or file_path.endswith(".html") or file_path.endswith(".xhtml"):
         return True
     
     # Check for HTML files without extensions
@@ -864,7 +864,6 @@ def is_html(file_path):
             first_line = next((line.strip() for line in f if line.strip()), None)
             return first_line and (first_line.lower().startswith('<!doctype html>') or first_line.lower().startswith('<html'))
     except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
         return False
 
 def is_markdown(file_path):
@@ -1286,12 +1285,13 @@ def retrieve_relevant_memory(query_text, top_k=3):
     return memory_manager.retrieve_relevant_memory(query_text, top_k)
 
 class DocumentIndexer:
-    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
+    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False):
         self.root_folder = root_folder
         self.collection_name = collection_name
         self.client = chroma_client
         self.model = embeddings_model
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
+        self.verbose = verbose
 
     def get_text_files(self):
         """
@@ -1345,12 +1345,15 @@ class DocumentIndexer:
         if allow_chunks:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-        from tqdm import tqdm
-        # Progress bar for indexing
-        progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
+        progress_bar = None
+        if self.verbose:
+            from tqdm import tqdm
+            # Progress bar for indexing
+            progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
 
         for file_path in text_files:
-            progress_bar.update(1)
+            if progress_bar:
+                progress_bar.update(1)
 
             try:
                 content = self.read_file(file_path)
@@ -1484,7 +1487,8 @@ class Agent:
         prompt = f"Break down the following task into smaller, manageable subtasks:\n{task}\n\nOutput each subtask on a new line, nothing more."
 
         response = self.query_llm(prompt)
-        print(f"Decomposed subtasks:\n{response}")
+        if self.verbose:
+            on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
         subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
 
         # If among the subtasks lines of text we have numbered or bulleted lists, extract the list items and ignore the rest, otherwise return the subtasks as is
@@ -1532,7 +1536,8 @@ Decide whether to:
 Explain your reasoning, and if you decide to use a tool or delegate, specify the tool name or agent.
 """
         thoughts = self.query_llm(prompt)
-        print(f"\nThoughts for subtask '{subtask}':\n{thoughts}")
+        if self.verbose:
+            on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
         prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
 
 The result from the previous subtask was:
@@ -1548,7 +1553,9 @@ My initial thoughts about the subtask are:
                 if agent_name.lower() in thoughts.lower() and agent_name != self.name:
                     agent = Agent.get_agent(agent_name)
                     if agent:
-                        print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...")
+                        if self.verbose:
+                            on_print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...", Fore.WHITE + Style.DIM)
+
                         return agent.process_task(prompt)
 
         return self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
@@ -1606,11 +1613,14 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
 
             while iterations < self.max_iterations:
                 iterations += 1
-                print(f"\nIteration {iterations}:")
+
+                if self.verbose:
+                    on_print(f"\nIteration {iterations}:", Fore.WHITE + Style.DIM)
 
                 results = []
                 for subtask in subtasks:
-                    print(f"Executing: {subtask}")
+                    if self.verbose:
+                        on_print(f"Executing: {subtask}", Fore.WHITE + Style.DIM)
                     result_from_previous_subtask = results[-1] if results else None
                     result = self.decide_and_execute_subtask(task, subtask, result_from_previous_subtask)
                     results.append(f"Task: {subtask}\nResult: {result}\n")
@@ -1619,14 +1629,17 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
 
                 # Synthesize results at each iteration
                 synthesized_result = self.synthesize_results(task, all_results)
-                print(f"Synthesized Result: {synthesized_result}")
+                if self.verbose:
+                    on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
 
                 # Perform self-reflection on the synthesized result
                 reflection = self.self_reflect(synthesized_result, task, subtasks)
-                print(f"Reflection: {reflection}")
+                if self.verbose:
+                    on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
 
                 if "Task complete, no further actions required" in reflection:
-                    print("Task completed successfully.")
+                    if self.verbose:
+                        on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
                     break
 
                 subtasks = self.decompose_task(reflection)
@@ -1848,7 +1861,7 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
 
     return filtered_collections[choice].name
 
-def set_current_collection(collection_name, create_new_collection_if_not_found=True):
+def set_current_collection(collection_name, create_new_collection_if_not_found=True, verbose=False):
     global collection
     global current_collection_name
 
@@ -1866,7 +1879,8 @@ def set_current_collection(collection_name, create_new_collection_if_not_found=T
         else:
             collection = chroma_client.get_collection(name=collection_name)
 
-        on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
+        if verbose:
+            on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
@@ -3175,7 +3189,7 @@ def run():
 
             if not current_collection_name:
                 on_print("No ChromaDB collection loaded.", Fore.RED)
-                set_current_collection(prompt_for_vector_database_collection())
+                set_current_collection(prompt_for_vector_database_collection(), verbose_mode)
 
             folder_to_index = user_input.split("/index")[1].strip()
             temp_folder = None
@@ -3329,7 +3343,7 @@ def run():
 
         if user_input == "/collection":
             collection_name = prompt_for_vector_database_collection()
-            set_current_collection(collection_name)
+            set_current_collection(collection_name, create_new_collection_if_not_found=False, verbose=verbose_mode)
             continue
 
         if memory_manager and (user_input == "/remember" or user_input == "/memorize"):
