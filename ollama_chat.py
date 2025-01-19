@@ -170,6 +170,11 @@ def on_stdout_flush():
 
 def get_available_tools():
     global custom_tools
+    global chroma_client
+    global web_cache_collection_name
+    global memory_collection_name
+    global current_collection_name
+    global selected_tools
 
     load_chroma_client()
 
@@ -216,7 +221,7 @@ def get_available_tools():
                     },
                     "collection_name": {
                         "type": "string",
-                        "description": "The name of the collection to search in",
+                        "description": f"The name of the collection to search in, which must be one of the available collections: {', '.join(available_collections)}",
                         "default": current_collection_name,
                         "enum": available_collections
                     },
@@ -281,7 +286,8 @@ def get_available_tools():
                         "items": {
                             "type": "string",
                             "enum": []
-                        }
+                        },
+                        "description": "A list of tools to be used by the agent for solving the task. Must be provided as an array of tool names."
                     },
                     "agent_name": {
                         "type": "string",
@@ -293,9 +299,15 @@ def get_available_tools():
         }
     }]
 
-    # Set the instantiate_agent_with_tools_and_process_task tools enum
-    default_tools[-1]["function"]["parameters"]["properties"]["tools"]["items"]["enum"] = [tool["function"]["name"] for tool in default_tools + custom_tools]
-    default_tools[-1]["function"]["parameters"]["properties"]["tools"]["description"] = f"Available tools: {', '.join([tool['function']['name'] for tool in default_tools + custom_tools])}"
+    # Find index of instantiate_agent_with_tools_and_process_task function
+    index = -1
+    for i, tool in enumerate(default_tools):
+        if tool['function']['name'] == 'instantiate_agent_with_tools_and_process_task':
+            index = i
+            break
+
+    default_tools[index]["function"]["parameters"]["properties"]["tools"]["items"]["enum"] = [tool["function"]["name"] for tool in selected_tools]
+    default_tools[index]["function"]["parameters"]["properties"]["tools"]["description"] += f" Available tools: {', '.join([tool['function']['name'] for tool in selected_tools])}"
 
     # Add custom tools from plugins
     available_tools = default_tools + custom_tools
@@ -938,7 +950,14 @@ def select_tools(available_tools, selected_tools):
         on_print("Available tools:\n", Style.RESET_ALL)
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
-            status = "[X]" if tool in selected_tools else "[ ]"
+
+            status = "[ ]"
+            # Find current tool name in selected tools
+            for selected_tool in selected_tools:
+                if selected_tool['function']['name'] == tool_name:
+                    status = "[X]"
+                    break
+            
             on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
 
     while True:
@@ -3606,7 +3625,7 @@ def run():
             continue
 
         if user_input == "/tools":
-            selected_tools = select_tools(get_available_tools(), selected_tools)
+            selected_tools = select_tools(get_available_tools(), selected_tools=selected_tools)
             continue
 
         if "/save" in user_input:
