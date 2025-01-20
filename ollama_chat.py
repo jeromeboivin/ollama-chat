@@ -32,6 +32,9 @@ import requests
 from PyPDF2 import PdfReader
 import chardet
 from rank_bm25 import BM25Okapi
+from pptx import Presentation
+from docx import Document
+from lxml import etree
 
 APP_NAME = "ollama-chat"
 APP_AUTHOR = ""
@@ -43,7 +46,7 @@ openai_client = None
 chroma_client = None
 current_collection_name = None
 collection = None
-number_of_documents_to_return_from_vector_db = 5
+number_of_documents_to_return_from_vector_db = 15
 temperature = 0.1
 verbose_mode = False
 embeddings_model = None
@@ -54,6 +57,7 @@ plugins_folder = None
 selected_tools = []  # Initially no tools selected
 current_model = None
 alternate_model = None
+thinking_model = None
 memory_manager = None
 
 other_instance_url = None
@@ -75,7 +79,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 
 # List of available commands to autocomplete
 COMMANDS = [
-    "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
+    "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/rmcollection", "/deletecollection", "/chatbot",
     "/cb", "/file", "/quit", "/exit", "/bye"
@@ -166,6 +170,23 @@ def on_stdout_flush():
 
 def get_available_tools():
     global custom_tools
+    global chroma_client
+    global web_cache_collection_name
+    global memory_collection_name
+    global current_collection_name
+    global selected_tools
+
+    load_chroma_client()
+
+    # List existing collections
+    available_collections = []
+    if chroma_client:
+        collections = chroma_client.list_collections()
+
+        for collection in collections:
+            if collection.name == web_cache_collection_name or collection.name == memory_collection_name:
+                continue
+            available_collections.append(collection.name)
 
     default_tools = [{
         'type': 'function',
@@ -190,7 +211,7 @@ def get_available_tools():
         'type': 'function',
         'function': {
             'name': 'query_vector_database',
-            'description': f'Performs a semantic search using knowledge base collection named: {current_collection_name}',
+            'description': f'Performs a semantic search using a knowledge base collection.',
             'parameters': {
                 "type": "object",
                 "properties": {
@@ -200,8 +221,9 @@ def get_available_tools():
                     },
                     "collection_name": {
                         "type": "string",
-                        "description": "The name of the collection to search in",
-                        "default": current_collection_name
+                        "description": f"The name of the collection to search in, which must be one of the available collections: {', '.join(available_collections)}",
+                        "default": current_collection_name,
+                        "enum": available_collections
                     },
                     "question_context": {
                         "type": "string",
@@ -210,6 +232,7 @@ def get_available_tools():
                 },
                 "required": [
                     "question",
+                    "collection_name",
                     "question_context"
                 ]
             }
@@ -238,7 +261,53 @@ def get_available_tools():
                 ]
             }
         }
+    },
+    {
+        'type': 'function',
+        'function': {
+            "name": "instantiate_agent_with_tools_and_process_task",
+            "description": (
+                "Creates an agent with a specified name using a provided system prompt, task, and a list of tools. "
+                "Executes the task-solving process and returns the result. The tools must be chosen from a predefined set."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task or problem that the agent needs to solve. Provide a clear and concise description."
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "The system prompt that defines the agent's behavior, personality, and approach to solving the task."
+                    },
+                    "tools": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": []
+                        },
+                        "description": "A list of tools to be used by the agent for solving the task. Must be provided as an array of tool names."
+                    },
+                    "agent_name": {
+                        "type": "string",
+                        "description": "A unique name for the agent that will be used for instantiation."
+                    }
+                },
+                "required": ["task", "system_prompt", "tools", "agent_name"]
+            }
+        }
     }]
+
+    # Find index of instantiate_agent_with_tools_and_process_task function
+    index = -1
+    for i, tool in enumerate(default_tools):
+        if tool['function']['name'] == 'instantiate_agent_with_tools_and_process_task':
+            index = i
+            break
+
+    default_tools[index]["function"]["parameters"]["properties"]["tools"]["items"]["enum"] = [tool["function"]["name"] for tool in selected_tools]
+    default_tools[index]["function"]["parameters"]["properties"]["tools"]["description"] += f" Available tools: {', '.join([tool['function']['name'] for tool in selected_tools])}"
 
     # Add custom tools from plugins
     available_tools = default_tools + custom_tools
@@ -395,6 +464,34 @@ def extract_text_from_html(html_content):
         for script in soup.find_all('script'):
             script.decompose()
 
+        # Remove all <style> tags
+        for style in soup.find_all('style'):
+            style.decompose()
+
+        # Remove all <noscript> tags
+        for noscript in soup.find_all('noscript'):
+            noscript.decompose()
+
+        # Remove all <svg> tags
+        for svg in soup.find_all('svg'):
+            svg.decompose()
+
+        # Remove all <canvas> tags
+        for canvas in soup.find_all('canvas'):
+            canvas.decompose()
+        
+        # Remove all <audio> tags
+        for audio in soup.find_all('audio'):
+            audio.decompose()
+
+        # Remove all <video> tags
+        for video in soup.find_all('video'):
+            video.decompose()
+
+        # Remove all <iframe> tags
+        for iframe in soup.find_all('iframe'):
+            iframe.decompose()
+
         text = md(soup, strip=['a', 'img'], heading_style='ATX', 
                         escape_asterisks=False, escape_underscores=False, 
                         autolinks=False)
@@ -421,6 +518,148 @@ def extract_text_from_pdf(pdf_content):
 
     # Return the extracted text, with extra newlines removed
     return re.sub(r'\n+', '\n', text)
+
+def extract_text_from_docx(docx_path):
+    # Load the Word document
+    document = Document(docx_path)
+    
+    # Extract the file name (without extension) and replace underscores with spaces
+    file_name = os.path.splitext(os.path.basename(docx_path))[0].replace('_', ' ')
+    
+    # Initialize a list to collect Markdown lines
+    markdown_lines = []
+    
+    def process_paragraph(paragraph, list_level=0):
+        """Convert a paragraph into Markdown based on its style and list level."""
+        text = paragraph.text.replace("\n", " ").strip()  # Replace carriage returns with spaces
+        if not text:
+            return None  # Skip empty paragraphs
+        
+        # Check if paragraph is a list item based on indentation
+        if paragraph.style.name == "List Paragraph":
+            # Use the list level to determine indentation for bullet points
+            bullet_prefix = "  " * list_level + "- "
+            return f"{bullet_prefix}{text}"
+        
+        # Check for headings
+        if paragraph.style.name.startswith("Heading"):
+            heading_level = int(paragraph.style.name.split(" ")[1])
+            return f"{'#' * heading_level} {text}"
+
+        # Default: Regular paragraph
+        return text
+    
+    def extract_lists(docx):
+        """Extract the list structure from the underlying XML of the document."""
+        # Access the document XML using lxml
+        xml_content = docx.element
+        namespaces = {
+            'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        }
+
+        # Parse the XML tree using lxml's etree
+        root = etree.fromstring(etree.tostring(xml_content))
+
+        # Find all list items (w:li)
+        list_paragraphs = []
+        for item in root.xpath("//w:li", namespaces=namespaces):
+            # Extract the list level from the parent elements
+            list_level = item.getparent().getparent().get("w:ilvl")
+            if list_level is not None:
+                list_paragraphs.append((list_level, item.text.strip()))
+        
+        return list_paragraphs
+    
+    # Add the document title (file name) as the top-level heading
+    markdown_lines.append(f"# {file_name}")
+    
+    # Process each paragraph in the document
+    for paragraph in document.paragraphs:
+        # Detect bullet points based on paragraph's indent level (style `List Paragraph`)
+        markdown_line = process_paragraph(paragraph)
+        if markdown_line:
+            markdown_lines.append(markdown_line)
+
+    # Extract and process lists directly from the document's XML
+    lists = extract_lists(document)
+    for level, item in lists:
+        bullet_prefix = "  " * int(level) + "- "
+        markdown_lines.append(f"{bullet_prefix}{item}")
+    
+    # Join all lines into a single Markdown string
+    return "\n\n".join(markdown_lines)
+
+def extract_text_from_pptx(pptx_path):
+    # Load the PowerPoint presentation
+    presentation = Presentation(pptx_path)
+    
+    # Extract the file name (without extension) and replace underscores with spaces
+    file_name = os.path.splitext(os.path.basename(pptx_path))[0].replace('_', ' ')
+    
+    # Initialize a list to collect Markdown lines
+    markdown_lines = []
+    
+    def extract_text_with_bullets(shape, exclude_text=None):
+        """Extract text with proper bullet point levels from a shape."""
+        text_lines = []
+        if shape.is_placeholder or shape.has_text_frame:
+            if shape.text_frame and shape.text_frame.text.strip():
+                for paragraph in shape.text_frame.paragraphs:
+                    line_text = paragraph.text.replace("\r", "").replace("\n", " ").strip()  # Replace \n with space
+                    if line_text and line_text != exclude_text:  # Exclude the slide title if needed
+                        bullet_level = paragraph.level  # Get the bullet level
+                        bullet = "  " * bullet_level + "- " + line_text
+                        text_lines.append(bullet)
+        elif shape.shape_type == 6:  # Grouped shapes
+            # Handle grouped shapes recursively
+            for sub_shape in shape.shapes:
+                text_lines.extend(extract_text_with_bullets(sub_shape, exclude_text))
+        return text_lines
+    
+    def get_first_text_entry(slide):
+        """Retrieve the first text entry from the slide."""
+        for shape in slide.shapes:
+            if shape.is_placeholder or shape.has_text_frame:
+                if shape.text_frame and shape.text_frame.text.strip():
+                    return shape.text_frame.paragraphs[0].text.replace("\n", " ").strip()
+        return None
+    
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        # Determine the Markdown header level
+        if slide_number == 1:
+            header_prefix = "#"
+        else:
+            header_prefix = "##"
+        
+        # Add the slide title or file name as the main title for the first slide
+        if slide_number == 1:
+            if slide.shapes.title and slide.shapes.title.text.strip():
+                title = slide.shapes.title.text.strip()
+            else:
+                title = file_name
+            markdown_lines.append(f"{header_prefix} {title}")
+        else:
+            # Add the title for subsequent slides
+            if slide.shapes.title and slide.shapes.title.text.strip():
+                title = slide.shapes.title.text.strip()
+            else:
+                # Use the first text entry as the slide title if no title is present
+                title = get_first_text_entry(slide)
+                if not title:
+                    title = f"Slide {slide_number}"
+            markdown_lines.append(f"{header_prefix} {title}")
+        
+        # Add the slide content (text in other shapes), excluding the title if it's used
+        for shape in slide.shapes:
+            bullet_text = extract_text_with_bullets(shape, exclude_text=title)
+            markdown_lines.extend(bullet_text)
+        
+        # Add a separator between slides, except after the last slide
+        if slide_number < len(presentation.slides):
+            markdown_lines.append("")
+    
+    # Join all lines into a single Markdown string
+    return "\n".join(markdown_lines)
 
 class MarkdownSplitter:
     def __init__(self, markdown_content, split_paragraphs=False):
@@ -497,7 +736,7 @@ class SimpleWebCrawler:
 
     def fetch_page(self, url):
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             response.raise_for_status()  # Raise an exception for HTTP errors
             return response.content  # Return raw bytes instead of text for PDF support
         except requests.exceptions.RequestException as e:
@@ -629,7 +868,7 @@ class SimpleWebScraper:
         try:
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 401:
-                print(f"Unauthorized access to {url}. Please enter your credentials.")
+                on_print(f"Unauthorized access to {url}. Please enter your credentials.", Fore.RED)
                 self.username = input("Username: ")
                 self.password = getpass.getpass("Password: ")
                 credentials = f"{self.username}:{self.password}"
@@ -639,7 +878,7 @@ class SimpleWebScraper:
                 response.raise_for_status()
             return response
         except requests.RequestException as e:
-            print(f"Failed to fetch {url}: {e}")
+            on_print(f"Failed to fetch {url}: {e}", Fore.RED)
             return None
 
     def _save_html(self, url, html):
@@ -711,7 +950,14 @@ def select_tools(available_tools, selected_tools):
         on_print("Available tools:\n", Style.RESET_ALL)
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
-            status = "[X]" if tool in selected_tools else "[ ]"
+
+            status = "[ ]"
+            # Find current tool name in selected tools
+            for selected_tool in selected_tools:
+                if selected_tool['function']['name'] == tool_name:
+                    status = "[X]"
+                    break
+            
             on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
 
     while True:
@@ -822,8 +1068,27 @@ def is_html(file_path):
             first_line = next((line.strip() for line in f if line.strip()), None)
             return first_line and (first_line.lower().startswith('<!doctype html>') or first_line.lower().startswith('<html'))
     except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
         return False
+    
+def is_docx(file_path):
+    """
+    Check if the given file is a DOCX file.
+    """
+    # Check for .docx extension
+    if file_path.lower().endswith(".docx"):
+        return True
+
+    return False
+    
+def is_pptx(file_path):
+    """
+    Check if the given file is a PPTX file.
+    """
+    # Check for .pptx extension
+    if file_path.lower().endswith(".pptx"):
+        return True
+
+    return False
 
 def is_markdown(file_path):
     if not os.path.exists(file_path):
@@ -1244,12 +1509,13 @@ def retrieve_relevant_memory(query_text, top_k=3):
     return memory_manager.retrieve_relevant_memory(query_text, top_k)
 
 class DocumentIndexer:
-    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model):
+    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False):
         self.root_folder = root_folder
         self.collection_name = collection_name
         self.client = chroma_client
         self.model = embeddings_model
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
+        self.verbose = verbose
 
     def get_text_files(self):
         """
@@ -1303,12 +1569,15 @@ class DocumentIndexer:
         if allow_chunks:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-        from tqdm import tqdm
-        # Progress bar for indexing
-        progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
+        progress_bar = None
+        if self.verbose:
+            from tqdm import tqdm
+            # Progress bar for indexing
+            progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
 
         for file_path in text_files:
-            progress_bar.update(1)
+            if progress_bar:
+                progress_bar.update(1)
 
             try:
                 content = self.read_file(file_path)
@@ -1389,6 +1658,296 @@ class DocumentIndexer:
                         )
             except KeyboardInterrupt:
                 break
+
+class Agent:
+    # Static registry to store all agents
+    agent_registry = {}
+
+    def __init__(self, name, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=5, tools=None, verbose=False, num_ctx=None):
+        """
+        Initialize the Agent with a name, system prompt, tools, and other parameters.
+
+        Parameters:
+        - name: A unique identifier for this agent.
+        - system_prompt: The foundational instruction that drives the agent's behavior and personality.
+        - model: The language model used by the agent.
+        - thinking_model: The language model used for thinking and decision-making.
+        - temperature: The creativity of the responses.
+        - max_iterations: The maximum number of iterations for the task processing loop.
+        - tools: A dictionary of tools with descriptions and callable functions.
+        - verbose: Whether to print verbose output.
+        - num_ctx: The context length for the language model.
+        """
+        self.name = name
+        self.system_prompt = system_prompt or "You are a helpful assistant capable of handling complex tasks."
+        self.model = model
+        self.temperature = temperature
+        self.max_iterations = max_iterations
+        self.tools = tools or {}
+        self.verbose = verbose
+        self.num_ctx = num_ctx
+        self.thinking_model = thinking_model or model
+
+        # Register this agent in the global agent registry
+        Agent.agent_registry[name] = self
+
+    @staticmethod
+    def get_agent(agent_name):
+        """
+        Retrieve an agent instance by name from the registry.
+        """
+        return Agent.agent_registry.get(agent_name)
+
+    def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
+        """
+        Query the OpenAI API with the given prompt and return the response.
+        """
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+
+        if model is None:
+            model = self.model
+
+        return ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+    
+    def decompose_task(self, task):
+        """
+        Decompose a task into subtasks using the system prompt for guidance.
+        """
+
+        # Prepare a list of available tools and agents with descriptions
+        tools_description = render_tools(self.tools)
+
+        prompt = f"""Break down the following task into smaller, manageable subtasks:
+{task}
+
+## Available tools to assist with subtasks:
+{tools_description or 'No tools available.'}
+
+Output each subtask on a new line, nothing more.
+"""
+
+        response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
+        if self.verbose:
+            on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
+        subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
+
+        # If among the subtasks lines of text we have numbered or bulleted lists, extract the list items and ignore the rest, otherwise return the subtasks as is
+        contains_list = any(re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask) for subtask in subtasks)
+        if contains_list:
+            # Remove non-list items that are not subtasks
+            subtasks = [subtask for subtask in subtasks if re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask)]
+
+        return subtasks
+
+
+    def decide_and_execute_subtask(self, main_task, subtask, result_from_previous_subtask):
+        """
+        Decide the best approach for a subtask: research, use a tool, delegate to another agent, or directly respond.
+
+        Parameters:
+        - main_task: The main task being solved.
+        - subtask: The subtask to be executed.
+        - results_from_previous_subtasks: The results from previous subtasks.
+
+        Returns:
+        - The result of the subtask execution.
+        """
+        # Prepare a list of available tools and agents with descriptions
+        tools_description = render_tools(self.tools)
+        agents_description = "\n".join([f"{name}: {agent.system_prompt}" for name, agent in Agent.agent_registry.items()])
+
+        prompt = f"""
+You are solving the subtask: "{subtask}" from the main task: "{main_task}".
+
+## Result from previous subtask:
+{result_from_previous_subtask or 'No results available.'}
+
+## Available tools:
+{tools_description or 'No tools available.'}
+
+## Other agents:
+{agents_description or 'No other agents available.'}
+
+Decide whether to:
+1. Use one of the tools above (and specify which tool to use).
+2. Perform research to gather information.
+3. Delegate the task to another agent (and specify which agent to delegate it to).
+4. Provide a direct response without using tools, research, or delegation.
+
+Explain your reasoning, and if you decide to use a tool or delegate, specify the tool name or agent.
+"""
+        thoughts = self.query_llm(prompt, model=self.thinking_model)
+        if self.verbose:
+            on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
+        prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
+
+The result from the previous subtask was:
+{result_from_previous_subtask or 'No results available.'}
+
+My initial thoughts about the subtask are:
+{thoughts}
+"""
+
+        # Parse the decision to determine next steps
+        if "delegate the task" in thoughts.lower():
+            for agent_name in Agent.agent_registry:
+                if agent_name.lower() in thoughts.lower() and agent_name != self.name:
+                    agent = Agent.get_agent(agent_name)
+                    if agent:
+                        if self.verbose:
+                            on_print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...", Fore.WHITE + Style.DIM)
+
+                        return agent.process_task(prompt)
+
+        return self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
+
+    def self_reflect(self, results, task, subtasks):
+        """
+        Reflect on the current results and decide if additional subtasks or research are needed.
+        """
+        prompt = f"""Reflect on whether additional subtasks, adjustments, or further research are needed to fully address this task:
+{task}.
+
+You already have completed the following subtasks and gathered these results:
+        
+Subtasks:
+{', '.join(subtasks)}
+
+Results:
+{results}
+
+Provide a response. If no further actions are needed, explicitly state: "Task complete, no further actions required."
+"""
+        chain_of_thoughts_system_prompt = generate_chain_of_thoughts_system_prompt(self.tools)
+        return self.query_llm(prompt, system_prompt=chain_of_thoughts_system_prompt, model=self.thinking_model)
+    
+    def synthesize_results(self, task, results):
+        """
+        Use the provided results to create a detailed and comprehensive response for the given task.
+        """
+        
+        # User prompt that clearly presents the results and instructions
+        user_prompt = (
+            f"Provide a detailed and comprehensive response to the task: '{task}'. Use all relevant information from the provided results, and ensure no important details are left out.\n\n"
+            "Use the following thoughts to craft your response:\n\n"
+            + "\n\n".join(results)
+            + "\n\nUsing all the relevant information provided, write a complete and detailed response to the task. Make sure your answer is thorough and does not omit any important points."
+        )
+        
+        # Query the LLM with the detailed instructions
+        return self.query_llm(user_prompt, system_prompt=self.system_prompt)
+    
+    def process_task(self, task):
+        """
+        Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
+        """
+        try:
+            subtasks = self.decompose_task(task)
+            all_results = []
+            all_results.append("Main task: " + task)
+
+            iterations = 0
+
+            while iterations < self.max_iterations:
+                iterations += 1
+
+                if self.verbose:
+                    on_print(f"\nIteration {iterations} - Decomposed subtasks: {subtasks}", Fore.WHITE + Style.DIM)
+
+                results = []
+                for subtask in subtasks:
+                    if self.verbose:
+                        on_print(f"Executing: {subtask}", Fore.WHITE + Style.DIM)
+                    result_from_previous_subtask = results[-1] if results else None
+                    result = self.decide_and_execute_subtask(task, subtask, result_from_previous_subtask)
+                    results.append(f"Sub-task: {subtask}\nResult: {result}\n")
+
+                all_results.append("\n".join(results))
+
+                # Synthesize results at each iteration
+                synthesized_result = self.synthesize_results(task, all_results)
+                if self.verbose:
+                    on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
+
+                # Perform self-reflection on the synthesized result
+                reflection = self.self_reflect(synthesized_result, task, subtasks)
+                if self.verbose:
+                    on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
+
+                if "Task complete, no further actions required" in reflection:
+                    if self.verbose:
+                        on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
+                    break
+
+                subtasks = self.decompose_task(reflection)
+
+            return synthesized_result
+        
+        except Exception as e:
+            return f"Error during task processing: {str(e)}"
+
+def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str) -> str:
+    """
+    Instantiate an Agent with a given name, system prompt, a list of tools, and solve a given task.
+
+    Parameters:
+    - task (str): The task or problem that the agent will solve.
+    - system_prompt (str): The system prompt to guide the agent's behavior and approach.
+    - tools (list[str]): A list of tools (from a predefined set) that the agent can use.
+    - agent_name (str): A unique name for the agent.
+
+    Returns:
+    - str: The final result after the agent processes the task.
+    """
+    global verbose_mode
+    global current_model
+    global thinking_model
+
+    if verbose_mode:
+        on_print("Agent Instantiation Parameters:", Fore.WHITE + Style.DIM)
+        on_print(f"Task: {task}", Fore.WHITE + Style.DIM)
+        on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
+        on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
+        on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+
+    # Validate inputs
+    if not isinstance(task, str) or not task.strip():
+        return "Error: Task must be a non-empty string describing the problem or goal."
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        return "Error: System prompt must be a non-empty string."
+    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        return "Error: Tools must be a list of strings."
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        return "Error: Agent name must be a non-empty string."
+
+    agent_tools = []
+    available_tools = get_available_tools()
+    for tool in tools:
+        for available_tool in available_tools:
+            if tool.lower() == available_tool['function']['name'].lower() and tool.lower() != "instantiate_agent_with_tools_and_process_task":
+                agent_tools.append(available_tool)
+                break
+
+    # Instantiate the Agent with the provided parameters
+    agent = Agent(
+        name=agent_name,
+        model=current_model,
+        thinking_model=thinking_model,
+        system_prompt=system_prompt,
+        temperature=0.7,
+        max_iterations=5,
+        tools=agent_tools,
+        verbose=verbose_mode
+    )
+
+    # Process the task using the agent
+    try:
+        result = agent.process_task(task)
+    except Exception as e:
+        return f"Error during task processing: {e}"
+
+    return result
 
 def web_search(query=None, n_results=5, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
     global current_model
@@ -1518,6 +2077,11 @@ chatbots = [
         "tools": [
             "retrieve_relevant_memory"
         ]
+    },
+    {
+        "name": "prompt generator",
+        "description": "The ultimate prompt generator, to write the best prompts from https://lawtonsolutions.com/",
+        "system_prompt": "CONTEXT: We are going to create one of the best ChatGPT prompts ever written. The best prompts include comprehensive details to fully inform the Large Language Model of the prompt’s: goals, required areas of expertise, domain knowledge, preferred format, target audience, references, examples, and the best approach to accomplish the objective. Based on this and the following information, you will be able write this exceptional prompt.\r\n\r\nROLE: You are an LLM prompt generation expert. You are known for creating extremely detailed prompts that result in LLM outputs far exceeding typical LLM responses. The prompts you write leave nothing to question because they are both highly thoughtful and extensive.\r\n\r\nACTION:\r\n\r\n1) Before you begin writing this prompt, you will first look to receive the prompt topic or theme. If I don’t provide the topic or theme for you, please request it.\r\n2) Once you are clear about the topic or theme, please also review the Format and Example provided below.\r\n3) If necessary, the prompt should include “fill in the blank” elements for the user to populate based on their needs.\r\n4) Take a deep breath and take it one step at a time.\r\n5) Once you’ve ingested all of the information, write the best prompt ever created.\r\n\r\nFORMAT: For organizational purposes, you will use an acronym called “C.R.A.F.T.” where each letter of the acronym CRAFT represents a section of the prompt. Your format and section descriptions for this prompt development are as follows:\r\n\r\nContext: This section describes the current context that outlines the situation for which the prompt is needed. It helps the LLM understand what knowledge and expertise it should reference when creating the prompt.\r\n\r\nRole: This section defines the type of experience the LLM has, its skill set, and its level of expertise relative to the prompt requested. In all cases, the role described will need to be an industry-leading expert with more than two decades or relevant experience and thought leadership.\r\n\r\nAction: This is the action that the prompt will ask the LLM to take. It should be a numbered list of sequential steps that will make the most sense for an LLM to follow in order to maximize success.\r\n\r\nFormat: This refers to the structural arrangement or presentation style of the LLM’s generated content. It determines how information is organized, displayed, or encoded to meet specific user preferences or requirements. Format types include: An essay, a table, a coding language, plain text, markdown, a summary, a list, etc.\r\n\r\nTarget Audience: This will be the ultimate consumer of the output that your prompt creates. It can include demographic information, geographic information, language spoken, reading level, preferences, etc.\r\n\r\nTARGET AUDIENCE: The target audience for this prompt creation is ChatGPT 4o or ChatGPT o1.\r\n\r\nEXAMPLE: Here is an Example of a CRAFT Prompt for your reference:\r\n\r\n**Context:** You are tasked with creating a detailed guide to help individuals set, track, and achieve monthly goals. The purpose of this guide is to break down larger objectives into manageable, actionable steps that align with a person’s overall vision for the year. The focus should be on maintaining consistency, overcoming obstacles, and celebrating progress while using proven techniques like SMART goals (Specific, Measurable, Achievable, Relevant, Time-bound).\r\n\r\n**Role:** You are an expert productivity coach with over two decades of experience in helping individuals optimize their time, define clear goals, and achieve sustained success. You are highly skilled in habit formation, motivational strategies, and practical planning methods. Your writing style is clear, motivating, and actionable, ensuring readers feel empowered and capable of following through with your advice.\r\n\r\n**Action:** 1. Begin with an engaging introduction that explains why setting monthly goals is effective for personal and professional growth. Highlight the benefits of short-term goal planning. 2. Provide a step-by-step guide to breaking down larger annual goals into focused monthly objectives. 3. Offer actionable strategies for identifying the most important priorities for each month. 4. Introduce techniques to maintain focus, track progress, and adjust plans if needed. 5. Include examples of monthly goals for common areas of life (e.g., health, career, finances, personal development). 6. Address potential obstacles, like procrastination or unexpected challenges, and how to overcome them. 7. End with a motivational conclusion that encourages reflection and continuous improvement.\r\n\r\n**Format:** Write the guide in plain text, using clear headings and subheadings for each section. Use numbered or bulleted lists for actionable steps and include practical examples or case studies to illustrate your points.\r\n\r\n**Target Audience:** The target audience includes working professionals and entrepreneurs aged 25-55 who are seeking practical, straightforward strategies to improve their productivity and achieve their goals. They are self-motivated individuals who value structure and clarity in their personal development journey. They prefer reading at a 6th grade level.\r\n\r\n-End example-\r\n\r\nPlease reference the example I have just provided for your output. Again, take a deep breath and take it one step at a time."
     }
 ]
 
@@ -1602,7 +2166,7 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
 
     return filtered_collections[choice].name
 
-def set_current_collection(collection_name, create_new_collection_if_not_found=True):
+def set_current_collection(collection_name, create_new_collection_if_not_found=True, verbose=False):
     global collection
     global current_collection_name
 
@@ -1620,7 +2184,8 @@ def set_current_collection(collection_name, create_new_collection_if_not_found=T
         else:
             collection = chroma_client.get_collection(name=collection_name)
 
-        on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
+        if verbose:
+            on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
@@ -1642,7 +2207,7 @@ def delete_collection(collection_name):
 
     try:
         chroma_client.delete_collection(name=collection_name)
-        on_print(f"Collection {collection_name} deleted.", Fore.WHITE + Style.DIM)
+        on_print(f"Collection {collection_name} deleted.", Fore.GREEN)
     except:
         on_print(f"Collection {collection_name} not found.", Fore.RED)
 
@@ -2580,6 +3145,7 @@ def run():
     global other_instance_url
     global listening_port
     global memory_manager
+    global thinking_model
     
     default_model = None
     prompt_template = None
@@ -2605,6 +3171,7 @@ def run():
     parser.add_argument('--system-prompt-placeholders-json', type=str, help='A JSON file containing a dictionary of key-value pairs to fill system prompt placeholders', default=None)
     parser.add_argument('--prompt', type=str, help='User prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default=None)
+    parser.add_argument('--thinking-model', type=str, help='Alternate model to use for more thoughtful responses, like OpenAI o1 or o3 models', default=None)
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
@@ -2639,6 +3206,14 @@ def run():
     initial_system_prompt = args.system_prompt
     system_prompt_placeholders_json = args.system_prompt_placeholders_json
     preferred_model = args.model
+    thinking_model = args.thinking_model
+
+    if not thinking_model:
+        thinking_model = preferred_model
+
+    if verbose_mode:
+        on_print(f"Using thinking model: {thinking_model}", Fore.WHITE + Style.DIM)
+
     conversations_folder = args.conversations_folder
     auto_save = args.auto_save
     syntax_highlighting = args.syntax_highlighting
@@ -2771,7 +3346,7 @@ def run():
             on_print("User name not used.", Fore.WHITE + Style.DIM)
 
     # Set the current collection
-    set_current_collection(current_collection_name)
+    set_current_collection(current_collection_name, verbose=verbose_mode)
 
     # Initial system message
     if initial_system_prompt:
@@ -2929,7 +3504,7 @@ def run():
 
             if not current_collection_name:
                 on_print("No ChromaDB collection loaded.", Fore.RED)
-                set_current_collection(prompt_for_vector_database_collection())
+                set_current_collection(prompt_for_vector_database_collection(), verbose=verbose_mode)
 
             folder_to_index = user_input.split("/index")[1].strip()
             temp_folder = None
@@ -2956,6 +3531,21 @@ def run():
             on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
             continue
 
+        if "/agent" in user_input:
+            user_input = user_input.replace("/agent", "").strip()
+            conversation.append({"role": "user", "content": user_input})
+
+            agent = Agent("Default agent", selected_model, thinking_model=thinking_model, temperature=temperature, tools=selected_tools, num_ctx=num_ctx, verbose=verbose_mode)
+            agent_response = agent.process_task(user_input)
+            
+            if agent_response:
+                conversation.append({"role": "assistant", "content": agent_response})
+                if syntax_highlighting:
+                    on_print(colorize(agent_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+                else:
+                    on_print(agent_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+            continue
+
         if "/cot" in user_input:
             user_input = user_input.replace("/cot", "").strip()
             chain_of_thoughts_system_prompt = generate_chain_of_thoughts_system_prompt(selected_tools)
@@ -2964,7 +3554,7 @@ def run():
             formatted_conversation = "\n".join([f"{entry['role']}: {entry['content']}" for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"])
             formatted_conversation += "\n\n" + user_input
 
-            thoughts = ask_ollama(chain_of_thoughts_system_prompt, formatted_conversation, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+            thoughts = ask_ollama(chain_of_thoughts_system_prompt, formatted_conversation, thinking_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
 
         if "/search" in user_input:
             # If /search is followed by a number, use that number as the number of documents to return (/search can be anywhere in the prompt)
@@ -3035,7 +3625,7 @@ def run():
             continue
 
         if user_input == "/tools":
-            selected_tools = select_tools(get_available_tools(), selected_tools)
+            selected_tools = select_tools(get_available_tools(), selected_tools=selected_tools)
             continue
 
         if "/save" in user_input:
@@ -3068,7 +3658,7 @@ def run():
 
         if user_input == "/collection":
             collection_name = prompt_for_vector_database_collection()
-            set_current_collection(collection_name)
+            set_current_collection(collection_name, verbose=verbose_mode)
             continue
 
         if memory_manager and (user_input == "/remember" or user_input == "/memorize"):

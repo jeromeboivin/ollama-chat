@@ -17,3 +17,6 @@ openai
 tqdm
 rank-bm25
 appdirs
+lxml
+python-pptx
+python-docx
