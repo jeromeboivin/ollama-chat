@@ -82,7 +82,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 COMMANDS = [
     "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/thinking_model", "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
-    "/memorize", "/forget", "/rmcollection", "/deletecollection", "/chatbot",
+    "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
     "/cb", "/file", "/quit", "/exit", "/bye"
 ]
 
@@ -181,6 +181,7 @@ def get_available_tools():
 
     # List existing collections
     available_collections = []
+    available_collections_description = []
     if chroma_client:
         collections = chroma_client.list_collections()
 
@@ -188,6 +189,9 @@ def get_available_tools():
             if collection.name == web_cache_collection_name or collection.name == memory_collection_name:
                 continue
             available_collections.append(collection.name)
+
+            if type(collection.metadata) == dict and "description" in collection.metadata:
+                available_collections_description.append(f"{collection.name}: {collection.metadata['description']}")
 
     default_tools = [{
         'type': 'function',
@@ -222,7 +226,7 @@ def get_available_tools():
                     },
                     "collection_name": {
                         "type": "string",
-                        "description": f"The name of the collection to search in, which must be one of the available collections: {', '.join(available_collections)}",
+                        "description": f"The name of the collection to search in, which must be one of the available collections: {', '.join(available_collections_description)}",
                         "default": current_collection_name,
                         "enum": available_collections
                     },
@@ -1735,7 +1739,17 @@ class Agent:
         if model is None:
             model = self.model
 
-        return ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+        if self.verbose:
+            on_print(f"System prompt:\n{system_prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"User prompt:\n{prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"Model: {model}", Fore.WHITE + Style.DIM)
+
+        llm_response = ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+
+        if self.verbose:
+            on_print(f"Response:\n{llm_response}", Fore.WHITE + Style.DIM)
+
+        return llm_response
     
     def decompose_task(self, task):
         """
@@ -1745,13 +1759,14 @@ class Agent:
         # Prepare a list of available tools and agents with descriptions
         tools_description = render_tools(self.tools)
 
-        prompt = f"""Break down the following task into smaller, manageable subtasks:
+        prompt = f"""Instructions: Break down the following task into smaller, manageable subtasks:
 {task}
 
 ## Available tools to assist with subtasks:
 {tools_description or 'No tools available.'}
 
-Output each subtask on a new line, nothing more.
+## Output format:
+Output each subtask on a new line. Output only the subtasks without any explanations, introductions, or conclusions, no formatting needed, just the subtasks themselves.
 """
         thinking_model_is_different = self.thinking_model != self.model
         response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
@@ -1762,6 +1777,8 @@ Output each subtask on a new line, nothing more.
 
             if reasoning is None:
                 reasoning = response
+
+            reasoning = self.rewrite_thinking_instructions_to_second_person(reasoning)
 
             # Use result from thinking model to guide the response from the main model
             prompt = f"""Break down the following task into smaller, manageable subtasks:
@@ -1838,6 +1855,8 @@ Explain your reasoning, and if you decide to use a tool or delegate, specify the
             if reasoning:
                 thoughts = reasoning
 
+            thoughts = self.rewrite_thinking_instructions_to_second_person(thoughts)
+
         if self.verbose:
             on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
         prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
@@ -1845,7 +1864,7 @@ Explain your reasoning, and if you decide to use a tool or delegate, specify the
 The result from the previous subtask was:
 {result_from_previous_subtask or 'No results available.'}
 
-My initial thoughts about the subtask are:
+Here are some initial thoughts on how to approach this subtask:
 {thoughts}
 """
         result = ""
@@ -1901,6 +1920,14 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
         
         # Query the LLM with the detailed instructions
         return self.query_llm(user_prompt, system_prompt=self.system_prompt)
+    
+    def rewrite_thinking_instructions_to_second_person(self, thinking_instructions):
+        """
+        Rewrite the thinking instructions to be in the second person.
+        """
+        system_prompt = """Convert any given text from the first person (I, me, my, mine) to the second person (you, your, yours). Output only the converted text without any explanations, introductions, or conclusions. Maintain the original tone, style, and context while ensuring grammatical correctness.
+If the input text refers to 'the user,' replace it with 'I' to maintain a natural conversational flow, as the original text is likely written from the perspective of someone addressing a system or guide."""
+        return self.query_llm(thinking_instructions, system_prompt=system_prompt)
     
     def process_task(self, task, return_intermediate_results=False):
         """
@@ -2345,6 +2372,33 @@ def prompt_for_chatbot():
 
     return chatbots[choice]
 
+def edit_collection_metadata(collection_name):
+    global chroma_client
+    
+    load_chroma_client()
+    
+    if not collection_name or not chroma_client:
+        on_print("Invalid collection name or ChromaDB client not initialized.", Fore.RED)
+        return
+    
+    try:
+        collection = chroma_client.get_collection(name=collection_name)
+        if type(collection.metadata) == dict:
+            current_description = collection.metadata.get("description", "No description")
+        else:
+            current_description = "No description"
+        on_print(f"Current description: {current_description}")
+        
+        new_description = on_user_input("Enter the new description: ")
+        existing_metadata = collection.metadata or {}
+        existing_metadata["description"] = new_description
+        existing_metadata["updated"] = str(datetime.now())
+        collection.modify(metadata=existing_metadata)
+        
+        on_print(f"Description updated for collection {collection_name}.", Fore.GREEN)
+    except:
+        raise Exception(f"Collection {collection_name} not found")
+
 def prompt_for_vector_database_collection(prompt_create_new=True):
     global chroma_client
     global web_cache_collection_name
@@ -2361,20 +2415,30 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
 
     if not collections:
         on_print("No collections found", Fore.RED)
-        return on_user_input("Enter a new collection to create: ")
+        new_collection_name = on_user_input("Enter a new collection to create: ")
+        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        return new_collection_name, new_collection_desc
 
     # Filter out the web_cache_collection_name
     filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name and collection.name != memory_collection_name]
 
     if not filtered_collections:
         on_print("No collections found", Fore.RED)
-        return on_user_input("Enter a new collection to create: ")
+        new_collection_name = on_user_input("Enter a new collection to create: ")
+        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        return new_collection_name, new_collection_desc
 
     # Ask user to choose a collection
     on_print("Available collections:", Style.RESET_ALL)
     for i, collection in enumerate(filtered_collections):
         collection_name = collection.name
-        on_print(f"{i}. {collection_name}")
+
+        if type(collection.metadata) == dict:
+            collection_metadata = collection.metadata.get("description", "No description")
+        else:
+            collection_metadata = "No description"
+
+        on_print(f"{i}. {collection_name} - {collection_metadata}")
 
     if prompt_create_new:
         # Propose to create a new collection
@@ -2383,11 +2447,13 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
     choice = int(on_user_input("Enter the number of your preferred collection [0]: ") or 0)
 
     if prompt_create_new and choice == len(filtered_collections):
-        return on_user_input("Enter a new collection to create: ")
+        new_collection_name = on_user_input("Enter a new collection to create: ")
+        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        return new_collection_name, new_collection_desc
 
-    return filtered_collections[choice].name
+    return filtered_collections[choice].name, None  # No new description needed for existing collections
 
-def set_current_collection(collection_name, create_new_collection_if_not_found=True, verbose=False):
+def set_current_collection(collection_name, description=None, create_new_collection_if_not_found=True, verbose=False):
     global collection
     global current_collection_name
 
@@ -2398,15 +2464,26 @@ def set_current_collection(collection_name, create_new_collection_if_not_found=T
         current_collection_name = None
         return
 
-    # Get the target collection
+    # Get or create the target collection
     try:
         if create_new_collection_if_not_found:
             collection = chroma_client.get_or_create_collection(name=collection_name)
         else:
             collection = chroma_client.get_collection(name=collection_name)
 
+        # Update description metadata if provided
+        if description:
+            existing_metadata = collection.metadata or {}
+
+            if description != existing_metadata.get("description"):
+                existing_metadata["description"] = description
+                collection.modify(metadata=existing_metadata)
+                if verbose:
+                    on_print(f"Updated description for collection {collection_name}.", Fore.WHITE + Style.DIM)
+
         if verbose:
             on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
+        
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
@@ -2500,7 +2577,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
 
     if not collection:
         on_print("No ChromaDB collection loaded.", Fore.RED)
-        collection_name = prompt_for_vector_database_collection()
+        collection_name, _ = prompt_for_vector_database_collection()
         if not collection_name:
             return ""
 
@@ -3744,7 +3821,9 @@ def run():
 
             if not current_collection_name:
                 on_print("No ChromaDB collection loaded.", Fore.RED)
-                set_current_collection(prompt_for_vector_database_collection(), verbose=verbose_mode)
+
+                collection_name, collection_description = prompt_for_vector_database_collection()
+                set_current_collection(collection_name, collection_description, verbose=verbose_mode)
 
             folder_to_index = user_input.split("/index")[1].strip()
             temp_folder = None
@@ -3915,8 +3994,8 @@ def run():
             continue
 
         if user_input == "/collection":
-            collection_name = prompt_for_vector_database_collection()
-            set_current_collection(collection_name, verbose=verbose_mode)
+            collection_name, collection_description = prompt_for_vector_database_collection()
+            set_current_collection(collection_name, collection_description, verbose=verbose_mode)
             continue
 
         if memory_manager and (user_input == "/remember" or user_input == "/memorize"):
@@ -3939,12 +4018,17 @@ def run():
                 collection_name = user_input.split("/deletecollection")[1].strip()
 
             if not collection_name:
-                collection_name = prompt_for_vector_database_collection(prompt_create_new=False)
+                collection_name, _ = prompt_for_vector_database_collection(prompt_create_new=False)
 
             if not collection_name:
                 continue
 
             delete_collection(collection_name)
+            continue
+
+        if "/editcollection" in user_input:
+            collection_name, _ = prompt_for_vector_database_collection()
+            edit_collection_metadata(collection_name)
             continue
 
         if user_input == "/chatbot":
