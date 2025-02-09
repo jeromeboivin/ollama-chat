@@ -58,6 +58,7 @@ selected_tools = []  # Initially no tools selected
 current_model = None
 alternate_model = None
 thinking_model = None
+thinking_model_reasoning_pattern = None
 memory_manager = None
 
 other_instance_url = None
@@ -80,8 +81,8 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 # List of available commands to autocomplete
 COMMANDS = [
     "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
-    "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
-    "/memorize", "/forget", "/rmcollection", "/deletecollection", "/chatbot",
+    "/thinking_model", "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
+    "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
     "/cb", "/file", "/quit", "/exit", "/bye"
 ]
 
@@ -180,6 +181,7 @@ def get_available_tools():
 
     # List existing collections
     available_collections = []
+    available_collections_description = []
     if chroma_client:
         collections = chroma_client.list_collections()
 
@@ -187,6 +189,9 @@ def get_available_tools():
             if collection.name == web_cache_collection_name or collection.name == memory_collection_name:
                 continue
             available_collections.append(collection.name)
+
+            if type(collection.metadata) == dict and "description" in collection.metadata:
+                available_collections_description.append(f"{collection.name}: {collection.metadata['description']}")
 
     default_tools = [{
         'type': 'function',
@@ -221,7 +226,7 @@ def get_available_tools():
                     },
                     "collection_name": {
                         "type": "string",
-                        "description": f"The name of the collection to search in, which must be one of the available collections: {', '.join(available_collections)}",
+                        "description": f"The name of the collection to search in, which must be one of the available collections: {', '.join(available_collections_description)}",
                         "default": current_collection_name,
                         "enum": available_collections
                     },
@@ -292,9 +297,13 @@ def get_available_tools():
                     "agent_name": {
                         "type": "string",
                         "description": "A unique name for the agent that will be used for instantiation."
+                    },
+                    "agent_description": {
+                        "type": "string",
+                        "description": "A brief description of the agent's purpose and capabilities."
                     }
                 },
-                "required": ["task", "system_prompt", "tools", "agent_name"]
+                "required": ["task", "system_prompt", "tools", "agent_name", "agent_description"]
             }
         }
     }]
@@ -1663,7 +1672,7 @@ class Agent:
     # Static registry to store all agents
     agent_registry = {}
 
-    def __init__(self, name, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=5, tools=None, verbose=False, num_ctx=None):
+    def __init__(self, name, description, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=3, tools=None, verbose=False, num_ctx=None, thinking_model_reasoning_pattern=None):
         """
         Initialize the Agent with a name, system prompt, tools, and other parameters.
 
@@ -1677,8 +1686,10 @@ class Agent:
         - tools: A dictionary of tools with descriptions and callable functions.
         - verbose: Whether to print verbose output.
         - num_ctx: The context length for the language model.
+        - thinking_model_reasoning_pattern: A regular expression pattern to match the reasoning pattern in the thinking model's responses. For example, "<think>.*?</think>".
         """
         self.name = name
+        self.description = description
         self.system_prompt = system_prompt or "You are a helpful assistant capable of handling complex tasks."
         self.model = model
         self.temperature = temperature
@@ -1687,6 +1698,9 @@ class Agent:
         self.verbose = verbose
         self.num_ctx = num_ctx
         self.thinking_model = thinking_model or model
+
+        # thinking_model_reasoning_pattern is a regular expression pattern to match the reasoning pattern in the thinking model's responses, for example everything between "<think>" and "</think>".
+        self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
 
         # Register this agent in the global agent registry
         Agent.agent_registry[name] = self
@@ -1698,6 +1712,23 @@ class Agent:
         """
         return Agent.agent_registry.get(agent_name)
 
+    def split_reasoning_and_final_response(self, response):
+        """
+        Split the reasoning and final response from the thinking model's response.
+        """
+        if not self.thinking_model_reasoning_pattern:
+            return None, response
+
+        reasoning = None
+        final_response = response
+
+        match = re.search(self.thinking_model_reasoning_pattern, response, re.DOTALL)
+        if match and len(match.groups()) > 0:
+            reasoning = match.group(1)
+            final_response = response.replace(reasoning, "").strip()
+
+        return reasoning, final_response
+
     def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
         """
         Query the OpenAI API with the given prompt and return the response.
@@ -1708,7 +1739,17 @@ class Agent:
         if model is None:
             model = self.model
 
-        return ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+        if self.verbose:
+            on_print(f"System prompt:\n{system_prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"User prompt:\n{prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"Model: {model}", Fore.WHITE + Style.DIM)
+
+        llm_response = ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+
+        if self.verbose:
+            on_print(f"Response:\n{llm_response}", Fore.WHITE + Style.DIM)
+
+        return llm_response
     
     def decompose_task(self, task):
         """
@@ -1718,16 +1759,41 @@ class Agent:
         # Prepare a list of available tools and agents with descriptions
         tools_description = render_tools(self.tools)
 
-        prompt = f"""Break down the following task into smaller, manageable subtasks:
+        prompt = f"""Instructions: Break down the following task into smaller, manageable subtasks:
+{task}
+
+## Available tools to assist with subtasks:
+{tools_description or 'No tools available.'}
+
+## Output format:
+Output each subtask on a new line. Output only the subtasks without any explanations, introductions, or conclusions, no formatting needed, just the subtasks themselves.
+"""
+        thinking_model_is_different = self.thinking_model != self.model
+        response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
+
+        if thinking_model_is_different:
+            # Split the reasoning and final response from the thinking model's response
+            reasoning, response = self.split_reasoning_and_final_response(response)
+
+            if reasoning is None:
+                reasoning = response
+
+            reasoning = self.rewrite_thinking_instructions_to_second_person(reasoning)
+
+            # Use result from thinking model to guide the response from the main model
+            prompt = f"""Break down the following task into smaller, manageable subtasks:
 {task}
 
 ## Available tools to assist with subtasks:
 {tools_description or 'No tools available.'}
 
 Output each subtask on a new line, nothing more.
-"""
 
-        response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
+Initial thoughts to guide the response:
+{reasoning}
+"""
+            response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.model)
+
         if self.verbose:
             on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
         subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
@@ -1738,8 +1804,10 @@ Output each subtask on a new line, nothing more.
             # Remove non-list items that are not subtasks
             subtasks = [subtask for subtask in subtasks if re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask)]
 
-        return subtasks
+        # Remove subtasks ending with ':' or '**'
+        subtasks = [subtask for subtask in subtasks if not re.search(r':$', subtask) and not re.search(r'\*\*$', subtask)]
 
+        return subtasks
 
     def decide_and_execute_subtask(self, main_task, subtask, result_from_previous_subtask):
         """
@@ -1755,7 +1823,7 @@ Output each subtask on a new line, nothing more.
         """
         # Prepare a list of available tools and agents with descriptions
         tools_description = render_tools(self.tools)
-        agents_description = "\n".join([f"{name}: {agent.system_prompt}" for name, agent in Agent.agent_registry.items()])
+        agents_description = "\n".join([f"{name}: {agent.description}" for name, agent in Agent.agent_registry.items()])
 
         prompt = f"""
 You are solving the subtask: "{subtask}" from the main task: "{main_task}".
@@ -1778,6 +1846,17 @@ Decide whether to:
 Explain your reasoning, and if you decide to use a tool or delegate, specify the tool name or agent.
 """
         thoughts = self.query_llm(prompt, model=self.thinking_model)
+        thinking_model_is_different = self.thinking_model != self.model
+
+        if thinking_model_is_different:
+            # Split the reasoning and final response from the thinking model's response
+            reasoning, _ = self.split_reasoning_and_final_response(thoughts)
+
+            if reasoning:
+                thoughts = reasoning
+
+            thoughts = self.rewrite_thinking_instructions_to_second_person(thoughts)
+
         if self.verbose:
             on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
         prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
@@ -1785,10 +1864,10 @@ Explain your reasoning, and if you decide to use a tool or delegate, specify the
 The result from the previous subtask was:
 {result_from_previous_subtask or 'No results available.'}
 
-My initial thoughts about the subtask are:
+Here are some initial thoughts on how to approach this subtask:
 {thoughts}
 """
-
+        result = ""
         # Parse the decision to determine next steps
         if "delegate the task" in thoughts.lower():
             for agent_name in Agent.agent_registry:
@@ -1798,9 +1877,13 @@ My initial thoughts about the subtask are:
                         if self.verbose:
                             on_print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...", Fore.WHITE + Style.DIM)
 
-                        return agent.process_task(prompt)
+                        result = agent.process_task(prompt)
+                        break
+        
+        if len(result) == 0:
+            result = self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
 
-        return self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
+        return result
 
     def self_reflect(self, results, task, subtasks):
         """
@@ -1838,7 +1921,15 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
         # Query the LLM with the detailed instructions
         return self.query_llm(user_prompt, system_prompt=self.system_prompt)
     
-    def process_task(self, task):
+    def rewrite_thinking_instructions_to_second_person(self, thinking_instructions):
+        """
+        Rewrite the thinking instructions to be in the second person.
+        """
+        system_prompt = """Convert any given text from the first person (I, me, my, mine) to the second person (you, your, yours). Output only the converted text without any explanations, introductions, or conclusions. Maintain the original tone, style, and context while ensuring grammatical correctness.
+If the input text refers to 'the user,' replace it with 'I' to maintain a natural conversational flow, as the original text is likely written from the perspective of someone addressing a system or guide."""
+        return self.query_llm(thinking_instructions, system_prompt=system_prompt)
+    
+    def process_task(self, task, return_intermediate_results=False):
         """
         Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
         """
@@ -1882,12 +1973,155 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
 
                 subtasks = self.decompose_task(reflection)
 
-            return synthesized_result
+            if return_intermediate_results:
+                return all_results
+            else:
+                return synthesized_result
         
         except Exception as e:
             return f"Error during task processing: {str(e)}"
 
-def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str) -> str:
+class AgentCrewManager:
+    def __init__(self, database_path="agents.json", verbose=False, num_ctx=None):
+        """
+        Initialize the AgentCrewManager with a path to the JSON database.
+
+        Parameters:
+        - database_path: Path to the JSON file used to store agent data.
+        """
+        self.database_path = database_path
+        self.verbose = verbose
+        self.num_ctx = num_ctx
+        # Load the database or initialize it if it doesn't exist
+        if os.path.exists(self.database_path):
+            with open(self.database_path, "r") as file:
+                self.agents_db = json.load(file)
+        else:
+            self.agents_db = {}
+            self._save_database()
+
+    def _save_database(self):
+        """Save the current state of the database to the JSON file."""
+        with open(self.database_path, "w") as file:
+            json.dump(self.agents_db, file, indent=4)
+
+    def add_agent(self, name, description, model, system_prompt=None, temperature=0.7, max_iterations=5, tools=None):
+        """
+        Add a new agent to the database.
+
+        Parameters:
+        - name: A unique identifier for the agent.
+        - model: The language model used by the agent.
+        - system_prompt: The foundational instruction for the agent.
+        - temperature: The creativity of the responses.
+        - max_iterations: The maximum number of iterations for task processing.
+        - tools: A dictionary of tools or a list of tool names.
+        - verbose: Whether the agent operates in verbose mode.
+        - num_ctx: The context length for the language model.
+        """
+        if name in self.agents_db:
+            raise ValueError(f"An agent with the name '{name}' already exists.")
+
+        # Add agent details to the database
+        self.agents_db[name] = {
+            "description": description,
+            "model": model,
+            "system_prompt": system_prompt,
+            "temperature": temperature,
+            "max_iterations": max_iterations,
+            "tools": tools or []
+        }
+        self._save_database()
+
+    def add_agent_from_instance(self, agent):
+        """
+        Add an agent to the database using an existing Agent instance.
+
+        Parameters:
+        - agent: An instance of the Agent class.
+        """
+        self.add_agent(
+            name=agent.name,
+            description=agent.description,
+            model=agent.model,
+            system_prompt=agent.system_prompt,
+            temperature=agent.temperature,
+            max_iterations=agent.max_iterations,
+            tools=agent.tools
+        )
+
+    def remove_agent(self, name):
+        """
+        Remove an agent from the database.
+
+        Parameters:
+        - name: The unique identifier of the agent to remove.
+        """
+        if name not in self.agents_db:
+            raise ValueError(f"No agent found with the name '{name}'.")
+
+        del self.agents_db[name]
+        self._save_database()
+
+    def get_agent(self, name):
+        """
+        Retrieve an agent's details from the database.
+
+        Parameters:
+        - name: The unique identifier of the agent to retrieve.
+
+        Returns:
+        - A dictionary containing the agent's details.
+        """
+        if name not in self.agents_db:
+            raise ValueError(f"No agent found with the name '{name}'.")
+
+        return self.agents_db[name]
+
+    def list_agents(self):
+        """
+        List all agents currently in the database.
+
+        Returns:
+        - A list of agent names.
+        """
+        return list(self.agents_db.keys())
+
+    def instantiate_agents(self, agent_names=None):
+        """
+        Instantiate agents based on the provided list of names.
+        If no names are provided, instantiate all agents.
+
+        Parameters:
+        - agent_names: A list of agent names to instantiate (optional).
+
+        Returns:
+        - A list of instantiated Agent objects.
+        """
+        if agent_names is None:
+            agent_names = self.agents_db.keys()
+
+        instantiated_agents = []
+        for name in agent_names:
+            if name in self.agents_db:
+                details = self.agents_db[name]
+                agent = Agent(
+                    name=name,
+                    description=details["description"],
+                    model=details["model"],
+                    system_prompt=details["system_prompt"],
+                    temperature=details["temperature"],
+                    max_iterations=details["max_iterations"],
+                    tools=details["tools"],
+                    verbose=self.verbose,
+                    num_ctx=self.num_ctx
+                )
+                instantiated_agents.append(agent)
+            else:
+                print(f"Warning: Agent with name '{name}' not found in the database.")
+        return instantiated_agents
+
+def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str) -> str:
     """
     Instantiate an Agent with a given name, system prompt, a list of tools, and solve a given task.
 
@@ -1903,6 +2137,10 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     global verbose_mode
     global current_model
     global thinking_model
+    global thinking_model_reasoning_pattern
+
+    # Make sure tools are unique
+    tools = list(set(tools))
 
     if verbose_mode:
         on_print("Agent Instantiation Parameters:", Fore.WHITE + Style.DIM)
@@ -1910,6 +2148,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
         on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
         on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+        on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
 
     # Validate inputs
     if not isinstance(task, str) or not task.strip():
@@ -1924,26 +2163,35 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     agent_tools = []
     available_tools = get_available_tools()
     for tool in tools:
+        # If tool name starts with 'functions.', remove it
+        if tool.startswith("functions."):
+            tool = tool.split(".", 1)[1]
+
         for available_tool in available_tools:
             if tool.lower() == available_tool['function']['name'].lower() and tool.lower() != "instantiate_agent_with_tools_and_process_task":
                 agent_tools.append(available_tool)
                 break
 
+    # Always include today's date to the system prompt, for context
+    system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%Y-%m-%d')}."
+
     # Instantiate the Agent with the provided parameters
     agent = Agent(
         name=agent_name,
+        description=agent_description,
         model=current_model,
         thinking_model=thinking_model,
         system_prompt=system_prompt,
         temperature=0.7,
-        max_iterations=5,
+        max_iterations=3,
         tools=agent_tools,
-        verbose=verbose_mode
+        verbose=verbose_mode,
+        thinking_model_reasoning_pattern=thinking_model_reasoning_pattern
     )
 
     # Process the task using the agent
     try:
-        result = agent.process_task(task)
+        result = agent.process_task(task, return_intermediate_results=True)
     except Exception as e:
         return f"Error during task processing: {e}"
 
@@ -2124,6 +2372,33 @@ def prompt_for_chatbot():
 
     return chatbots[choice]
 
+def edit_collection_metadata(collection_name):
+    global chroma_client
+    
+    load_chroma_client()
+    
+    if not collection_name or not chroma_client:
+        on_print("Invalid collection name or ChromaDB client not initialized.", Fore.RED)
+        return
+    
+    try:
+        collection = chroma_client.get_collection(name=collection_name)
+        if type(collection.metadata) == dict:
+            current_description = collection.metadata.get("description", "No description")
+        else:
+            current_description = "No description"
+        on_print(f"Current description: {current_description}")
+        
+        new_description = on_user_input("Enter the new description: ")
+        existing_metadata = collection.metadata or {}
+        existing_metadata["description"] = new_description
+        existing_metadata["updated"] = str(datetime.now())
+        collection.modify(metadata=existing_metadata)
+        
+        on_print(f"Description updated for collection {collection_name}.", Fore.GREEN)
+    except:
+        raise Exception(f"Collection {collection_name} not found")
+
 def prompt_for_vector_database_collection(prompt_create_new=True):
     global chroma_client
     global web_cache_collection_name
@@ -2140,20 +2415,30 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
 
     if not collections:
         on_print("No collections found", Fore.RED)
-        return on_user_input("Enter a new collection to create: ")
+        new_collection_name = on_user_input("Enter a new collection to create: ")
+        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        return new_collection_name, new_collection_desc
 
     # Filter out the web_cache_collection_name
     filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name and collection.name != memory_collection_name]
 
     if not filtered_collections:
         on_print("No collections found", Fore.RED)
-        return on_user_input("Enter a new collection to create: ")
+        new_collection_name = on_user_input("Enter a new collection to create: ")
+        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        return new_collection_name, new_collection_desc
 
     # Ask user to choose a collection
     on_print("Available collections:", Style.RESET_ALL)
     for i, collection in enumerate(filtered_collections):
         collection_name = collection.name
-        on_print(f"{i}. {collection_name}")
+
+        if type(collection.metadata) == dict:
+            collection_metadata = collection.metadata.get("description", "No description")
+        else:
+            collection_metadata = "No description"
+
+        on_print(f"{i}. {collection_name} - {collection_metadata}")
 
     if prompt_create_new:
         # Propose to create a new collection
@@ -2162,11 +2447,13 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
     choice = int(on_user_input("Enter the number of your preferred collection [0]: ") or 0)
 
     if prompt_create_new and choice == len(filtered_collections):
-        return on_user_input("Enter a new collection to create: ")
+        new_collection_name = on_user_input("Enter a new collection to create: ")
+        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        return new_collection_name, new_collection_desc
 
-    return filtered_collections[choice].name
+    return filtered_collections[choice].name, None  # No new description needed for existing collections
 
-def set_current_collection(collection_name, create_new_collection_if_not_found=True, verbose=False):
+def set_current_collection(collection_name, description=None, create_new_collection_if_not_found=True, verbose=False):
     global collection
     global current_collection_name
 
@@ -2177,15 +2464,26 @@ def set_current_collection(collection_name, create_new_collection_if_not_found=T
         current_collection_name = None
         return
 
-    # Get the target collection
+    # Get or create the target collection
     try:
         if create_new_collection_if_not_found:
             collection = chroma_client.get_or_create_collection(name=collection_name)
         else:
             collection = chroma_client.get_collection(name=collection_name)
 
+        # Update description metadata if provided
+        if description:
+            existing_metadata = collection.metadata or {}
+
+            if description != existing_metadata.get("description"):
+                existing_metadata["description"] = description
+                collection.modify(metadata=existing_metadata)
+                if verbose:
+                    on_print(f"Updated description for collection {collection_name}.", Fore.WHITE + Style.DIM)
+
         if verbose:
             on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
+        
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
@@ -2279,7 +2577,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
 
     if not collection:
         on_print("No ChromaDB collection loaded.", Fore.RED)
-        collection_name = prompt_for_vector_database_collection()
+        collection_name, _ = prompt_for_vector_database_collection()
         if not collection_name:
             return ""
 
@@ -2436,7 +2734,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         )
     except Exception as e:
         on_print(f"Error during OpenAI completion: {e}", Fore.RED)
-        return "", False, completion_done
+        return "", False, True
 
     bot_response_is_tool_calls = False
     tool_calls = []
@@ -2614,7 +2912,9 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         conversation[1]["content"] = conversation[0]["content"] + "\n" + conversation[1]["content"]
         conversation = conversation[1:]
 
-    if use_openai:
+    model_is_an_ollama_model = is_model_an_ollama_model(model)
+
+    if use_openai and not model_is_an_ollama_model:
         if verbose_mode:
             on_print("Using OpenAI API for conversation generation.", Fore.WHITE + Style.DIM)
 
@@ -2633,7 +2933,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     model_support_tools = True
 
-    if use_openai:
+    if use_openai and not model_is_an_ollama_model:
         completion_done = False
 
         while not completion_done:
@@ -2949,8 +3249,8 @@ def select_openai_model_if_available(model_name):
         on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
     
-    # Remove non-chat models from the list
-    models = [model for model in models if model.id.startswith("gpt-")]
+    # Remove non-chat models from the list (keep only GPT models and oX models like o1 and o3)
+    models = [model for model in models if model.id.startswith("gpt-") or model.id.startswith("o")]
 
     for model in models:
         if model.id == model_name:
@@ -3049,6 +3349,20 @@ def prompt_for_ollama_model(default_model, current_model):
         on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
     return selected_model
 
+def is_model_an_ollama_model(model_name):
+    global ollama
+
+    try:
+        models = ollama.list()["models"]
+    except:
+        return False
+
+    for model in models:
+        if model["model"] == model_name:
+            return True
+
+    return False
+
 def prompt_for_model(default_model, current_model):
     global use_openai
 
@@ -3146,6 +3460,7 @@ def run():
     global listening_port
     global memory_manager
     global thinking_model
+    global thinking_model_reasoning_pattern
     
     default_model = None
     prompt_template = None
@@ -3172,6 +3487,7 @@ def run():
     parser.add_argument('--prompt', type=str, help='User prompt message', default=None)
     parser.add_argument('--model', type=str, help='Preferred Ollama model', default=None)
     parser.add_argument('--thinking-model', type=str, help='Alternate model to use for more thoughtful responses, like OpenAI o1 or o3 models', default=None)
+    parser.add_argument('--thinking-model-reasoning-pattern', type=str, help='Reasoning pattern used by the thinking model', default=None)
     parser.add_argument('--conversations-folder', type=str, help='Folder to save conversations to', default=None)
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
@@ -3207,6 +3523,7 @@ def run():
     system_prompt_placeholders_json = args.system_prompt_placeholders_json
     preferred_model = args.model
     thinking_model = args.thinking_model
+    thinking_model_reasoning_pattern = args.thinking_model_reasoning_pattern
 
     if not thinking_model:
         thinking_model = preferred_model
@@ -3504,7 +3821,9 @@ def run():
 
             if not current_collection_name:
                 on_print("No ChromaDB collection loaded.", Fore.RED)
-                set_current_collection(prompt_for_vector_database_collection(), verbose=verbose_mode)
+
+                collection_name, collection_description = prompt_for_vector_database_collection()
+                set_current_collection(collection_name, collection_description, verbose=verbose_mode)
 
             folder_to_index = user_input.split("/index")[1].strip()
             temp_folder = None
@@ -3535,7 +3854,16 @@ def run():
             user_input = user_input.replace("/agent", "").strip()
             conversation.append({"role": "user", "content": user_input})
 
-            agent = Agent("Default agent", selected_model, thinking_model=thinking_model, temperature=temperature, tools=selected_tools, num_ctx=num_ctx, verbose=verbose_mode)
+            agent = Agent("DefaultAgent",
+                            "A simple agent that uses Ollama or OpenAI to generate responses.",
+                            system_prompt=system_prompt,
+                            model=selected_model,
+                            thinking_model=thinking_model,
+                            temperature=temperature,
+                            tools=selected_tools,
+                            num_ctx=num_ctx,
+                            verbose=verbose_mode,
+                            thinking_model_reasoning_pattern=thinking_model_reasoning_pattern)
             agent_response = agent.process_task(user_input)
             
             if agent_response:
@@ -3589,9 +3917,18 @@ def run():
                 if verbose_mode:
                     on_print(user_input, Fore.WHITE + Style.DIM)
 
+        if user_input == "/thinking_model":
+            selected_model = prompt_for_model(default_model, thinking_model)
+            thinking_model = selected_model
+            continue
+
         if user_input == "/model":
+            thinking_model_is_same = thinking_model == current_model
             selected_model = prompt_for_model(default_model, current_model)
             current_model = selected_model
+
+            if thinking_model_is_same:
+                thinking_model = selected_model
 
             if use_memory_manager:
                 load_chroma_client()
@@ -3657,8 +3994,8 @@ def run():
             continue
 
         if user_input == "/collection":
-            collection_name = prompt_for_vector_database_collection()
-            set_current_collection(collection_name, verbose=verbose_mode)
+            collection_name, collection_description = prompt_for_vector_database_collection()
+            set_current_collection(collection_name, collection_description, verbose=verbose_mode)
             continue
 
         if memory_manager and (user_input == "/remember" or user_input == "/memorize"):
@@ -3681,12 +4018,17 @@ def run():
                 collection_name = user_input.split("/deletecollection")[1].strip()
 
             if not collection_name:
-                collection_name = prompt_for_vector_database_collection(prompt_create_new=False)
+                collection_name, _ = prompt_for_vector_database_collection(prompt_create_new=False)
 
             if not collection_name:
                 continue
 
             delete_collection(collection_name)
+            continue
+
+        if "/editcollection" in user_input:
+            collection_name, _ = prompt_for_vector_database_collection()
+            edit_collection_metadata(collection_name)
             continue
 
         if user_input == "/chatbot":
