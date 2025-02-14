@@ -6,6 +6,8 @@ import chromadb
 import readline
 import base64
 import getpass
+import chainlit as cl
+import asyncio
 
 if platform.system() == "Windows":
     import win32clipboard
@@ -74,6 +76,7 @@ chroma_client_port = 8000
 chroma_db_path = None
 
 custom_tools = []
+use_chainlit = False
 web_cache_collection_name = "web_cache"
 memory_collection_name = "memory"
 long_term_memory_file = "long_term_memory.json"
@@ -97,19 +100,32 @@ def completer(text, state):
         return options[state]
     return None
 
-def on_user_input(input_prompt=None):
+def clean_message(message):
+    """Remove ANSI escape sequences from the message."""
+    ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
+    return ansi_escape.sub('', message)
+
+async def on_user_input(input_prompt=None):
+    global use_chainlit
     for plugin in plugins:
         if hasattr(plugin, "on_user_input") and callable(getattr(plugin, "on_user_input")):
             plugin_response = getattr(plugin, "on_user_input")(input_prompt)
             if plugin_response:
                 return plugin_response
 
+    if use_chainlit:
+        res = await cl.AskUserMessage(content=input_prompt, raise_on_timeout=False).send()
+        if res and res['output']:
+            return res['output']
+        
+        return None
     if input_prompt:
         return input(input_prompt)
     else:
         return input()
 
-def on_print(message, style="", prompt=""):
+async def on_print(message, style="", prompt=""):
+    global use_chainlit
     function_handled = False
     for plugin in plugins:
         if hasattr(plugin, "on_print") and callable(getattr(plugin, "on_print")):
@@ -117,12 +133,15 @@ def on_print(message, style="", prompt=""):
             function_handled = function_handled or plugin_response
 
     if not function_handled:
-        if style or prompt:
+        if use_chainlit:
+            await cl.Message(clean_message(message)).send()
+        elif style or prompt:
             print(f"{style}{prompt}{message}")
         else:
             print(message)
 
-def on_stdout_write(message, style="", prompt=""):
+async def on_stdout_write(message, style="", prompt=""):
+    global use_chainlit
     function_handled = False
     for plugin in plugins:
         if hasattr(plugin, "on_stdout_write") and callable(getattr(plugin, "on_stdout_write")):
@@ -130,12 +149,30 @@ def on_stdout_write(message, style="", prompt=""):
             function_handled = function_handled or plugin_response
 
     if not function_handled:
-        if style or prompt:
+        if use_chainlit:
+            await cl.Message(clean_message(message)).send()
+        elif style or prompt:
             sys.stdout.write(f"{style}{prompt}{message}")
         else:
             sys.stdout.write(message)
 
-def on_llm_token_response(token, style="", prompt=""):
+async def on_llm_end_response(bot_response, bot_response_is_tool_calls, completion_done):
+    global use_chainlit
+    function_handled = False
+    for plugin in plugins:
+        if hasattr(plugin, "on_llm_end_response") and callable(getattr(plugin, "on_llm_end_response")):
+            plugin_response = getattr(plugin, "on_llm_end_response")(bot_response, bot_response_is_tool_calls, completion_done)
+            function_handled = function_handled or plugin_response
+
+    if not function_handled:
+        if use_chainlit:
+            llm_response = cl.user_session.get("llm_response", None)
+            if llm_response:
+                await llm_response.send()
+                cl.user_session.set("llm_response", None)
+
+async def on_llm_token_response(token, style="", prompt=""):
+    global use_chainlit
     function_handled = False
     for plugin in plugins:
         if hasattr(plugin, "on_llm_token_response") and callable(getattr(plugin, "on_llm_token_response")):
@@ -143,7 +180,14 @@ def on_llm_token_response(token, style="", prompt=""):
             function_handled = function_handled or plugin_response
 
     if not function_handled:
-        if style or prompt:
+        if use_chainlit:
+            llm_response = cl.user_session.get("llm_response", None)
+            if llm_response is None:
+                llm_response = cl.Message(content="")
+                cl.user_session.set("llm_response", llm_response)
+                
+            await llm_response.stream_token(token)
+        elif style or prompt:
             sys.stdout.write(f"{style}{prompt}{token}")
         else:
             sys.stdout.write(token)
@@ -171,7 +215,7 @@ def on_stdout_flush():
     if not function_handled:
         sys.stdout.flush()
 
-def get_available_tools():
+async def get_available_tools():
     global custom_tools
     global chroma_client
     global web_cache_collection_name
@@ -179,7 +223,7 @@ def get_available_tools():
     global current_collection_name
     global selected_tools
 
-    load_chroma_client()
+    await load_chroma_client()
 
     # List existing collections
     available_collections = []
@@ -517,7 +561,7 @@ By structuring your reasoning as an inner dialogue, you will create a rich, expl
 def md(soup, **options):
     return MarkdownConverter(**options).convert_soup(soup)
 
-def extract_text_from_html(html_content):
+async def extract_text_from_html(html_content):
     # Convert the modified HTML content to Markdown
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -563,23 +607,22 @@ def extract_text_from_html(html_content):
 
         return text
     except Exception as e:
-        on_print(f"Failed to parse HTML content: {e}", Fore.RED)
+        await on_print(f"Failed to parse HTML content: {e}", Fore.RED)
         return ""
 
-def extract_text_from_pdf(pdf_content):
-    with open('temp.pdf', 'wb') as f:
-        f.write(pdf_content)
+async def extract_text_from_pdf(pdf_path):
+    try:
+        # Load the PDF file and extract text from each page
+        reader = PdfReader(pdf_path)
+        text = ''
+        for page in reader.pages:
+            text += page.extract_text() + '\n'
 
-    reader = PdfReader('temp.pdf')
-    text = ''
-    for page in reader.pages:
-        text += page.extract_text()
-
-    # Clean up by removing the temporary file
-    os.remove('temp.pdf')
-
-    # Return the extracted text, with extra newlines removed
-    return re.sub(r'\n+', '\n', text)
+        # Return the extracted text, with extra newlines removed
+        return re.sub(r'\n+', '\n', text)
+    except Exception as e:
+        await on_print(f"Failed to extract text from PDF: {e}", Fore.RED)
+        return None
 
 def extract_text_from_docx(docx_path):
     # Load the Word document
@@ -796,20 +839,20 @@ class SimpleWebCrawler:
         self.plugins = plugins
         self.num_ctx = num_ctx
 
-    def fetch_page(self, url):
+    async def fetch_page(self, url):
         try:
             response = requests.get(url, timeout=10)
             response.raise_for_status()  # Raise an exception for HTTP errors
             return response.content  # Return raw bytes instead of text for PDF support
         except requests.exceptions.RequestException as e:
             if self.verbose:
-                on_print(f"Error fetching URL {url}: {e}", Fore.RED)
+                await on_print(f"Error fetching URL {url}: {e}", Fore.RED)
             return None
 
-    def ask_llm(self, content, user_input):
+    async def ask_llm(self, content, user_input):
         # Use the provided ask_ollama function to interact with the LLM
         user_input = content + "\n\n" + user_input
-        return ask_ollama(system_prompt=self.system_prompt, 
+        return await ask_ollama(system_prompt=self.system_prompt, 
                           user_input=user_input, 
                           selected_model=self.selected_model,
                           temperature=self.temperature, 
@@ -819,21 +862,21 @@ class SimpleWebCrawler:
                           stream_active=self.verbose,
                           num_ctx=self.num_ctx)
 
-    def decode_content(self, content):
+    async def decode_content(self, content):
         # Detect encoding
         detected_encoding = chardet.detect(content)['encoding']
         if self.verbose:
-            on_print(f"Detected encoding: {detected_encoding}", Fore.WHITE + Style.DIM)
+            await on_print(f"Detected encoding: {detected_encoding}", Fore.WHITE + Style.DIM)
         
         # Decode content
         try:
             return content.decode(detected_encoding)
         except (UnicodeDecodeError, TypeError):
             if self.verbose:
-                on_print(f"Error decoding content with {detected_encoding}, using ISO-8859-1 as fallback.", Fore.RED)
+                await on_print(f"Error decoding content with {detected_encoding}, using ISO-8859-1 as fallback.", Fore.RED)
             return content.decode('ISO-8859-1')
 
-    def crawl(self, task=None):
+    async def crawl(self, task=None):
         for url in self.urls:
             continue_response_generation = True
             for plugin in self.plugins:
@@ -847,26 +890,34 @@ class SimpleWebCrawler:
                 break
 
             if self.verbose:
-                on_print(f"Fetching URL: {url}", Fore.WHITE + Style.DIM)
-            content = self.fetch_page(url)
+                await on_print(f"Fetching URL: {url}", Fore.WHITE + Style.DIM)
+            content = await self.fetch_page(url)
             if content:
                 # Check if the URL points to a PDF
                 if url.lower().endswith('.pdf'):
                     if self.verbose:
-                        on_print(f"Extracting text from PDF: {url}", Fore.WHITE + Style.DIM)
-                    extracted_text = extract_text_from_pdf(content)
+                        await on_print(f"Extracting text from PDF: {url}", Fore.WHITE + Style.DIM)
+                    # Save content to a temporary PDF file
+                    pdf_path = None
+                    with tempfile.NamedTemporaryFile(delete=False) as pdf_file:
+                        pdf_file.write(content)
+                        pdf_path = pdf_file.name
+
+                    if pdf_path:
+                        extracted_text = await extract_text_from_pdf(pdf_path)
+                        os.unlink(pdf_path)  # Remove the temporary PDF file after extraction
                 else:
                     if self.verbose:
-                        on_print(f"Extracting text from HTML: {url}", Fore.WHITE + Style.DIM)
-                    decoded_content = self.decode_content(content)
-                    extracted_text = extract_text_from_html(decoded_content)
+                        await on_print(f"Extracting text from HTML: {url}", Fore.WHITE + Style.DIM)
+                    decoded_content = await self.decode_content(content)
+                    extracted_text = await extract_text_from_html(decoded_content)
 
                 article = {'url': url, 'text': extracted_text}
                 
                 if self.llm_enabled and task:
                     if self.verbose:
-                        on_print(Fore.WHITE + Style.DIM + f"Using LLM to process the content. Task: {task}")
-                    llm_result = self.ask_llm(content=extracted_text, user_input=task)
+                        await on_print(Fore.WHITE + Style.DIM + f"Using LLM to process the content. Task: {task}")
+                    llm_result = await self.ask_llm(content=extracted_text, user_input=task)
                     article['llm_result'] = llm_result
 
                 self.articles.append(article)
@@ -886,13 +937,13 @@ class SimpleWebScraper:
         self.username = None
         self.password = None
 
-    def scrape(self, url=None, depth=0, max_depth=50):
+    async def scrape(self, url=None, depth=0, max_depth=50):
         if url is None:
             url = self.base_url
 
         # Prevent deep recursion
         if depth > max_depth and self.verbose:
-            on_print(f"Max depth reached for {url}")
+            await on_print(f"Max depth reached for {url}")
             return
 
         # Normalize the URL to avoid duplicates
@@ -904,23 +955,23 @@ class SimpleWebScraper:
         self.visited.add(url)
 
         if self.verbose:
-            on_print(f"Scraping: {url}")
-        response = self._fetch(url)
+            await on_print(f"Scraping: {url}")
+        response = await self._fetch(url)
         if not response:
             return
 
         content_type = response.headers.get("Content-Type", "")
         if "text/html" in content_type or not self._has_extension(url):
             if self.convert_to_markdown:
-                self._save_markdown(url, response.text)
+                await self._save_markdown(url, response.text)
             else:
                 self._save_html(url, response.text)
-            self._parse_and_scrape_links(response.text, url, depth + 1)
+            await self._parse_and_scrape_links(response.text, url, depth + 1)
         else:
             if self._is_allowed_file_type(url):
                 self._save_file(url, response.content)
 
-    def _fetch(self, url):
+    async def _fetch(self, url):
         headers = {}
         if self.username and self.password:
             credentials = f"{self.username}:{self.password}"
@@ -930,8 +981,8 @@ class SimpleWebScraper:
         try:
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 401:
-                on_print(f"Unauthorized access to {url}. Please enter your credentials.", Fore.RED)
-                self.username = input("Username: ")
+                await on_print(f"Unauthorized access to {url}. Please enter your credentials.", Fore.RED)
+                self.username = await on_user_input("Username: ")
                 self.password = getpass.getpass("Password: ")
                 credentials = f"{self.username}:{self.password}"
                 encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
@@ -940,7 +991,7 @@ class SimpleWebScraper:
                 response.raise_for_status()
             return response
         except requests.RequestException as e:
-            on_print(f"Failed to fetch {url}: {e}", Fore.RED)
+            await on_print(f"Failed to fetch {url}: {e}", Fore.RED)
             return None
 
     def _save_html(self, url, html):
@@ -949,10 +1000,10 @@ class SimpleWebScraper:
         with open(local_path, "w", encoding="utf-8") as file:
             file.write(html)
 
-    def _save_markdown(self, url, html):
+    async def _save_markdown(self, url, html):
         local_path = self._get_local_path(url, markdown=True)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        markdown_content = extract_text_from_html(html)
+        markdown_content = await extract_text_from_html(html)
         with open(local_path, "w", encoding="utf-8") as file:
             file.write(markdown_content)
 
@@ -977,7 +1028,7 @@ class SimpleWebScraper:
         normalized = parsed._replace(fragment="").geturl()
         return normalized
 
-    def _parse_and_scrape_links(self, html, base_url, depth):
+    async def _parse_and_scrape_links(self, html, base_url, depth):
         soup = BeautifulSoup(html, "html.parser")
 
         for tag, attr in [("a", "href"), ("img", "src"), ("link", "href"), ("script", "src")]:
@@ -991,7 +1042,7 @@ class SimpleWebScraper:
                     if not self._is_allowed_file_type(abs_link) and self._has_extension(abs_link):
                         continue
                     if abs_link not in self.visited:
-                        self.scrape(abs_link, depth=depth)
+                        await self.scrape(abs_link, depth=depth)
 
     def _is_same_domain(self, url):
         base_domain = urlparse(self.base_url).netloc
@@ -1007,26 +1058,28 @@ class SimpleWebScraper:
         path = urlparse(url).path
         return bool(os.path.splitext(path)[1])
 
-def select_tools(available_tools, selected_tools):
+async def select_tools(available_tools, selected_tools):
     def display_tool_options():
-        on_print("Available tools:\n", Style.RESET_ALL)
+        tool_options = ["Available tools:\n"]
         for i, tool in enumerate(available_tools):
             tool_name = tool['function']['name']
-
+    
             status = "[ ]"
             # Find current tool name in selected tools
             for selected_tool in selected_tools:
                 if selected_tool['function']['name'] == tool_name:
                     status = "[X]"
                     break
-            
-            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
-
+    
+            tool_options.append(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
+        
+        return "\n".join(tool_options)
+    
     while True:
-        display_tool_options()
-        on_print("Select or deselect tools by entering the corresponding number (e.g., 1).\nPress Enter or type 'done' when done.")
-
-        user_input = on_user_input("Your choice: ").strip()
+        tool_options = display_tool_options()
+        tool_options += "\n\nSelect or deselect tools by entering the corresponding number (e.g., 1).\nPress Enter or type 'done' when done."
+        tool_options += "\n\nYour choice: "
+        user_input = (await on_user_input(tool_options)).strip()
 
         if len(user_input) == 0 or user_input == 'done':
             break
@@ -1037,33 +1090,33 @@ def select_tools(available_tools, selected_tools):
                 selected_tool = available_tools[index]
                 if selected_tool in selected_tools:
                     selected_tools.remove(selected_tool)
-                    on_print(f"Tool '{selected_tool['function']['name']}' deselected.\n")
+                    await on_print(f"Tool '{selected_tool['function']['name']}' deselected.\n")
                 else:
                     selected_tools.append(selected_tool)
-                    on_print(f"Tool '{selected_tool['function']['name']}' selected.\n")
+                    await on_print(f"Tool '{selected_tool['function']['name']}' selected.\n")
             else:
-                on_print("Invalid selection. Please choose a valid tool number.\n")
+                await on_print("Invalid selection. Please choose a valid tool number.\n")
         except ValueError:
-            on_print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
+            await on_print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
 
     return selected_tools
 
-def select_tool_by_name(available_tools, selected_tools, target_tool_name):
+async def select_tool_by_name(available_tools, selected_tools, target_tool_name):
     for tool in available_tools:
         if tool['function']['name'].lower() == target_tool_name.lower():
             if tool not in selected_tools:
                 selected_tools.append(tool)
 
                 if verbose_mode:
-                    on_print(f"Tool '{target_tool_name}' selected.\n")
+                    await on_print(f"Tool '{target_tool_name}' selected.\n")
             else:
-                on_print(f"Tool '{target_tool_name}' is already selected.\n")
+                await on_print(f"Tool '{target_tool_name}' is already selected.\n")
             return selected_tools
 
-    on_print(f"Tool '{target_tool_name}' not found.\n")
+    await on_print(f"Tool '{target_tool_name}' not found.\n")
     return selected_tools
 
-def discover_plugins(plugin_folder=None):
+async def discover_plugins(plugin_folder=None):
     global verbose_mode
     global other_instance_url
     global listening_port
@@ -1077,7 +1130,7 @@ def discover_plugins(plugin_folder=None):
     
     if not os.path.isdir(plugin_folder):
         if verbose_mode:
-            on_print("Plugin folder does not exist: " + plugin_folder, Fore.RED)
+            await on_print("Plugin folder does not exist: " + plugin_folder, Fore.RED)
         return []
     
     plugins = []
@@ -1092,7 +1145,7 @@ def discover_plugins(plugin_folder=None):
             for name, obj in inspect.getmembers(module):
                 if inspect.isclass(obj) and "plugin" in name.lower():
                     if verbose_mode:
-                        on_print(f"Discovered class: {name}", Fore.WHITE + Style.DIM)
+                        await on_print(f"Discovered class: {name}", Fore.WHITE + Style.DIM)
 
                     plugin = obj()
                     if hasattr(obj, 'set_web_crawler') and callable(getattr(obj, 'set_web_crawler')):
@@ -1109,11 +1162,11 @@ def discover_plugins(plugin_folder=None):
 
                     plugins.append(plugin)
                     if verbose_mode:
-                        on_print(f"Discovered plugin: {name}", Fore.WHITE + Style.DIM)
+                        await on_print(f"Discovered plugin: {name}", Fore.WHITE + Style.DIM)
                     if hasattr(obj, 'get_tool_definition') and callable(getattr(obj, 'get_tool_definition')):
                         custom_tools.append(obj().get_tool_definition())
                         if verbose_mode:
-                            on_print(f"Discovered tool: {name}", Fore.WHITE + Style.DIM)
+                            await on_print(f"Discovered tool: {name}", Fore.WHITE + Style.DIM)
     return plugins
 
 def is_html(file_path):
@@ -1175,6 +1228,16 @@ def is_markdown(file_path):
     # If no Markdown features are found, assume it's a regular text file
     return False
 
+def is_pdf(file_path):
+    """
+    Check if the given file is a PDF file.
+    """
+    # Check for .pdf extension
+    if file_path.lower().endswith(".pdf"):
+        return True
+
+    return False
+
 class MemoryManager:
     def __init__(self, collection_name, chroma_client, selected_model, embedding_model_name, verbose=False, num_ctx=None, long_term_memory_file="long_term_memory.json"):
         """
@@ -1194,7 +1257,7 @@ class MemoryManager:
         self.num_ctx = num_ctx
         self.long_term_memory_manager = LongTermMemoryManager(selected_model, verbose, num_ctx, memory_file=long_term_memory_file)
 
-    def preprocess_conversation(self, conversation):
+    async def preprocess_conversation(self, conversation):
         """
         Preprocess the conversation to filter out tool or function role entries, and then summarize key points.
 
@@ -1232,7 +1295,7 @@ class MemoryManager:
         """
 
         # Use the ask_ollama function to summarize key points
-        summary = ask_ollama(system_prompt, user_input, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx)
+        summary = await ask_ollama(system_prompt, user_input, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx)
         
         return summary
 
@@ -1252,7 +1315,7 @@ class MemoryManager:
             embedding = response["embedding"]
         return embedding
 
-    def add_memory(self, conversation, metadata=None):
+    async def add_memory(self, conversation, metadata=None):
         """
         Preprocess and store a conversation in memory by summarizing it and storing the summary.
 
@@ -1262,11 +1325,11 @@ class MemoryManager:
         conversation_id = datetime.now().strftime("%Y%m%d%H%M%S")
         
         # Preprocess the conversation to summarize the key points
-        summarized_conversation = self.preprocess_conversation(conversation)
+        summarized_conversation = await self.preprocess_conversation(conversation)
 
         if len(summarized_conversation) == 0:
             if self.verbose:
-                on_print("Empty conversation. No memory added.", Fore.WHITE + Style.DIM)
+                await on_print("Empty conversation. No memory added.", Fore.WHITE + Style.DIM)
             return False
         
         # Create metadata if none is provided
@@ -1287,7 +1350,7 @@ class MemoryManager:
         )
         
         if self.verbose:
-            on_print(f"Memory for conversation {conversation_id} added. Summary: {summarized_conversation}", Fore.WHITE + Style.DIM)
+            await on_print(f"Memory for conversation {conversation_id} added. Summary: {summarized_conversation}", Fore.WHITE + Style.DIM)
 
         user_id = "anonymous"
         try:
@@ -1298,11 +1361,11 @@ class MemoryManager:
         self.long_term_memory_manager.process_conversation(user_id, conversation)
 
         if self.verbose:
-            on_print(f"Long-term memory updated.", Fore.WHITE + Style.DIM)
+            await on_print(f"Long-term memory updated.", Fore.WHITE + Style.DIM)
 
         return True
 
-    def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=200):
+    async def retrieve_relevant_memory(self, query_text, top_k=3, answer_distance_threshold=200):
         """
         Retrieve the most relevant memories based on the given query.
 
@@ -1311,7 +1374,7 @@ class MemoryManager:
         :return: A list of the top-k most relevant memories.
         """
         if self.verbose:
-            on_print(f"Retrieving relevant memories for query: {query_text}", Fore.WHITE + Style.DIM)
+            await on_print(f"Retrieving relevant memories for query: {query_text}", Fore.WHITE + Style.DIM)
 
         # Generate an embedding for the query
         query_embedding = self.generate_embedding(query_text)
@@ -1337,20 +1400,20 @@ class MemoryManager:
         for metadata, answer_distance, document in zip(metadatas, distances, documents):
             if answer_distance_threshold > 0 and answer_distance > answer_distance_threshold:
                 if self.verbose:
-                    on_print(f"Answer distance: {answer_distance} > {answer_distance_threshold}. Skipping memory.", Fore.WHITE + Style.DIM)
+                    await on_print(f"Answer distance: {answer_distance} > {answer_distance_threshold}. Skipping memory.", Fore.WHITE + Style.DIM)
                 continue
 
             if self.verbose:
-                on_print(f"Answer distance: {answer_distance}", Fore.WHITE + Style.DIM)
-                on_print(f"Memory: {document}", Fore.WHITE + Style.DIM)
-                on_print(f"Metadata: {metadata}", Fore.WHITE + Style.DIM)
+                await on_print(f"Answer distance: {answer_distance}", Fore.WHITE + Style.DIM)
+                await on_print(f"Memory: {document}", Fore.WHITE + Style.DIM)
+                await on_print(f"Metadata: {metadata}", Fore.WHITE + Style.DIM)
 
             filtered_results['documents'].append(document)
             filtered_results['metadatas'].append(metadata)
         
         return filtered_results['documents'], filtered_results['metadatas']
 
-    def handle_user_query(self, conversation, query=None):
+    async def handle_user_query(self, conversation, query=None):
         """
         Handle a user query by updating the 'system' part of the conversation with relevant memories in XML markup.
         
@@ -1370,7 +1433,7 @@ class MemoryManager:
             return
 
         # Retrieve relevant memories based on the current user query
-        relevant_memories, memory_metadata = self.retrieve_relevant_memory(user_input)
+        relevant_memories, memory_metadata = await self.retrieve_relevant_memory(user_input)
 
         # Find the existing 'system' prompt in the conversation
         system_prompt_entry = None
@@ -1404,10 +1467,10 @@ class MemoryManager:
                 system_prompt_entry['content'] = f"{original_system_prompt}\n\n{memory_section}"
 
                 if self.verbose:
-                    on_print(f"System prompt updated with relevant memories:\n{system_prompt_entry['content']}", Fore.WHITE + Style.DIM)
+                    await on_print(f"System prompt updated with relevant memories:\n{system_prompt_entry['content']}", Fore.WHITE + Style.DIM)
             else:
                 if self.verbose:
-                    on_print("No relevant memories found for the user query.", Fore.WHITE + Style.DIM)
+                    await on_print("No relevant memories found for the user query.", Fore.WHITE + Style.DIM)
                 system_prompt_entry['content'] = original_system_prompt
         else:
             # If no system prompt exists, raise an exception (or create one, depending on desired behavior)
@@ -1457,7 +1520,7 @@ class LongTermMemoryManager:
             # Save the updated memory back to the JSON file
             self._save_memory()
 
-    def process_conversation(self, user_id, conversation):
+    async def process_conversation(self, user_id, conversation):
         """
         Processes a conversation and uses GPT to:
         - Extract relevant key-value pairs for long-term memory.
@@ -1474,15 +1537,15 @@ class LongTermMemoryManager:
 
         # Step 1: Extract key-value information
         system_prompt_extract = self._get_extraction_prompt()
-        extracted_info = extract_json(ask_ollama(system_prompt_extract, conversation_str, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx))
+        extracted_info = extract_json(await ask_ollama(system_prompt_extract, conversation_str, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx))
 
         if self.verbose:
-            on_print(f"Extracted information: {extracted_info}", Fore.WHITE + Style.DIM)
+            await on_print(f"Extracted information: {extracted_info}", Fore.WHITE + Style.DIM)
 
         # Step 2: Check for contradictions with existing memory
         existing_memory = self.memory["users"].get(user_id, {})
         system_prompt_conflict = self._get_conflict_check_prompt(existing_memory, conversation_str)
-        conflicting_info = extract_json(ask_ollama(system_prompt_conflict, conversation_str, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx))
+        conflicting_info = extract_json(await ask_ollama(system_prompt_conflict, conversation_str, self.selected_model, temperature=0.1, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx))
 
         # Remove conflicting info from memory if flagged by GPT
         if conflicting_info:
@@ -1557,7 +1620,7 @@ class LongTermMemoryManager:
                         del self.memory["users"][user_id][key]
                 self._save_memory()
 
-def retrieve_relevant_memory(query_text, top_k=3):
+async def retrieve_relevant_memory(query_text, top_k=3):
     global memory_collection_name
     global chroma_client
     global current_model
@@ -1568,35 +1631,36 @@ def retrieve_relevant_memory(query_text, top_k=3):
     if not memory_manager:
         return []
 
-    return memory_manager.retrieve_relevant_memory(query_text, top_k)
+    return await memory_manager.retrieve_relevant_memory(query_text, top_k)
 
 class DocumentIndexer:
-    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False):
+    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False, supported_file_types=[".txt", ".md", ".tex", ".pdf", ".docx", ".pptx", ".html", ".htm"]):
         self.root_folder = root_folder
         self.collection_name = collection_name
         self.client = chroma_client
         self.model = embeddings_model
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self.verbose = verbose
+        self.supported_file_types = supported_file_types
 
-    def get_text_files(self):
+    def get_files(self):
         """
-        Recursively find all .txt, .md, .tex files in the root folder.
+        Recursively find all supported files in the root folder.
         Also include HTML files without extensions if they start with <!DOCTYPE html> or <html.
         Ignore empty lines at the beginning of the file and check only the first non-empty line.
         """
-        text_files = []
+        all_files = []
         for root, dirs, files in os.walk(self.root_folder):
             for file in files:
                 # Check for files with extension
-                if file.endswith(".txt") or file.endswith(".md") or file.endswith(".tex"):
-                    text_files.append(os.path.join(root, file))
+                if any(file.lower().endswith(ext) for ext in self.supported_file_types):
+                    all_files.append(os.path.join(root, file))
                 else:
                     # Check for HTML files without extensions
                     file_path = os.path.join(root, file)
                     if is_html(file_path):
-                        text_files.append(file_path)
-        return text_files
+                        all_files.append(file_path)
+        return all_files
 
     def read_file(self, file_path):
         """
@@ -1608,7 +1672,7 @@ class DocumentIndexer:
             except:
                 return None
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None):
+    async def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None):
         """
         Index all text files in the root folder.
         
@@ -1619,14 +1683,17 @@ class DocumentIndexer:
         """
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
-            on_print("Large documents will be chunked into smaller pieces for indexing.")
-            allow_chunks = on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
+            await on_print("Large documents will be chunked into smaller pieces for indexing.")
+            allow_chunks = (await on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ")).lower() in ['y', 'yes']
 
         if allow_chunks:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-        # Get the list of text files
-        text_files = self.get_text_files()
+        # Get the list of files to index
+        file_list = self.get_files()
+
+        if self.verbose:
+            await on_print(f"Found {len(file_list)} files to index in folder: {self.root_folder}", Fore.WHITE + Style.DIM)
 
         if allow_chunks:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
@@ -1634,19 +1701,13 @@ class DocumentIndexer:
         progress_bar = None
         if self.verbose:
             # Progress bar for indexing
-            progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
+            progress_bar = tqdm(total=len(file_list), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
 
-        for file_path in text_files:
+        for file_path in file_list:
             if progress_bar:
                 progress_bar.update(1)
 
             try:
-                content = self.read_file(file_path)
-
-                if not content:
-                    on_print(f"An error occurred while reading file: {file_path}", Fore.RED)
-                    continue
-
                 document_id = os.path.splitext(os.path.basename(file_path))[0]
                 
                 # Add any additional metadata for the file
@@ -1654,18 +1715,38 @@ class DocumentIndexer:
                 if additional_metadata and file_path in additional_metadata:
                     file_metadata.update(additional_metadata[file_path])
 
+                content = None
+                use_text_splitter = False
+                # Extract file content
+                if is_docx(file_path):
+                    content = extract_text_from_docx(file_path)
+                elif is_pptx(file_path):
+                    content = extract_text_from_pptx(file_path)
+                elif is_pdf(file_path):
+                    content = await extract_text_from_pdf(file_path)
+                elif is_html(file_path):
+                    content = self.read_file(file_path)
+                    content = await extract_text_from_html(content)
+                elif is_markdown(file_path):
+                    content = self.read_file(file_path)
+                else:
+                    # Check for .txt files
+                    content = self.read_file(file_path)
+                    use_text_splitter = True
+
+                if not content:
+                    await on_print(f"An error occurred while reading file: {file_path}", Fore.RED)
+                    continue
+
                 if allow_chunks:
                     chunks = []
-                    # Split Markdown files into sections if needed
-                    if is_html(file_path):
-                        # Convert to Markdown before splitting
-                        markdown_splitter = MarkdownSplitter(extract_text_from_html(content), split_paragraphs=split_paragraphs)
-                        chunks = markdown_splitter.split()
-                    elif is_markdown(file_path):
+
+                    if use_text_splitter:
+                        chunks = text_splitter.split_text(content)
+                    else:
+                        # Split Markdown files into sections if needed
                         markdown_splitter = MarkdownSplitter(content, split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
-                    else:
-                        chunks = text_splitter.split_text(content)
                     
                     for i, chunk in enumerate(chunks):
                         chunk_id = f"{document_id}_{i}"
@@ -1781,7 +1862,7 @@ class Agent:
 
         return reasoning, final_response
 
-    def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
+    async def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
         """
         Query the OpenAI API with the given prompt and return the response.
         """
@@ -1792,18 +1873,18 @@ class Agent:
             model = self.model
 
         if self.verbose:
-            on_print(f"System prompt:\n{system_prompt}", Fore.WHITE + Style.DIM)
-            on_print(f"User prompt:\n{prompt}", Fore.WHITE + Style.DIM)
-            on_print(f"Model: {model}", Fore.WHITE + Style.DIM)
+            await on_print(f"System prompt:\n{system_prompt}", Fore.WHITE + Style.DIM)
+            await on_print(f"User prompt:\n{prompt}", Fore.WHITE + Style.DIM)
+            await on_print(f"Model: {model}", Fore.WHITE + Style.DIM)
 
-        llm_response = ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
+        llm_response = await ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
 
         if self.verbose:
-            on_print(f"Response:\n{llm_response}", Fore.WHITE + Style.DIM)
+            await on_print(f"Response:\n{llm_response}", Fore.WHITE + Style.DIM)
 
         return llm_response
     
-    def decompose_task(self, task):
+    async def decompose_task(self, task):
         """
         Decompose a task into subtasks using the system prompt for guidance.
         """
@@ -1854,7 +1935,7 @@ Output each subtask on a new line, nothing more.
             response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.model)
 
         if self.verbose:
-            on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
+            await on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
         subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
 
         # If among the subtasks lines of text we have numbered or bulleted lists, extract the list items and ignore the rest, otherwise return the subtasks as is
@@ -1872,7 +1953,7 @@ Output each subtask on a new line, nothing more.
 
         return subtasks
 
-    def decide_and_execute_subtask(self, main_task, subtask, previous_subtask, result_from_previous_subtask):
+    async def decide_and_execute_subtask(self, main_task, subtask, previous_subtask, result_from_previous_subtask):
         """
         Decide the best approach for a subtask: research, use a tool, delegate to another agent, or directly respond.
 
@@ -1933,7 +2014,7 @@ Decision: [Your decision here] (possible values: 'use tool', 'research', 'delega
                 thoughts = reasoning_response
 
         if self.verbose:
-            on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
+            await on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
         prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
 
 The result from the previous subtask was:
@@ -1955,7 +2036,7 @@ You can follow a similar approach or provide a different response based on your 
                     agent = Agent.get_agent(agent_name)
                     if agent:
                         if self.verbose:
-                            on_print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...", Fore.WHITE + Style.DIM)
+                            await on_print(f"Delegating subtask '{subtask}' to agent '{agent_name}'...", Fore.WHITE + Style.DIM)
 
                         result = agent.process_task(prompt)
                         break
@@ -2003,7 +2084,7 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
         # Query the LLM with the detailed instructions
         return self.query_llm(user_prompt, system_prompt=self.system_prompt)
     
-    def process_task(self, task, return_intermediate_results=False):
+    async def process_task(self, task, return_intermediate_results=False):
         """
         Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
         """
@@ -2019,7 +2100,7 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
                 iterations += 1
 
                 if self.verbose:
-                    on_print(f"\nIteration {iterations} - Decomposed subtasks: {subtasks}", Fore.WHITE + Style.DIM)
+                    await on_print(f"\nIteration {iterations} - Decomposed subtasks: {subtasks}", Fore.WHITE + Style.DIM)
 
                 results = []
                 for subtask, subtask_index in zip(subtasks, range(len(subtasks))):
@@ -2043,16 +2124,16 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
                 # Synthesize results at each iteration
                 synthesized_result = self.synthesize_results(task, all_results)
                 if self.verbose:
-                    on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
+                    await on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
 
                 # Perform self-reflection on the synthesized result
                 reflection = self.self_reflect(synthesized_result, task, subtasks)
                 if self.verbose:
-                    on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
+                    await on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
 
                 if "Task complete, no further actions required" in reflection:
                     if self.verbose:
-                        on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
+                        await on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
                     break
 
                 subtasks = self.decompose_task(reflection)
@@ -2206,7 +2287,7 @@ class AgentCrewManager:
                 print(f"Warning: Agent with name '{name}' not found in the database.")
         return instantiated_agents
 
-def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str):
+async def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str):
     global agent_crew_manager
     global verbose_mode
     
@@ -2214,11 +2295,11 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
     tools = list(set(tools))
 
     if verbose_mode:
-        on_print("Agent Creation Parameters:", Fore.WHITE + Style.DIM)
-        on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
-        on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
-        on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
-        on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
+        await on_print("Agent Creation Parameters:", Fore.WHITE + Style.DIM)
+        await on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
+        await on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
+        await on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+        await on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
 
     # Validate inputs
     if not isinstance(system_prompt, str) or not system_prompt.strip():
@@ -2229,7 +2310,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         raise ValueError("Agent name must be a non-empty string.")
     
     agent_tools = []
-    available_tools = get_available_tools()
+    available_tools = await get_available_tools()
     for tool in tools:
         # If tool name starts with 'functions.', remove it
         if tool.startswith("functions."):
@@ -2244,7 +2325,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         agent_tools.clear()
 
         # Some models are confused between collections and tools, so we need to check for this case
-        load_chroma_client()
+        await load_chroma_client()
 
         # List existing collections
         collections = None
@@ -2277,7 +2358,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
     # Add the agent to the agent crew manager
     agent_crew_manager.add_agent_from_instance(agent)
 
-def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str = None, process_task=True) -> str|Agent:
+async def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str = None, process_task=True) -> str|Agent:
     """
     Instantiate an Agent with a given name, system prompt, a list of tools, and solve a given task.
 
@@ -2298,12 +2379,12 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     global thinking_model_reasoning_pattern
 
     if verbose_mode:
-        on_print("Agent Instantiation Parameters:", Fore.WHITE + Style.DIM)
-        on_print(f"Task: {task}", Fore.WHITE + Style.DIM)
-        on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
-        on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
-        on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
-        on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
+        await on_print("Agent Instantiation Parameters:", Fore.WHITE + Style.DIM)
+        await on_print(f"Task: {task}", Fore.WHITE + Style.DIM)
+        await on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
+        await on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
+        await on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+        await on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
 
 
     # If tools is a string, it's probably a JSON string, so parse it
@@ -2330,7 +2411,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     tools = list(set(tools))
 
     agent_tools = []
-    available_tools = get_available_tools()
+    available_tools = await get_available_tools()
     for tool in tools:
         # If tool name starts with 'functions.', remove it
         if tool.startswith("functions."):
@@ -2345,7 +2426,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         agent_tools.clear()
 
         # Some models are confused between collections and tools, so we need to check for this case
-        load_chroma_client()
+        await load_chroma_client()
 
         # List existing collections
         collections = None
@@ -2388,7 +2469,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
 
     return agent
 
-def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
+async def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
     global current_model
     global verbose_mode
     global plugins
@@ -2409,15 +2490,15 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         pass
 
     if verbose_mode:
-        on_print("Web Search Results:", Fore.WHITE + Style.DIM)
-        on_print(urls, Fore.WHITE + Style.DIM)
+        await on_print("Web Search Results:", Fore.WHITE + Style.DIM)
+        await on_print(urls, Fore.WHITE + Style.DIM)
 
     if len(urls) == 0:
         return "No search results found."
 
     webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins, num_ctx=num_ctx)
     # webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
-    webCrawler.crawl()
+    await webCrawler.crawl()
     articles = webCrawler.get_articles()
 
     # Save articles to temporary files, before indexing them in the vector database
@@ -2435,7 +2516,7 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
 
     # Index the articles in the vector database
     document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model)
-    document_indexer.index_documents(no_chunking_confirmation=True, additional_metadata=additional_metadata)
+    await document_indexer.index_documents(no_chunking_confirmation=True, additional_metadata=additional_metadata)
 
     # Remove the temporary folder and its contents
     for file in os.listdir(temp_folder):
@@ -2444,23 +2525,23 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
     os.rmdir(temp_folder)
 
     # Search the vector database for the query
-    results = query_vector_database(query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
+    results = await query_vector_database(query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
 
     # If no results are found, refined search
     if not results:
-        new_query = ask_ollama("", f"No relevant information found. Please provide a refined search query: {query}", current_model, temperature=0.7, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+        new_query = await ask_ollama("", f"No relevant information found. Please provide a refined search query: {query}", current_model, temperature=0.7, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
         if new_query:
             if verbose_mode:
-                on_print(f"Refined search query: {new_query}", Fore.WHITE + Style.DIM)
-            return web_search(new_query, n_results, region, web_cache_collection, web_embedding_model, num_ctx)
+                await on_print(f"Refined search query: {new_query}", Fore.WHITE + Style.DIM)
+            return await web_search(new_query, n_results, region, web_cache_collection, web_embedding_model, num_ctx)
 
     return results
 
-def print_spinning_wheel(print_char_index):
+async def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
     spinner =  ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    on_stdout_write(spinner[print_char_index % len(spinner)], Style.RESET_ALL, "\rBot: ")
+    await on_stdout_write(spinner[print_char_index % len(spinner)], Style.RESET_ALL, "\rBot: ")
     on_stdout_flush()
 
 def colorize(input_text, language='md'):
@@ -2537,7 +2618,7 @@ chatbots = [
     }
 ]
 
-def load_additional_chatbots(json_file):
+async def load_additional_chatbots(json_file):
     global chatbots
 
     if not json_file:
@@ -2547,7 +2628,7 @@ def load_additional_chatbots(json_file):
         # Check if the file exists in the same directory as the script
         json_file = os.path.join(os.path.dirname(__file__), json_file)
         if not os.path.exists(json_file):
-            on_print(f"Additional chatbots file not found: {json_file}", Fore.RED)
+            await on_print(f"Additional chatbots file not found: {json_file}", Fore.RED)
             return
 
     with open(json_file, 'r', encoding="utf8") as f:
@@ -2565,24 +2646,24 @@ def split_numbered_list(input_text):
             output.append(line.split('.', 1)[1].strip())  # Remove the leading number and period, then strip any whitespace
     return output
 
-def prompt_for_chatbot():
+async def prompt_for_chatbot():
     global chatbots
 
-    on_print("Available chatbots:", Style.RESET_ALL)
+    await on_print("Available chatbots:", Style.RESET_ALL)
     for i, chatbot in enumerate(chatbots):
-        on_print(f"{i}. {chatbot['name']} - {chatbot['description']}")
+        await on_print(f"{i}. {chatbot['name']} - {chatbot['description']}")
     
-    choice = int(on_user_input("Enter the number of your preferred chatbot [0]: ") or 0)
+    choice = int(await on_user_input("Enter the number of your preferred chatbot [0]: ") or 0)
 
     return chatbots[choice]
 
-def edit_collection_metadata(collection_name):
+async def edit_collection_metadata(collection_name):
     global chroma_client
     
-    load_chroma_client()
+    await load_chroma_client()
     
     if not collection_name or not chroma_client:
-        on_print("Invalid collection name or ChromaDB client not initialized.", Fore.RED)
+        await on_print("Invalid collection name or ChromaDB client not initialized.", Fore.RED)
         return
     
     try:
@@ -2591,49 +2672,49 @@ def edit_collection_metadata(collection_name):
             current_description = collection.metadata.get("description", "No description")
         else:
             current_description = "No description"
-        on_print(f"Current description: {current_description}")
+        await on_print(f"Current description: {current_description}")
         
-        new_description = on_user_input("Enter the new description: ")
+        new_description = await on_user_input("Enter the new description: ")
         existing_metadata = collection.metadata or {}
         existing_metadata["description"] = new_description
         existing_metadata["updated"] = str(datetime.now())
         collection.modify(metadata=existing_metadata)
         
-        on_print(f"Description updated for collection {collection_name}.", Fore.GREEN)
+        await on_print(f"Description updated for collection {collection_name}.", Fore.GREEN)
     except:
         raise Exception(f"Collection {collection_name} not found")
 
-def prompt_for_vector_database_collection(prompt_create_new=True):
+async def prompt_for_vector_database_collection(prompt_create_new=True):
     global chroma_client
     global web_cache_collection_name
     global memory_collection_name
 
-    load_chroma_client()
+    await load_chroma_client()
 
     # List existing collections
     collections = None
     if chroma_client:
         collections = chroma_client.list_collections()
     else:
-        on_print("ChromaDB is not running.", Fore.RED)
+        await on_print("ChromaDB is not running.", Fore.RED)
 
     if not collections:
-        on_print("No collections found", Fore.RED)
-        new_collection_name = on_user_input("Enter a new collection to create: ")
-        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        await on_print("No collections found", Fore.RED)
+        new_collection_name = await on_user_input("Enter a new collection to create: ")
+        new_collection_desc = await on_user_input("Enter a description for the new collection: ")
         return new_collection_name, new_collection_desc
 
     # Filter out the web_cache_collection_name
     filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name and collection.name != memory_collection_name]
 
     if not filtered_collections:
-        on_print("No collections found", Fore.RED)
-        new_collection_name = on_user_input("Enter a new collection to create: ")
-        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        await on_print("No collections found", Fore.RED)
+        new_collection_name = await on_user_input("Enter a new collection to create: ")
+        new_collection_desc = await on_user_input("Enter a description for the new collection: ")
         return new_collection_name, new_collection_desc
 
     # Ask user to choose a collection
-    on_print("Available collections:", Style.RESET_ALL)
+    await on_print("Available collections:", Style.RESET_ALL)
     for i, collection in enumerate(filtered_collections):
         collection_name = collection.name
 
@@ -2642,26 +2723,26 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
         else:
             collection_metadata = "No description"
 
-        on_print(f"{i}. {collection_name} - {collection_metadata}")
+        await on_print(f"{i}. {collection_name} - {collection_metadata}")
 
     if prompt_create_new:
         # Propose to create a new collection
-        on_print(f"{len(filtered_collections)}. Create a new collection")
+        await on_print(f"{len(filtered_collections)}. Create a new collection")
     
-    choice = int(on_user_input("Enter the number of your preferred collection [0]: ") or 0)
+    choice = int(await on_user_input("Enter the number of your preferred collection [0]: ") or 0)
 
     if prompt_create_new and choice == len(filtered_collections):
-        new_collection_name = on_user_input("Enter a new collection to create: ")
-        new_collection_desc = on_user_input("Enter a description for the new collection: ")
+        new_collection_name = await on_user_input("Enter a new collection to create: ")
+        new_collection_desc = await on_user_input("Enter a description for the new collection: ")
         return new_collection_name, new_collection_desc
 
     return filtered_collections[choice].name, None  # No new description needed for existing collections
 
-def set_current_collection(collection_name, description=None, create_new_collection_if_not_found=True, verbose=False):
+async def set_current_collection(collection_name, description=None, create_new_collection_if_not_found=True, verbose=False):
     global collection
     global current_collection_name
 
-    load_chroma_client()
+    await load_chroma_client()
 
     if not collection_name or not chroma_client:
         collection = None
@@ -2683,35 +2764,35 @@ def set_current_collection(collection_name, description=None, create_new_collect
                 existing_metadata["description"] = description
                 collection.modify(metadata=existing_metadata)
                 if verbose:
-                    on_print(f"Updated description for collection {collection_name}.", Fore.WHITE + Style.DIM)
+                    await on_print(f"Updated description for collection {collection_name}.", Fore.WHITE + Style.DIM)
 
         if verbose:
-            on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
+            await on_print(f"Collection {collection_name} loaded.", Fore.WHITE + Style.DIM)
         
         current_collection_name = collection_name
     except:
         raise Exception(f"Collection {collection_name} not found")
     
-def delete_collection(collection_name):
+async def delete_collection(collection_name):
     global chroma_client
 
-    load_chroma_client()
+    await load_chroma_client()
 
     if not chroma_client:
         return
 
     # Ask for user confirmation before deleting
-    confirmation = on_user_input(f"Are you sure you want to delete the collection '{collection_name}'? (y/n): ").lower()
+    confirmation = (await on_user_input(f"Are you sure you want to delete the collection '{collection_name}'? (y/n): ")).lower()
 
     if confirmation != 'y' and confirmation != 'yes':
-        on_print("Collection deletion canceled.", Fore.YELLOW)
+        await on_print("Collection deletion canceled.", Fore.YELLOW)
         return
 
     try:
         chroma_client.delete_collection(name=collection_name)
-        on_print(f"Collection {collection_name} deleted.", Fore.GREEN)
+        await on_print(f"Collection {collection_name} deleted.", Fore.GREEN)
     except:
-        on_print(f"Collection {collection_name} not found.", Fore.RED)
+        await on_print(f"Collection {collection_name} not found.", Fore.RED)
 
 def preprocess_text(text):
     global stop_words
@@ -2737,7 +2818,7 @@ def preprocess_text(text):
 
     return words
 
-def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None):
+async def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None):
     global collection
     global verbose_mode
     global embeddings_model
@@ -2780,16 +2861,16 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         query_embeddings_model = embeddings_model
 
     if not collection and collection_name:
-        set_current_collection(collection_name, create_new_collection_if_not_found=False)
+        await set_current_collection(collection_name, create_new_collection_if_not_found=False)
 
     if not collection:
-        on_print("No ChromaDB collection loaded.", Fore.RED)
-        collection_name, _ = prompt_for_vector_database_collection()
+        await on_print("No ChromaDB collection loaded.", Fore.RED)
+        collection_name, _ = await prompt_for_vector_database_collection()
         if not collection_name:
             return ""
 
     if collection_name and collection_name != current_collection_name:
-        set_current_collection(collection_name, create_new_collection_if_not_found=False)
+        await set_current_collection(collection_name, create_new_collection_if_not_found=False)
 
     if expand_query:
         expanded_query = None
@@ -2802,16 +2883,16 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
             if "deepseek-r1" in thinking_model:
                  # DeepSeek-R1 model requires an empty system prompt
                 prompt = f"""{system_prompt}\n{question}"""
-                expanded_query = ask_ollama("", prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+                expanded_query = await ask_ollama("", prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
             else:
-                expanded_query = ask_ollama(system_prompt, question, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+                expanded_query = await ask_ollama(system_prompt, question, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
         else:
-            expanded_query = ask_ollama(system_prompt, question, selected_model=current_model, no_bot_prompt=True, stream_active=False)
+            expanded_query = await ask_ollama(system_prompt, question, selected_model=current_model, no_bot_prompt=True, stream_active=False)
         if expanded_query:
             question += "\n" + expanded_query
             if verbose_mode:
-                on_print("Expanded query:", Fore.WHITE + Style.DIM)
-                on_print(question, Fore.WHITE + Style.DIM)
+                await on_print("Expanded query:", Fore.WHITE + Style.DIM)
+                await on_print(question, Fore.WHITE + Style.DIM)
     
     if query_embeddings_model is None:
         result = collection.query(
@@ -2859,11 +2940,15 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     filtered_results = []
     for idx, (metadata, distance, document, bm25_score) in reranked_results:
         usefulness_prompt = f"Is the following document useful to answer the query '{initial_question}'?\n\nDocument:\n{document}\n\nAnswer by 'yes' or 'no'."
-        usefulness_response = ask_ollama("", usefulness_prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+        if verbose_mode:
+            await on_print(f"Usefulness prompt: {usefulness_prompt}", Fore.WHITE + Style.DIM)
+            await on_print(f"Thinking model: {thinking_model}", Fore.WHITE + Style.DIM)
+
+        usefulness_response = await ask_ollama("", usefulness_prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
 
         if verbose_mode:
-            on_print("Usefulness response:", Fore.WHITE + Style.DIM)
-            on_print(usefulness_response, Fore.WHITE + Style.DIM)
+            await on_print("Usefulness response:", Fore.WHITE + Style.DIM)
+            await on_print(usefulness_response, Fore.WHITE + Style.DIM)
         
         if "yes" in usefulness_response.lower():
             filtered_results.append((metadata, distance, document, bm25_score))
@@ -2874,17 +2959,20 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     for metadata, distance, document, bm25_score in filtered_results:
         if answer_distance_threshold > 0 and distance > answer_distance_threshold:
             if verbose_mode:
-                on_print("Skipping answer with distance: " + str(distance), Fore.WHITE + Style.DIM)
+                await on_print("Skipping answer with distance: " + str(distance), Fore.WHITE + Style.DIM)
             continue
 
         if verbose_mode:
-            on_print("Answer distance: " + str(distance), Fore.WHITE + Style.DIM)
+            await on_print("Answer distance: " + str(distance), Fore.WHITE + Style.DIM)
         answer_index += 1
         
         # Format the answer with the title, content, and URL
         title = metadata.get("title", "")
         url = metadata.get("url", "")
         filePath = metadata.get("filePath", "")
+
+        # Remove duplicate carriage returns from the document
+        document = re.sub(r'\n+', '\n', document).strip()
 
         formatted_answer = document
 
@@ -2899,7 +2987,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
 
     return '\n\n'.join(answers)
 
-def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
+async def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
     global openai_client
     global verbose_mode
     global syntax_highlighting
@@ -2962,7 +3050,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
             tools=tools
         )
     except Exception as e:
-        on_print(f"Error during OpenAI completion: {e}", Fore.RED)
+        await on_print(f"Error during OpenAI completion: {e}", Fore.RED)
         return "", False, True
 
     bot_response_is_tool_calls = False
@@ -2979,7 +3067,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
         conversation.append(completion.choices[0].message)
 
         if verbose_mode:
-            on_print(f"Tool calls: {tool_calls}", Fore.WHITE + Style.DIM)
+            await on_print(f"Tool calls: {tool_calls}", Fore.WHITE + Style.DIM)
         bot_response = tool_calls
         bot_response_is_tool_calls = True
 
@@ -2988,7 +3076,7 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
             bot_response = completion.choices[0].message.content
 
             if verbose_mode:
-                on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
+                await on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
 
             # Check if the completion is done based on the finish reason
             if completion.choices[0].finish_reason == 'stop' or completion.choices[0].finish_reason == 'function_call' or completion.choices[0].finish_reason == 'content_filter' or completion.choices[0].finish_reason == 'tool_calls':
@@ -3002,9 +3090,9 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
 
                     if not delta is None:
                         if syntax_highlighting and interactive_mode:
-                            print_spinning_wheel(chunk_count)
+                            await print_spinning_wheel(chunk_count)
                         else:
-                            on_llm_token_response(delta, Style.RESET_ALL)
+                            await on_llm_token_response(delta, Style.RESET_ALL)
                             on_stdout_flush()
                         bot_response += delta
                     elif isinstance(chunk.choices[0].delta.tool_calls, list) and len(chunk.choices[0].delta.tool_calls) > 0:
@@ -3028,16 +3116,17 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
             except KeyboardInterrupt:
                 completion.close()
             except Exception as e:
-                on_print(f"Error during streaming completion: {e}", Fore.RED)
+                await on_print(f"Error during streaming completion: {e}", Fore.RED)
                 bot_response = ""
                 bot_response_is_tool_calls = False
 
     if not completion_done and not bot_response_is_tool_calls:
         conversation.append({"role": "assistant", "content": bot_response})
 
+    await on_llm_end_response(bot_response, bot_response_is_tool_calls, completion_done)
     return bot_response, bot_response_is_tool_calls, completion_done
 
-def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=None):
+async def handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=None):
     # Iterate over each function call in the bot response
     tool_found = False
     for tool_call in bot_response:
@@ -3070,33 +3159,33 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                 # Check if the tool is a globally defined function
                 if tool_name in globals():
                     if verbose_mode:
-                        on_print(f"Calling tool function: {tool_name} with parameters: {parameters}", Fore.WHITE + Style.DIM)
+                        await on_print(f"Calling tool function: {tool_name} with parameters: {parameters}", Fore.WHITE + Style.DIM)
                     try:
                         # Call the global function with extracted parameters
-                        tool_response = globals()[tool_name](**parameters)
+                        tool_response = await globals()[tool_name](**parameters)
                         if verbose_mode:
-                            on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
+                            await on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
                         tool_found = True
                     except Exception as e:
-                        on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
+                        await on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
                 else:
                     if verbose_mode:
-                        on_print(f"Trying to find plugin with function '{tool_name}'...", Fore.WHITE + Style.DIM)
+                        await on_print(f"Trying to find plugin with function '{tool_name}'...", Fore.WHITE + Style.DIM)
                     # Search for the tool function in plugins
                     for plugin in plugins:
                         if hasattr(plugin, tool_name) and callable(getattr(plugin, tool_name)):
                             tool_found = True
                             if verbose_mode:
-                                on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__} with arguments {parameters}", Fore.WHITE + Style.DIM)
+                                await on_print(f"Calling tool function: {tool_name} from plugin: {plugin.__class__.__name__} with arguments {parameters}", Fore.WHITE + Style.DIM)
 
                             try:
                                 # Call the plugin's tool function with parameters
-                                tool_response = getattr(plugin, tool_name)(**parameters)
+                                tool_response = await getattr(plugin, tool_name)(**parameters)
                                 if verbose_mode:
-                                    on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
+                                    await on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
                                 break
                             except Exception as e:
-                                on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
+                                await on_print(f"Error calling tool function: {tool_name} - {e}", Fore.RED + Style.NORMAL)
 
                 if not tool_response is None:
                     # If the tool response is a string, append it to the conversation
@@ -3120,14 +3209,14 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                                 tool_response_str += "\n" + latest_user_message
                         conversation.append({"role": tool_role, "content": tool_response_str, "tool_call_id": tool_call_id})
     if tool_found:
-        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, stream_active=stream_active, num_ctx=num_ctx)
+        bot_response = await ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, stream_active=stream_active, num_ctx=num_ctx)
     else:
-        on_print(f"Tools not found", Fore.RED)
+        await on_print(f"Tools not found", Fore.RED)
         return None
     
     return bot_response
 
-def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None, num_ctx=None):
+async def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None, num_ctx=None):
     global no_system_role
     global syntax_highlighting
     global interactive_mode
@@ -3145,7 +3234,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     if use_openai and not model_is_an_ollama_model:
         if verbose_mode:
-            on_print("Using OpenAI API for conversation generation.", Fore.WHITE + Style.DIM)
+            await on_print("Using OpenAI API for conversation generation.", Fore.WHITE + Style.DIM)
 
     if not syntax_highlighting:
         if interactive_mode and not no_bot_prompt:
@@ -3155,9 +3244,9 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                 on_prompt(f"{prompt}: ", Style.RESET_ALL)
         else:
             if prompt_color:
-                on_stdout_write("", prompt_color)
+                await on_stdout_write("", prompt_color)
             else:
-                on_stdout_write("", Style.RESET_ALL)
+                await on_stdout_write("", Style.RESET_ALL)
         on_stdout_flush()
 
     model_support_tools = True
@@ -3166,15 +3255,15 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         completion_done = False
 
         while not completion_done:
-            bot_response, bot_response_is_tool_calls, completion_done = ask_openai_with_conversation(conversation, model, temperature, prompt_template, stream_active, tools)
+            bot_response, bot_response_is_tool_calls, completion_done = await ask_openai_with_conversation(conversation, model, temperature, prompt_template, stream_active, tools)
             if bot_response and bot_response_is_tool_calls:
                 # Convert bot_response list of objects to a list of dict
                 bot_response = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in bot_response]
 
                 if verbose_mode:
-                    on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
+                    await on_print(f"Bot response: {bot_response}", Fore.WHITE + Style.DIM)
 
-                bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
+                bot_response = await handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
                 # Consider completion done
                 completion_done = True
@@ -3200,7 +3289,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         )
     except ollama.ResponseError as e:
         if "does not support tools" in str(e):
-            tool_response = generate_tool_response(find_latest_user_message(conversation), tools, model, temperature, prompt_template, num_ctx=num_ctx)
+            tool_response = await generate_tool_response(find_latest_user_message(conversation), tools, model, temperature, prompt_template, num_ctx=num_ctx)
             
             if not tool_response is None and len(tool_response) > 0:
                 bot_response = tool_response
@@ -3209,14 +3298,14 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             else:
                 return ""
         else:
-            on_print(f"An error occurred during the conversation: {e}", Fore.RED)
+            await on_print(f"An error occurred during the conversation: {e}", Fore.RED)
             return ""
 
     if not bot_response_is_tool_calls:
         try:
             if stream_active and len(tools) == 0:
                 if alternate_model:
-                    on_print(f"Response from model: {model}\n")
+                    await on_print(f"Response from model: {model}\n")
                 chunk_count = 0
                 for chunk in stream:
                     continue_response_generation = True
@@ -3244,11 +3333,11 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                     bot_response += delta
                     
                     if syntax_highlighting and interactive_mode:
-                        print_spinning_wheel(chunk_count)
+                        await print_spinning_wheel(chunk_count)
                     else:
-                        on_llm_token_response(delta)
+                        await on_llm_token_response(delta)
                         on_stdout_flush()
-                on_llm_token_response("\n")
+                await on_llm_token_response("\n")
                 on_stdout_flush()
             else:
                 tool_calls = stream['message'].get('tool_calls', [])
@@ -3257,7 +3346,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                     conversation.append(stream['message'])
 
                     if verbose_mode:
-                        on_print(f"Tool calls: {tool_calls}", Fore.WHITE + Style.DIM)
+                        await on_print(f"Tool calls: {tool_calls}", Fore.WHITE + Style.DIM)
                     bot_response = tool_calls
                     bot_response_is_tool_calls = True
                 else:
@@ -3265,7 +3354,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         except KeyboardInterrupt:
             stream.close()
         except ollama.ResponseError as e:
-            on_print(f"An error occurred during the conversation: {e}", Fore.RED)
+            await on_print(f"An error occurred during the conversation: {e}", Fore.RED)
             return ""
 
     # Check if the bot response is a tool call object
@@ -3284,16 +3373,17 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
         bot_response_is_tool_calls = True
 
     if bot_response and bot_response_is_tool_calls:
-        bot_response = handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
+        bot_response = await handle_tool_response(bot_response, model_support_tools, conversation, model, temperature, prompt_template, tools, stream_active, num_ctx=num_ctx)
 
+    await on_llm_end_response(bot_response, bot_response_is_tool_calls, True)
     if isinstance(bot_response, str):
         return bot_response.strip()
     else:
         return None
 
-def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, num_ctx=None):
+async def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, num_ctx=None):
     conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
-    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active, num_ctx=num_ctx)
+    return await ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active, num_ctx=num_ctx)
 
 def find_latest_user_message(conversation):
     # Iterate through the conversation list in reverse order
@@ -3326,7 +3416,7 @@ def try_parse_json(json_str):
 
     return result
 
-def extract_json(garbage_str):
+async def extract_json(garbage_str):
     global verbose_mode
 
     if garbage_str is None:
@@ -3396,20 +3486,20 @@ def extract_json(garbage_str):
 
         # Attempt to load the JSON to verify it's correct
         if verbose_mode:
-            on_print(f"Extracted JSON: '{json_str}'", Fore.WHITE + Style.DIM)
+            await on_print(f"Extracted JSON: '{json_str}'", Fore.WHITE + Style.DIM)
         result = try_parse_json(json_str)
         if result is not None:
             return result
         else:
             if verbose_mode:
-                on_print("Extracted string is not a valid JSON.", Fore.RED)
+                await on_print("Extracted string is not a valid JSON.", Fore.RED)
     else:
         if verbose_mode:
-            on_print("Extracted string is not a valid JSON.", Fore.RED)
+            await on_print("Extracted string is not a valid JSON.", Fore.RED)
     
     return []
 
-def generate_tool_response(user_input, tools, selected_model, temperature=0.1, prompt_template=None, num_ctx=None):
+async def generate_tool_response(user_input, tools, selected_model, temperature=0.1, prompt_template=None, num_ctx=None):
     """Generate a response using Ollama that suggests function calls based on the user input."""
     global verbose_mode
 
@@ -3429,10 +3519,10 @@ If no tool is relevant to answer, simply return an empty array: [].
 """
 
     # Call the existing ask_ollama function
-    tool_response = ask_ollama(system_prompt, user_input, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+    tool_response = await ask_ollama(system_prompt, user_input, selected_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
 
     if verbose_mode:
-        on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
+        await on_print(f"Tool response: {tool_response}", Fore.WHITE + Style.DIM)
     
     # The response should be in JSON format already if the function is correct.
     return extract_json(tool_response)
@@ -3441,7 +3531,7 @@ def bytes_to_gibibytes(bytes):
     gigabytes = bytes / (1024 ** 3)
     return f"{gigabytes:.1f} GB"
 
-def select_ollama_model_if_available(model_name):
+async def select_ollama_model_if_available(model_name):
     global no_system_role
     global verbose_mode
 
@@ -3451,7 +3541,7 @@ def select_ollama_model_if_available(model_name):
     try:
         models = ollama.list()["models"]
     except:
-        on_print("Ollama API is not running.", Fore.RED)
+        await on_print("Ollama API is not running.", Fore.RED)
         return None
 
     for model in models:
@@ -3460,16 +3550,16 @@ def select_ollama_model_if_available(model_name):
     
             if "gemma" in selected_model:
                 no_system_role=True
-                on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
+                await on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
             if verbose_mode:
-                on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
+                await on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
             return model_name
         
-    on_print(f"Model {model_name} not found.", Fore.RED)
+    await on_print(f"Model {model_name} not found.", Fore.RED)
     return None
 
-def select_openai_model_if_available(model_name):
+async def select_openai_model_if_available(model_name):
     global verbose_mode
     global openai_client
 
@@ -3479,7 +3569,7 @@ def select_openai_model_if_available(model_name):
     try:
         models = openai_client.models.list().data
     except Exception as e:
-        on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
+        await on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
     
     # Remove non-chat models from the list (keep only GPT models and oX models like o1 and o3)
@@ -3488,13 +3578,13 @@ def select_openai_model_if_available(model_name):
     for model in models:
         if model.id == model_name:
             if verbose_mode:
-                on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
+                await on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
             return model_name
 
-    on_print(f"Model {model_name} not found.", Fore.RED)
+    await on_print(f"Model {model_name} not found.", Fore.RED)
     return None
 
-def prompt_for_openai_model(default_model, current_model):
+async def prompt_for_openai_model(default_model, current_model):
     global verbose_mode
     global openai_client
 
@@ -3502,7 +3592,7 @@ def prompt_for_openai_model(default_model, current_model):
     try:
         models = openai_client.models.list().data
     except Exception as e:
-        on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
+        await on_print(f"Failed to fetch OpenAI models: {str(e)}", Fore.RED)
         return None
 
     if current_model is None:
@@ -3512,10 +3602,10 @@ def prompt_for_openai_model(default_model, current_model):
     models = [model for model in models if model.id.startswith("gpt-")]
 
     # Display available models
-    on_print("Available OpenAI models:\n", Style.RESET_ALL)
+    await on_print("Available OpenAI models:\n", Style.RESET_ALL)
     for i, model in enumerate(models):
         star = " *" if model.id == current_model else ""
-        on_stdout_write(f"{i}. {model.id}{star}\n")
+        await on_stdout_write(f"{i}. {model.id}{star}\n")
     on_stdout_flush()
 
     # Default choice index for current_model
@@ -3529,17 +3619,17 @@ def prompt_for_openai_model(default_model, current_model):
         default_choice_index = 0
 
     # Prompt user to choose a model
-    choice = int(on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
+    choice = int(await on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
 
     # Select the chosen model
     selected_model = models[choice].id
 
     if verbose_mode:
-        on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
+        await on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
 
     return selected_model
 
-def prompt_for_ollama_model(default_model, current_model):
+async def prompt_for_ollama_model(default_model, current_model):
     global no_system_role
     global verbose_mode
 
@@ -3547,18 +3637,18 @@ def prompt_for_ollama_model(default_model, current_model):
     try:
         models = ollama.list()["models"]
     except:
-        on_print("Ollama API is not running.", Fore.RED)
+        await on_print("Ollama API is not running.", Fore.RED)
         return None
 
     if current_model is None:
         current_model = default_model
 
     # Ask user to choose a model
-    on_print("Available models:\n", Style.RESET_ALL)
+    available_models_message = "Available models:\n"
     for i, model in enumerate(models):
         star = " *" if model['model'] == current_model else ""
-        on_stdout_write(f"{i}. {model['model']} ({bytes_to_gibibytes(model['size'])}){star}\n")
-    on_stdout_flush()
+        available_models_message += f"{i}. {model['model']} ({bytes_to_gibibytes(model['size'])}){star}\n"
+    await on_print(available_models_message, Style.RESET_ALL)
 
     default_choice_index = None
     for i, model in enumerate(models):
@@ -3569,17 +3659,17 @@ def prompt_for_ollama_model(default_model, current_model):
     if default_choice_index is None:
         default_choice_index = 0
 
-    choice = int(on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
+    choice = int(await on_user_input("Enter the number of your preferred model [" + str(default_choice_index) + "]: ") or default_choice_index)
 
     # Use the chosen model
     selected_model = models[choice]['model']
 
     if "gemma" in selected_model:
         no_system_role=True
-        on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
+        await on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
     if verbose_mode:
-        on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
+        await on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
     return selected_model
 
 def is_model_an_ollama_model(model_name):
@@ -3596,13 +3686,13 @@ def is_model_an_ollama_model(model_name):
 
     return False
 
-def prompt_for_model(default_model, current_model):
+async def prompt_for_model(default_model, current_model):
     global use_openai
 
     if use_openai:
-        return prompt_for_openai_model(default_model, current_model)
+        return await prompt_for_openai_model(default_model, current_model)
     else:
-        return prompt_for_ollama_model(default_model, current_model)
+        return await prompt_for_ollama_model(default_model, current_model)
 
 def get_personal_info():
     personal_info = {}
@@ -3621,7 +3711,7 @@ def get_personal_info():
     personal_info['user_name'] = user_name
     return personal_info
 
-def save_conversation_to_file(conversation, file_path):
+async def save_conversation_to_file(conversation, file_path):
     with open(file_path, 'w', encoding="utf8") as f:
         # Convert conversation list of objects to a list of dict
         conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
@@ -3639,9 +3729,9 @@ def save_conversation_to_file(conversation, file_path):
             
             f.write(f"{role}: {message['content']}\n\n")
 
-    on_print(f"Conversation saved to {file_path}", Fore.WHITE + Style.DIM)
+    await on_print(f"Conversation saved to {file_path}", Fore.WHITE + Style.DIM)
 
-def load_chroma_client():
+async def load_chroma_client():
     global chroma_client
     global verbose_mode
     global chroma_client_host
@@ -3663,10 +3753,689 @@ def load_chroma_client():
             raise ValueError("Invalid Chroma client configuration")
     except:
         if verbose_mode:
-            on_print("ChromaDB client could not be initialized. Please check the host and port.", Fore.RED + Style.DIM)
+            await on_print("ChromaDB client could not be initialized. Please check the host and port.", Fore.RED + Style.DIM)
         chroma_client = None
 
-def run():
+class ConversationManager:
+    def __init__(self, conversation, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit):
+        self.default_model = default_model
+        self.selected_model = selected_model
+        self.current_model = selected_model
+        self.alternate_model = alternate_model
+        self.thinking_model = thinking_model
+        self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
+        self.auto_start_conversation = auto_start_conversation
+        self.memory_manager = memory_manager
+        self.use_memory_manager = use_memory_manager
+        self.stream_active = stream_active
+        self.system_prompt_placeholders = system_prompt_placeholders
+        self.conversations_folder = conversations_folder
+        self.user_name = user_name
+        self.output_file = output_file
+        self.conversation = conversation
+        self.answer_and_exit = answer_and_exit
+        self.verbose_mode = verbose_mode
+        self.selected_tools = selected_tools
+        self.num_ctx = num_ctx
+        self.agent_crew_manager = agent_crew_manager
+        self.use_chainlit = use_chainlit
+
+    async def on_message(self, message, style="", prompt=""):
+        await on_print(message, style, prompt)
+    
+    async def process_user_input(self, user_input):
+        thoughts = None
+
+        # Exit condition
+        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
+            await self.on_message("Goodbye!", Style.RESET_ALL)
+            if self.memory_manager:
+                await self.on_message("Saving conversation to memory...", Fore.WHITE + Style.DIM)
+                if self.memory_manager.add_memory(self.conversation):
+                    await self.on_message("Conversation saved to memory.", Fore.WHITE + Style.DIM)
+                    await self.on_message("", Style.RESET_ALL)
+            return False
+
+        if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
+            await self.on_message("Conversation reset.", Style.RESET_ALL)
+            if initial_message:
+                self.conversation = [initial_message]
+            else:
+                self.conversation = []
+
+            self.auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
+            user_input = ""
+            return True
+
+        for plugin in plugins:
+            if hasattr(plugin, "on_user_input_done") and callable(getattr(plugin, "on_user_input_done")):
+                user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=self.verbose_mode)
+                if user_input_from_plugin:
+                    user_input = user_input_from_plugin
+        
+        # Allow for /context command to be used to set the context window size
+        if user_input.startswith("/context"):
+            if re.search(r'/context\s+\d+', user_input):
+                context_window = int(re.search(r'/context\s+(\d+)', user_input).group(1))
+                max_context_length = 125 # 125 * 1024 = 128000 tokens
+                if context_window < 0 or context_window > max_context_length:
+                    await self.on_message(f"Context window must be between 0 and {max_context_length}.", Fore.RED)
+                else:
+                    self.num_ctx = context_window * 1024
+                    if self.verbose_mode:
+                        await self.on_message(f"Context window changed to {self.num_ctx} tokens.", Fore.WHITE + Style.DIM)
+            else:
+                await self.on_message(f"Please specify context window size with /context <number>.", Fore.RED)
+            return True
+
+        if "/system" in user_input:
+            system_prompt = user_input.replace("/system", "").strip()
+
+            if len(system_prompt) > 0:
+                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+                for key, value in self.system_prompt_placeholders.items():
+                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
+                if self.verbose_mode:
+                    await self.on_message("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
+
+                for entry in self.conversation:
+                    if "role" in entry and entry["role"] == "system":
+                        entry["content"] = system_prompt
+                        break
+            return True
+
+        if "/index" in user_input:
+            if not chroma_client:
+                await self.on_message("ChromaDB client not initialized.", Fore.RED)
+                return True
+
+            await load_chroma_client()
+
+            if not current_collection_name:
+                await self.on_message("No ChromaDB collection loaded.", Fore.RED)
+
+                collection_name, collection_description = await prompt_for_vector_database_collection()
+                await set_current_collection(collection_name, collection_description, verbose=self.verbose_mode)
+
+            folder_to_index = user_input.split("/index")[1].strip()
+            temp_folder = None
+            if folder_to_index.startswith("http"):
+                base_url = folder_to_index
+                temp_folder = tempfile.mkdtemp()
+                scraper = SimpleWebScraper(base_url, output_dir=temp_folder, file_types=["html", "htm"], restrict_to_base=True, convert_to_markdown=True, verbose=self.verbose_mode)
+                await scraper.scrape()
+                folder_to_index = temp_folder
+
+            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model, verbose=self.verbose_mode)
+            await document_indexer.index_documents()
+
+            if temp_folder:
+                # Remove the temporary folder and its contents
+                for file in os.listdir(temp_folder):
+                    file_path = os.path.join(temp_folder, file)
+                    os.remove(file_path)
+                os.rmdir(temp_folder)
+            return True
+
+        if user_input == "/verbose":
+            self.verbose_mode = not self.verbose_mode
+            await self.on_message(f"Verbose mode: {self.verbose_mode}", Fore.WHITE + Style.DIM)
+            return True
+
+        if "/agent" in user_input:
+            user_input = user_input.replace("/agent", "").strip()
+            
+            self.agent_crew_manager.create_agent(user_input)
+            return True
+
+        if "/cot" in user_input:
+            user_input = user_input.replace("/cot", "").strip()
+            chain_of_thoughts_system_prompt = generate_chain_of_thoughts_system_prompt(self.selected_tools)
+
+            # Format the current conversation as user/assistant messages
+            formatted_conversation = "\n".join([f"{entry['role']}: {entry['content']}" for entry in self.conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"])
+            formatted_conversation += "\n\n" + user_input
+
+            thoughts = await ask_ollama(chain_of_thoughts_system_prompt, formatted_conversation, self.thinking_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=self.num_ctx)
+
+        if "/search" in user_input:
+            # If /search is followed by a number, use that number as the number of documents to return (/search can be anywhere in the prompt)
+            if re.search(r'/search\s+\d+', user_input):
+                n_docs_to_return = int(re.search(r'/search\s+(\d+)', user_input).group(1))
+                user_input = user_input.replace(f"/search {n_docs_to_return}", "").strip()
+            else:
+                user_input = user_input.replace("/search", "").strip()
+                n_docs_to_return = number_of_documents_to_return_from_vector_db
+
+            answer_from_vector_db = await query_vector_database(user_input, collection_name=current_collection_name, n_results=n_docs_to_return)
+            if answer_from_vector_db:
+                initial_user_input = user_input
+                user_input = "Question: " + initial_user_input
+                user_input += "\n\nAnswer the question as truthfully as possible using the provided text below, and if the answer is not contained within the text below, say 'I don't know'.\n\n"
+                user_input += answer_from_vector_db
+                user_input += "\n\nAnswer the question as truthfully as possible using the provided text above, and if the answer is not contained within the text above, say 'I don't know'."
+                user_input += "\nQuestion: " + initial_user_input
+
+                if self.verbose_mode:
+                    await self.on_message(user_input, Fore.WHITE + Style.DIM)
+        elif "/web" in user_input:
+            user_input = user_input.replace("/web", "").strip()
+            web_search_response = await web_search(user_input, num_ctx=self.num_ctx)
+            if web_search_response:
+                initial_user_input = user_input
+                user_input += "Context: " + web_search_response
+                user_input += "\n\nQuestion: " + initial_user_input
+                user_input += "\nAnswer the question as truthfully as possible using the provided web search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
+                user_input += "Cite some useful links from the search results to support your answer."
+
+                if self.verbose_mode:
+                    await self.on_message(user_input, Fore.WHITE + Style.DIM)
+
+        if user_input == "/thinking_model":
+            self.selected_model = await prompt_for_model(self.default_model, self.thinking_model)
+            self.thinking_model = self.selected_model
+            return True
+
+        if user_input == "/model":
+            thinking_model_is_same = self.thinking_model == self.current_model
+            self.selected_model = await prompt_for_model(self.default_model, self.current_model)
+            self.current_model = self.selected_model
+
+            if thinking_model_is_same:
+                self.thinking_model = self.selected_model
+
+            if self.use_memory_manager:
+                await load_chroma_client()
+
+                if chroma_client:
+                    self.memory_manager = MemoryManager(memory_collection_name, chroma_client, self.current_model, embeddings_model, self.verbose_mode, num_ctx=self.num_ctx, long_term_memory_file=long_term_memory_file)
+                else:
+                    self.use_memory_manager = False
+            return True
+
+        if user_input == "/memory":
+            if self.use_memory_manager:
+                # Deactivate memory manager
+                self.memory_manager = None
+                self.use_memory_manager = False
+                await self.on_message("Memory manager deactivated.", Fore.WHITE + Style.DIM)
+            else:
+                await load_chroma_client()
+
+                if chroma_client:
+                    self.memory_manager = MemoryManager(memory_collection_name, chroma_client, self.current_model, embeddings_model, self.verbose_mode, num_ctx=self.num_ctx, long_term_memory_file=long_term_memory_file)
+                    self.use_memory_manager = True
+                    await self.on_message("Memory manager activated.", Fore.WHITE + Style.DIM)
+                else:
+                    await self.on_message("ChromaDB client not initialized.", Fore.RED)
+
+            return True
+
+        if user_input == "/model2":
+            self.alternate_model = await prompt_for_model(self.default_model, self.current_model)
+            return True
+
+        if user_input == "/tools":
+            self.selected_tools = await select_tools(await get_available_tools(), selected_tools=self.selected_tools)
+            return True
+
+        if "/save" in user_input:
+            # If the user input contains /save and followed by a filename, save the conversation to that file
+            file_path = user_input.split("/save")[1].strip()
+            # Remove any leading or trailing spaces, single or double quotes
+            file_path = file_path.strip().strip('\'').strip('\"')
+
+            if file_path:
+                # Check if the filename contains a folder path (use os path separator to check)
+                if os.path.sep in file_path:
+                    # Get the folder path and filename
+                    folder_path, _ = os.path.split(file_path)
+                    # Create the folder if it doesn't exist
+                    if not os.path.exists(folder_path):
+                        os.makedirs(folder_path)
+                elif self.conversations_folder:
+                    file_path = os.path.join(self.conversations_folder, file_path)
+
+                await save_conversation_to_file(self.conversation, file_path)
+            else:
+                # Save the conversation to a file, use current timestamp as the filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                if self.conversations_folder:
+                    await save_conversation_to_file(self.conversation, os.path.join(self.conversations_folder, f"conversation_{timestamp}.txt"))
+                else:
+                    await save_conversation_to_file(self.conversation, f"conversation_{timestamp}.txt")
+            return True
+
+        if user_input == "/collection":
+            collection_name, collection_description = await prompt_for_vector_database_collection()
+            await set_current_collection(collection_name, collection_description, verbose=self.verbose_mode)
+            return True
+
+        if self.memory_manager and (user_input == "/remember" or user_input == "/memorize"):
+            await self.on_message("Saving conversation to memory...", Fore.WHITE + Style.DIM)
+            if self.memory_manager.add_memory(self.conversation):
+                await self.on_message("Conversation saved to memory.", Fore.WHITE + Style.DIM)
+                await self.on_message("", Style.RESET_ALL)
+            return True
+
+        if self.memory_manager and user_input == "/forget":
+            # Remove memory collection
+            await delete_collection(memory_collection_name)
+            return True
+
+        if "/rmcollection" in user_input or "/deletecollection" in user_input:
+            if "/rmcollection" in user_input and len(user_input.split("/rmcollection")) > 1:
+                collection_name = user_input.split("/rmcollection")[1].strip()
+
+            if not collection_name and "/deletecollection" in user_input and len(user_input.split("/deletecollection")) > 1:
+                collection_name = user_input.split("/deletecollection")[1].strip()
+
+            if not collection_name:
+                collection_name, _ = await prompt_for_vector_database_collection(prompt_create_new=False)
+
+            if not collection_name:
+                return True
+
+            await delete_collection(collection_name)
+            return True
+
+        if "/editcollection" in user_input:
+            collection_name, _ = await prompt_for_vector_database_collection()
+            await edit_collection_metadata(collection_name)
+            return True
+
+        if user_input == "/chatbot":
+            chatbot = await prompt_for_chatbot()
+            if "tools" in chatbot and len(chatbot["tools"]) > 0:
+                # Append chatbot tools to selected_tools if not already in the array
+                if self.selected_tools is None:
+                    self.selected_tools = []
+                
+                for tool in chatbot["tools"]:
+                    self.selected_tools = await select_tool_by_name(await get_available_tools(), self.selected_tools, tool)
+
+            system_prompt = chatbot["system_prompt"]
+            # Initial system message
+            if not no_system_role and len(self.user_name) > 0:
+                first_name = self.user_name.split()[0]
+                system_prompt += f"\nThe user's name is {self.user_name}, first name: {first_name}. {today}"
+
+            if len(system_prompt) > 0:
+                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+                for key, value in self.system_prompt_placeholders.items():
+                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
+                if self.verbose_mode:
+                    await self.on_message("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
+
+                initial_message = {"role": "system", "content": system_prompt}
+                self.conversation = [initial_message]
+            else:
+                self.conversation = []
+            await self.on_message("Conversation reset.", Style.RESET_ALL)
+            self.auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
+            user_input = ""
+            return True
+
+        if "/cb" in user_input:
+            if platform.system() == "Windows":
+                # Replace /cb with the clipboard content
+                win32clipboard.OpenClipboard()
+                clipboard_content = win32clipboard.GetClipboardData()
+                win32clipboard.CloseClipboard()
+            else:
+                clipboard_content = pyperclip.paste()
+            user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
+            await self.on_message("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
+
+        image_path = None
+        # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
+        if "/file " in user_input:
+            file_path = user_input.split("/file")[1].strip()
+            file_path = file_path.strip("'\"")
+            
+            # Check if the file is an image
+            _, ext = os.path.splitext(file_path)
+            if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as file:
+                        user_input = user_input.replace("/file", "")
+                        user_input += "\n" + file.read()
+                except FileNotFoundError:
+                    await self.on_message("File not found. Please try again.", Fore.RED)
+                    return True
+            else:
+                user_input = user_input.split("/file")[0].strip()
+                image_path = file_path
+
+        # If user input starts with '/' and is not a command, ignore it.
+        if user_input.startswith('/') and not user_input.startswith('//'):
+            await self.on_message(f"Invalid command '{user_input}'. Please try again.", Fore.RED)
+            return True
+
+        # Add user input to conversation history
+        if image_path:
+            self.conversation.append({"role": "user", "content": user_input, "images": [image_path]})
+        elif len(user_input.strip()) > 0:
+            self.conversation.append({"role": "user", "content": user_input})
+
+        if self.memory_manager:
+            await self.memory_manager.handle_user_query(self.conversation)
+
+        if thoughts:
+            thoughts = f"Thinking...\n{thoughts}\nEnd of internal thoughts.\n\nFinal response:"
+            if syntax_highlighting:
+                await self.on_message(colorize(thoughts), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+            else:
+                await self.on_message(thoughts, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+            
+            # Add the chain of thoughts to the conversation, as an assistant message
+            self.conversation.append({"role": "assistant", "content": thoughts})
+
+        # Generate response
+        bot_response = await ask_ollama_with_conversation(self.conversation, self.selected_model, temperature=temperature, prompt_template=prompt_template, tools=self.selected_tools, stream_active=self.stream_active, num_ctx=self.num_ctx, no_bot_prompt=self.use_chainlit)
+
+        alternate_bot_response = None
+        if self.alternate_model:
+            alternate_bot_response = await ask_ollama_with_conversation(self.conversation, self.alternate_model, temperature=temperature, prompt_template=prompt_template, tools=self.selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN, stream_active=self.stream_active, num_ctx=self.num_ctx, no_bot_prompt=self.use_chainlit)
+        
+        bot_response_handled_by_plugin = False
+        for plugin in plugins:
+            if hasattr(plugin, "on_llm_response") and callable(getattr(plugin, "on_llm_response")):
+                plugin_response = getattr(plugin, "on_llm_response")(bot_response)
+                bot_response_handled_by_plugin = bot_response_handled_by_plugin or plugin_response
+
+        if not bot_response_handled_by_plugin:
+            if syntax_highlighting:
+                await self.on_message(colorize(bot_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+            
+                if alternate_bot_response:
+                    await self.on_message(colorize(alternate_bot_response), Fore.CYAN, "\rAlt: " if interactive_mode else "")
+            elif not use_openai and len(self.selected_tools) > 0:
+                # Ollama cannot stream when tools are used
+                await self.on_message(bot_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+
+                if alternate_bot_response:
+                    await self.on_message(alternate_bot_response, Fore.CYAN, "\rAlt: " if interactive_mode else "")
+
+        if alternate_bot_response:
+            # Ask user to select the preferred response
+            await self.on_message(f"Select the preferred response:\n1. Original model ({self.current_model})\n2. Alternate model ({self.alternate_model})", Fore.WHITE + Style.DIM)
+            choice = await on_user_input("Enter the number of your preferred response [1]: ") or "1"
+            bot_response = bot_response if choice == "1" else alternate_bot_response
+
+        # Add bot response to conversation history
+        self.conversation.append({"role": "assistant", "content": bot_response})
+
+        if self.auto_start_conversation:
+            self.auto_start_conversation = False
+
+        if self.output_file:
+            with open(self.output_file, 'a', encoding='utf-8') as f:
+                f.write(bot_response)
+                if self.verbose_mode:
+                    await self.on_message(f"Response saved to {self.output_file}", Fore.WHITE + Style.DIM)
+
+        # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
+        if bot_response and re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
+            await self.on_message("Goodbye!", Style.RESET_ALL)
+            return False
+
+        if self.answer_and_exit:
+            return False
+        
+        return True
+
+async def init(settings, use_chainlit=False):
+    global chroma_client_host
+    global chroma_client_port
+    global chroma_db_path
+    global temperature
+    global prompt_template
+    global thinking_model_reasoning_pattern
+    global number_of_documents_to_return_from_vector_db
+    global auto_save
+    global syntax_highlighting
+    global other_instance_url
+    global listening_port
+    global plugins
+    global openai_client
+    global selected_tools
+    global verbose_mode
+    global current_model
+    global memory_manager
+    global thinking_model
+
+    preferred_collection_name = settings.collection
+    use_openai = settings.use_openai
+    chroma_client_host = settings.chroma_host
+    chroma_client_port = settings.chroma_port
+    chroma_db_path = settings.chroma_path
+    temperature = settings.temperature
+    no_system_role = bool(settings.disable_system_role)
+    current_collection_name = preferred_collection_name
+    prompt_template = settings.prompt_template
+    additional_chatbots_file = settings.additional_chatbots
+    verbose_mode = settings.verbose
+    initial_system_prompt = settings.system_prompt
+    system_prompt_placeholders_json = settings.system_prompt_placeholders_json
+    preferred_model = settings.model
+    thinking_model = settings.thinking_model
+    thinking_model_reasoning_pattern = settings.thinking_model_reasoning_pattern
+    number_of_documents_to_return_from_vector_db = settings.docs_to_fetch_from_chroma
+
+    if not thinking_model:
+        thinking_model = preferred_model
+
+    if verbose_mode:
+        await on_print(f"Using thinking model: {thinking_model}", Fore.WHITE + Style.DIM)
+
+    conversations_folder = settings.conversations_folder
+    auto_save = settings.auto_save
+    syntax_highlighting = settings.syntax_highlighting
+
+    if use_chainlit:
+        # Deactivate syntax highlighting when using ChainLit
+        syntax_highlighting = False
+
+    interactive_mode = settings.interactive
+    embeddings_model = settings.embeddings_model
+    plugins_folder = settings.plugins_folder
+    user_prompt = settings.prompt
+    stream_active = settings.stream
+    output_file = settings.output
+    other_instance_url = settings.other_instance_url
+    listening_port = settings.listening_port
+    custom_user_name = settings.user_name
+    no_user_name = settings.anonymous
+    use_memory_manager = settings.memory
+    num_ctx = settings.context_window
+    auto_start_conversation = settings.auto_start
+    memory_collection_name = settings.memory_collection_name
+    long_term_memory_file = settings.long_term_memory_file
+
+    if verbose_mode and num_ctx:
+        await on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
+
+    # Get today's date
+    today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
+
+    system_prompt_placeholders = {}
+    if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
+        with open(system_prompt_placeholders_json, 'r', encoding="utf8") as f:
+            system_prompt_placeholders = json.load(f)
+
+    # If output file already exists, ask user for confirmation to overwrite
+    if output_file and os.path.exists(output_file):
+        if interactive_mode:
+            confirmation = (await on_user_input(f"Output file '{output_file}' already exists. Overwrite? (y/n): ")).lower()
+            if confirmation != 'y' and confirmation != 'yes':
+                await on_print("Output file not overwritten.")
+                output_file = None
+            else:
+                # Delete the existing file
+                os.remove(output_file)
+        else:
+            # Delete the existing file
+            os.remove(output_file)
+
+    if verbose_mode and user_prompt:
+        await on_print(f"User prompt: {user_prompt}", Fore.WHITE + Style.DIM)
+
+    plugins = await discover_plugins(plugins_folder)
+
+    if verbose_mode:
+        await on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
+
+    # Load additional chatbots from a JSON file
+    await load_additional_chatbots(additional_chatbots_file)
+
+    chatbot = None
+    if settings.chatbot:
+        # Trim the chatbot name to remove any leading or trailing spaces, single or double quotes
+        settings.chatbot = settings.chatbot.strip().strip('\'').strip('\"')
+        for bot in chatbots:
+            if bot["name"] == settings.chatbot:
+                chatbot = bot
+                break
+        if chatbot is None:
+            await on_print(f"Chatbot '{settings.chatbot}' not found.", Fore.RED)
+            
+        if verbose_mode and chatbot and 'name' in chatbot:
+            await on_print(f"Using chatbot: {chatbot['name']}", Fore.WHITE + Style.DIM)
+    
+    if chatbot is None:
+        # Load the default chatbot
+        chatbot = chatbots[0]
+
+    if settings.index_documents:
+        await load_chroma_client()
+        document_indexer = DocumentIndexer(settings.index_documents, current_collection_name, chroma_client, embeddings_model)
+        await document_indexer.index_documents()
+
+    auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or auto_start_conversation
+    system_prompt = chatbot["system_prompt"]
+    use_openai = use_openai or (hasattr(chatbot, 'use_openai') and getattr(chatbot, 'use_openai'))
+    if "preferred_model" in chatbot:
+        default_model = chatbot["preferred_model"]
+    if preferred_model:
+        default_model = preferred_model
+
+    if not use_openai:
+        # If default model does not contain ":", append ":latest" to the model name
+        if ":" not in default_model:
+            default_model += ":latest"
+
+        selected_model = await select_ollama_model_if_available(default_model)
+    else:
+        from openai import OpenAI
+
+        # Get API key from environment variable
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            if verbose_mode:
+                await on_print("No OpenAI API key found in the environment variables, calling local OpenAI API.", Fore.WHITE + Style.DIM)
+            openai_client = OpenAI(
+                base_url="http://127.0.0.1:8080",
+                api_key="none"
+            )
+        else:
+            if verbose_mode:
+                await on_print("OpenAI API key found in the environment variables, redirecting to OpenAI API.", Fore.WHITE + Style.DIM)
+            openai_client = OpenAI(
+                api_key=api_key
+            )
+
+        selected_model = await select_openai_model_if_available(default_model)
+
+    if selected_model is None:
+        selected_model = await prompt_for_model(default_model, current_model)
+        if selected_model is None:
+            return
+
+    if not system_prompt:
+        if no_system_role:
+            await on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
+            system_prompt = ""
+        else:
+            system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
+
+    user_name = custom_user_name or get_personal_info()["user_name"]
+    if no_user_name:
+        user_name = ""
+        if verbose_mode:
+            await on_print("User name not used.", Fore.WHITE + Style.DIM)
+
+    # Set the current collection
+    await set_current_collection(current_collection_name, verbose=verbose_mode)
+
+    # Initial system message
+    if initial_system_prompt:
+        if verbose_mode:
+            await on_print("Initial system prompt: " + initial_system_prompt, Fore.WHITE + Style.DIM)
+        system_prompt = initial_system_prompt
+
+    if not no_system_role and len(user_name) > 0:
+        first_name = user_name.split()[0]
+        system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
+
+    if len(system_prompt) > 0:
+        # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+        for key, value in system_prompt_placeholders.items():
+            system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
+        initial_message = {"role": "system", "content": system_prompt}
+        conversation = [initial_message]
+    else:
+        initial_message = None
+        conversation = []
+
+    current_model = selected_model
+
+    answer_and_exit = False
+    if not interactive_mode and user_prompt:
+        answer_and_exit = True
+
+    if use_memory_manager:
+        await load_chroma_client()
+
+        if chroma_client:
+            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
+
+            if initial_message:
+                # Add long-term memory to the system prompt
+                long_term_memory = memory_manager.long_term_memory_manager.memory
+
+                initial_message["content"] += f"\n\nLong-term memory: {long_term_memory}"
+        else:
+            use_memory_manager = False
+
+    if initial_message and verbose_mode:
+        await on_print("System prompt: " + initial_message["content"], Fore.WHITE + Style.DIM)
+
+    if "tools" in chatbot and len(chatbot["tools"]) > 0:
+        # Append chatbot tools to selected_tools if not already in the array
+        if selected_tools is None:
+            selected_tools = []
+        
+        for tool in chatbot["tools"]:
+            selected_tools = await select_tool_by_name(await get_available_tools(), selected_tools, tool)
+    
+    selected_tool_names = settings.tools.split(',') if settings.tools else []
+    for tool_name in selected_tool_names:
+        # Strip any leading or trailing spaces, single or double quotes
+        tool_name = tool_name.strip().strip('\'').strip('\"')
+        selected_tools = await select_tool_by_name(await get_available_tools(), selected_tools, tool_name)
+
+    agent_crew_manager = AgentCrewManager(verbose=verbose_mode, num_ctx=num_ctx)
+
+    # Main conversation loop
+    conversation_manager = ConversationManager(conversation, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit)
+    return conversation_manager
+
+async def run():
     global current_collection_name
     global memory_collection_name
     global long_term_memory_file
@@ -3743,250 +4512,30 @@ def run():
     parser.add_argument('--long-term-memory-file', type=str, help="Long-term memory file name", default=long_term_memory_file)
     args = parser.parse_args()
 
-    preferred_collection_name = args.collection
-    use_openai = args.use_openai
-    chroma_client_host = args.chroma_host
-    chroma_client_port = args.chroma_port
-    chroma_db_path = args.chroma_path
-    temperature = args.temperature
-    no_system_role = bool(args.disable_system_role)
-    current_collection_name = preferred_collection_name
-    prompt_template = args.prompt_template
-    additional_chatbots_file = args.additional_chatbots
-    verbose_mode = args.verbose
-    initial_system_prompt = args.system_prompt
-    system_prompt_placeholders_json = args.system_prompt_placeholders_json
-    preferred_model = args.model
-    thinking_model = args.thinking_model
-    thinking_model_reasoning_pattern = args.thinking_model_reasoning_pattern
-    number_of_documents_to_return_from_vector_db = args.docs_to_fetch_from_chroma
+    conversation_manager = await init(args)
 
-    if not thinking_model:
-        thinking_model = preferred_model
-
-    if verbose_mode:
-        on_print(f"Using thinking model: {thinking_model}", Fore.WHITE + Style.DIM)
-
-    conversations_folder = args.conversations_folder
-    auto_save = args.auto_save
-    syntax_highlighting = args.syntax_highlighting
-    interactive_mode = args.interactive
-    embeddings_model = args.embeddings_model
-    plugins_folder = args.plugins_folder
-    user_prompt = args.prompt
-    stream_active = args.stream
-    output_file = args.output
-    other_instance_url = args.other_instance_url
-    listening_port = args.listening_port
-    custom_user_name = args.user_name
-    no_user_name = args.anonymous
-    use_memory_manager = args.memory
-    num_ctx = args.context_window
-    auto_start_conversation = args.auto_start
-    memory_collection_name = args.memory_collection_name
-    long_term_memory_file = args.long_term_memory_file
-
-    if verbose_mode and num_ctx:
-        on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
-
-    # Get today's date
-    today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
-
-    system_prompt_placeholders = {}
-    if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
-        with open(system_prompt_placeholders_json, 'r', encoding="utf8") as f:
-            system_prompt_placeholders = json.load(f)
-
-    # If output file already exists, ask user for confirmation to overwrite
-    if output_file and os.path.exists(output_file):
-        if interactive_mode:
-            confirmation = on_user_input(f"Output file '{output_file}' already exists. Overwrite? (y/n): ").lower()
-            if confirmation != 'y' and confirmation != 'yes':
-                on_print("Output file not overwritten.")
-                output_file = None
-            else:
-                # Delete the existing file
-                os.remove(output_file)
-        else:
-            # Delete the existing file
-            os.remove(output_file)
-
-    if verbose_mode and user_prompt:
-        on_print(f"User prompt: {user_prompt}", Fore.WHITE + Style.DIM)
-
-    plugins = discover_plugins(plugins_folder)
-
-    if verbose_mode:
-        on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
-
-    # Load additional chatbots from a JSON file
-    load_additional_chatbots(additional_chatbots_file)
-
-    chatbot = None
-    if args.chatbot:
-        # Trim the chatbot name to remove any leading or trailing spaces, single or double quotes
-        args.chatbot = args.chatbot.strip().strip('\'').strip('\"')
-        for bot in chatbots:
-            if bot["name"] == args.chatbot:
-                chatbot = bot
-                break
-        if chatbot is None:
-            on_print(f"Chatbot '{args.chatbot}' not found.", Fore.RED)
-            
-        if verbose_mode and chatbot and 'name' in chatbot:
-            on_print(f"Using chatbot: {chatbot['name']}", Fore.WHITE + Style.DIM)
-    
-    if chatbot is None:
-        # Load the default chatbot
-        chatbot = chatbots[0]
-
-    if args.index_documents:
-        load_chroma_client()
-        document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
-        document_indexer.index_documents()
-
-    auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or auto_start_conversation
-    system_prompt = chatbot["system_prompt"]
-    use_openai = use_openai or (hasattr(chatbot, 'use_openai') and getattr(chatbot, 'use_openai'))
-    if "preferred_model" in chatbot:
-        default_model = chatbot["preferred_model"]
-    if preferred_model:
-        default_model = preferred_model
-
-    if not use_openai:
-        # If default model does not contain ":", append ":latest" to the model name
-        if ":" not in default_model:
-            default_model += ":latest"
-
-        selected_model = select_ollama_model_if_available(default_model)
-    else:
-        from openai import OpenAI
-
-        # Get API key from environment variable
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            if verbose_mode:
-                on_print("No OpenAI API key found in the environment variables, calling local OpenAI API.", Fore.WHITE + Style.DIM)
-            openai_client = OpenAI(
-                base_url="http://127.0.0.1:8080",
-                api_key="none"
-            )
-        else:
-            if verbose_mode:
-                on_print("OpenAI API key found in the environment variables, redirecting to OpenAI API.", Fore.WHITE + Style.DIM)
-            openai_client = OpenAI(
-                api_key=api_key
-            )
-
-        selected_model = select_openai_model_if_available(default_model)
-
-    if selected_model is None:
-        selected_model = prompt_for_model(default_model, current_model)
-        if selected_model is None:
-            return
-
-    if not system_prompt:
-        if no_system_role:
-            on_print("The selected model does not support the 'system' role.", Fore.WHITE + Style.DIM)
-            system_prompt = ""
-        else:
-            system_prompt = "You are a helpful chatbot assistant. Possible chatbot prompt commands: " + print_possible_prompt_commands()
-
-    user_name = custom_user_name or get_personal_info()["user_name"]
-    if no_user_name:
-        user_name = ""
-        if verbose_mode:
-            on_print("User name not used.", Fore.WHITE + Style.DIM)
-
-    # Set the current collection
-    set_current_collection(current_collection_name, verbose=verbose_mode)
-
-    # Initial system message
-    if initial_system_prompt:
-        if verbose_mode:
-            on_print("Initial system prompt: " + initial_system_prompt, Fore.WHITE + Style.DIM)
-        system_prompt = initial_system_prompt
-
-    if not no_system_role and len(user_name) > 0:
-        first_name = user_name.split()[0]
-        system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
-
-    if len(system_prompt) > 0:
-        # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
-        for key, value in system_prompt_placeholders.items():
-            system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
-
-        initial_message = {"role": "system", "content": system_prompt}
-        conversation = [initial_message]
-    else:
-        initial_message = None
-        conversation = []
-
-    current_model = selected_model
-
-    answer_and_exit = False
-    if not interactive_mode and user_prompt:
-        answer_and_exit = True
-
-    if use_memory_manager:
-        load_chroma_client()
-
-        if chroma_client:
-            memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
-
-            if initial_message:
-                # Add long-term memory to the system prompt
-                long_term_memory = memory_manager.long_term_memory_manager.memory
-
-                initial_message["content"] += f"\n\nLong-term memory: {long_term_memory}"
-        else:
-            use_memory_manager = False
-
-    if initial_message and verbose_mode:
-        on_print("System prompt: " + initial_message["content"], Fore.WHITE + Style.DIM)
-
-    user_input = ""
-
-    if "tools" in chatbot and len(chatbot["tools"]) > 0:
-        # Append chatbot tools to selected_tools if not already in the array
-        if selected_tools is None:
-            selected_tools = []
-        
-        for tool in chatbot["tools"]:
-            selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool)
-    
-    selected_tool_names = args.tools.split(',') if args.tools else []
-    for tool_name in selected_tool_names:
-        # Strip any leading or trailing spaces, single or double quotes
-        tool_name = tool_name.strip().strip('\'').strip('\"')
-        selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool_name)
-
-    agent_crew_manager = AgentCrewManager(verbose=verbose_mode, num_ctx=num_ctx)
-
-    # Main conversation loop
     while True:
-        thoughts = None
-        if not auto_start_conversation:
+        if not conversation_manager.auto_start_conversation:
             try:
                 if interactive_mode:
                     on_prompt("\nYou: ", Fore.YELLOW + Style.NORMAL)
 
                 if user_prompt:
                     if other_instance_url:
-                        conversation.append({"role": "assistant", "content": user_prompt})
-                        user_input = on_user_input(user_prompt)
+                        conversation_manager.conversation.append({"role": "assistant", "content": user_prompt})
+                        user_input = await on_user_input(user_prompt)
                     else:
                         user_input = user_prompt
                     user_prompt = None
                 else:
-                    user_input = on_user_input()
+                    user_input = await on_user_input()
 
                 if user_input.strip().startswith('"""'):
                     multi_line_input = [user_input[3:]]  # Keep the content after the first """
-                    on_stdout_write("... ")  # Prompt continuation line
+                    await on_stdout_write("... ")  # Prompt continuation line
                     
                     while True:
-                        line = on_user_input()
+                        line = await on_user_input()
                         if line.strip().endswith('"""') and len(line.strip()) > 3:
                             # Handle if the line contains content before """
                             multi_line_input.append(line[:-3])
@@ -3995,7 +4544,7 @@ def run():
                             break
                         else:
                             multi_line_input.append(line)
-                            on_stdout_write("... ")  # Prompt continuation line
+                            await on_stdout_write("... ")  # Prompt continuation line
                     
                     user_input = "\n".join(multi_line_input)
                 
@@ -4003,411 +4552,14 @@ def run():
                 break
             except KeyboardInterrupt:
                 auto_save = False
-                on_print("\nGoodbye!", Style.RESET_ALL)
+                await on_print("\nGoodbye!", Style.RESET_ALL)
                 break
 
             if len(user_input.strip()) == 0:
                 continue
         
-        # Exit condition
-        if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
-            on_print("Goodbye!", Style.RESET_ALL)
-            if memory_manager:
-                on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
-                if memory_manager.add_memory(conversation):
-                    on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
-                    on_print("", Style.RESET_ALL)
-            break
-
-        if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
-            on_print("Conversation reset.", Style.RESET_ALL)
-            if initial_message:
-                conversation = [initial_message]
-            else:
-                conversation = []
-
-            auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
-            user_input = ""
-            continue
-
-        for plugin in plugins:
-            if hasattr(plugin, "on_user_input_done") and callable(getattr(plugin, "on_user_input_done")):
-                user_input_from_plugin = plugin.on_user_input_done(user_input, verbose_mode=verbose_mode)
-                if user_input_from_plugin:
-                    user_input = user_input_from_plugin
-        
-        # Allow for /context command to be used to set the context window size
-        if user_input.startswith("/context"):
-            if re.search(r'/context\s+\d+', user_input):
-                context_window = int(re.search(r'/context\s+(\d+)', user_input).group(1))
-                max_context_length = 125 # 125 * 1024 = 128000 tokens
-                if context_window < 0 or context_window > max_context_length:
-                    on_print(f"Context window must be between 0 and {max_context_length}.", Fore.RED)
-                else:
-                    num_ctx = context_window * 1024
-                    if verbose_mode:
-                        on_print(f"Context window changed to {num_ctx} tokens.", Fore.WHITE + Style.DIM)
-            else:
-                on_print(f"Please specify context window size with /context <number>.", Fore.RED)
-            continue
-
-        if "/system" in user_input:
-            system_prompt = user_input.replace("/system", "").strip()
-
-            if len(system_prompt) > 0:
-                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
-                for key, value in system_prompt_placeholders.items():
-                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
-
-                if verbose_mode:
-                    on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
-
-                for entry in conversation:
-                    if "role" in entry and entry["role"] == "system":
-                        entry["content"] = system_prompt
-                        break
-            continue
-
-        if "/index" in user_input:
-            if not chroma_client:
-                on_print("ChromaDB client not initialized.", Fore.RED)
-                continue
-
-            load_chroma_client()
-
-            if not current_collection_name:
-                on_print("No ChromaDB collection loaded.", Fore.RED)
-
-                collection_name, collection_description = prompt_for_vector_database_collection()
-                set_current_collection(collection_name, collection_description, verbose=verbose_mode)
-
-            folder_to_index = user_input.split("/index")[1].strip()
-            temp_folder = None
-            if folder_to_index.startswith("http"):
-                base_url = folder_to_index
-                temp_folder = tempfile.mkdtemp()
-                scraper = SimpleWebScraper(base_url, output_dir=temp_folder, file_types=["html", "htm"], restrict_to_base=True, convert_to_markdown=True, verbose=verbose_mode)
-                scraper.scrape()
-                folder_to_index = temp_folder
-
-            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model)
-            document_indexer.index_documents()
-
-            if temp_folder:
-                # Remove the temporary folder and its contents
-                for file in os.listdir(temp_folder):
-                    file_path = os.path.join(temp_folder, file)
-                    os.remove(file_path)
-                os.rmdir(temp_folder)
-            continue
-
-        if user_input == "/verbose":
-            verbose_mode = not verbose_mode
-            on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
-            continue
-
-        if "/agent" in user_input:
-            user_input = user_input.replace("/agent", "").strip()
-            
-            agent_crew_manager.create_agent(user_input)
-            continue
-
-        if "/cot" in user_input:
-            user_input = user_input.replace("/cot", "").strip()
-            chain_of_thoughts_system_prompt = generate_chain_of_thoughts_system_prompt(selected_tools)
-
-            # Format the current conversation as user/assistant messages
-            formatted_conversation = "\n".join([f"{entry['role']}: {entry['content']}" for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"])
-            formatted_conversation += "\n\n" + user_input
-
-            thoughts = ask_ollama(chain_of_thoughts_system_prompt, formatted_conversation, thinking_model, temperature, prompt_template, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
-
-        if "/search" in user_input:
-            # If /search is followed by a number, use that number as the number of documents to return (/search can be anywhere in the prompt)
-            if re.search(r'/search\s+\d+', user_input):
-                n_docs_to_return = int(re.search(r'/search\s+(\d+)', user_input).group(1))
-                user_input = user_input.replace(f"/search {n_docs_to_return}", "").strip()
-            else:
-                user_input = user_input.replace("/search", "").strip()
-                n_docs_to_return = number_of_documents_to_return_from_vector_db
-
-            answer_from_vector_db = query_vector_database(user_input, collection_name=current_collection_name, n_results=n_docs_to_return)
-            if answer_from_vector_db:
-                initial_user_input = user_input
-                user_input = "Question: " + initial_user_input
-                user_input += "\n\nAnswer the question as truthfully as possible using the provided text below, and if the answer is not contained within the text below, say 'I don't know'.\n\n"
-                user_input += answer_from_vector_db
-                user_input += "\n\nAnswer the question as truthfully as possible using the provided text above, and if the answer is not contained within the text above, say 'I don't know'."
-                user_input += "\nQuestion: " + initial_user_input
-
-                if verbose_mode:
-                    on_print(user_input, Fore.WHITE + Style.DIM)
-        elif "/web" in user_input:
-            user_input = user_input.replace("/web", "").strip()
-            web_search_response = web_search(user_input, num_ctx=num_ctx)
-            if web_search_response:
-                initial_user_input = user_input
-                user_input += "Context: " + web_search_response
-                user_input += "\n\nQuestion: " + initial_user_input
-                user_input += "\nAnswer the question as truthfully as possible using the provided web search results, and if the answer is not contained within the text below, say 'I don't know'.\n"
-                user_input += "Cite some useful links from the search results to support your answer."
-
-                if verbose_mode:
-                    on_print(user_input, Fore.WHITE + Style.DIM)
-
-        if user_input == "/thinking_model":
-            selected_model = prompt_for_model(default_model, thinking_model)
-            thinking_model = selected_model
-            continue
-
-        if user_input == "/model":
-            thinking_model_is_same = thinking_model == current_model
-            selected_model = prompt_for_model(default_model, current_model)
-            current_model = selected_model
-
-            if thinking_model_is_same:
-                thinking_model = selected_model
-
-            if use_memory_manager:
-                load_chroma_client()
-
-                if chroma_client:
-                    memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
-                else:
-                    use_memory_manager = False
-            continue
-
-        if user_input == "/memory":
-            if use_memory_manager:
-                # Deactivate memory manager
-                memory_manager = None
-                use_memory_manager = False
-                on_print("Memory manager deactivated.", Fore.WHITE + Style.DIM)
-            else:
-                load_chroma_client()
-
-                if chroma_client:
-                    memory_manager = MemoryManager(memory_collection_name, chroma_client, current_model, embeddings_model, verbose_mode, num_ctx=num_ctx, long_term_memory_file=long_term_memory_file)
-                    use_memory_manager = True
-                    on_print("Memory manager activated.", Fore.WHITE + Style.DIM)
-                else:
-                    on_print("ChromaDB client not initialized.", Fore.RED)
-
-            continue
-
-        if user_input == "/model2":
-            alternate_model = prompt_for_model(default_model, current_model)
-            continue
-
-        if user_input == "/tools":
-            selected_tools = select_tools(get_available_tools(), selected_tools=selected_tools)
-            continue
-
-        if "/save" in user_input:
-            # If the user input contains /save and followed by a filename, save the conversation to that file
-            file_path = user_input.split("/save")[1].strip()
-            # Remove any leading or trailing spaces, single or double quotes
-            file_path = file_path.strip().strip('\'').strip('\"')
-
-            if file_path:
-                # Check if the filename contains a folder path (use os path separator to check)
-                if os.path.sep in file_path:
-                    # Get the folder path and filename
-                    folder_path, _ = os.path.split(file_path)
-                    # Create the folder if it doesn't exist
-                    if not os.path.exists(folder_path):
-                        os.makedirs(folder_path)
-                elif conversations_folder:
-                    file_path = os.path.join(conversations_folder, file_path)
-
-                save_conversation_to_file(conversation, file_path)
-            else:
-                # Save the conversation to a file, use current timestamp as the filename
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-                if conversations_folder:
-                    save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
-                else:
-                    save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
-            continue
-
-        if user_input == "/collection":
-            collection_name, collection_description = prompt_for_vector_database_collection()
-            set_current_collection(collection_name, collection_description, verbose=verbose_mode)
-            continue
-
-        if memory_manager and (user_input == "/remember" or user_input == "/memorize"):
-            on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
-            if memory_manager.add_memory(conversation):
-                on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
-                on_print("", Style.RESET_ALL)
-            continue
-
-        if memory_manager and user_input == "/forget":
-            # Remove memory collection
-            delete_collection(memory_collection_name)
-            continue
-
-        if "/rmcollection" in user_input or "/deletecollection" in user_input:
-            if "/rmcollection" in user_input and len(user_input.split("/rmcollection")) > 1:
-                collection_name = user_input.split("/rmcollection")[1].strip()
-
-            if not collection_name and "/deletecollection" in user_input and len(user_input.split("/deletecollection")) > 1:
-                collection_name = user_input.split("/deletecollection")[1].strip()
-
-            if not collection_name:
-                collection_name, _ = prompt_for_vector_database_collection(prompt_create_new=False)
-
-            if not collection_name:
-                continue
-
-            delete_collection(collection_name)
-            continue
-
-        if "/editcollection" in user_input:
-            collection_name, _ = prompt_for_vector_database_collection()
-            edit_collection_metadata(collection_name)
-            continue
-
-        if user_input == "/chatbot":
-            chatbot = prompt_for_chatbot()
-            if "tools" in chatbot and len(chatbot["tools"]) > 0:
-                # Append chatbot tools to selected_tools if not already in the array
-                if selected_tools is None:
-                    selected_tools = []
-                
-                for tool in chatbot["tools"]:
-                    selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool)
-
-            system_prompt = chatbot["system_prompt"]
-            # Initial system message
-            if not no_system_role and len(user_name) > 0:
-                first_name = user_name.split()[0]
-                system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
-
-            if len(system_prompt) > 0:
-                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
-                for key, value in system_prompt_placeholders.items():
-                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
-
-                if verbose_mode:
-                    on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
-
-                initial_message = {"role": "system", "content": system_prompt}
-                conversation = [initial_message]
-            else:
-                conversation = []
-            on_print("Conversation reset.", Style.RESET_ALL)
-            auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
-            user_input = ""
-            continue
-
-        if "/cb" in user_input:
-            if platform.system() == "Windows":
-                # Replace /cb with the clipboard content
-                win32clipboard.OpenClipboard()
-                clipboard_content = win32clipboard.GetClipboardData()
-                win32clipboard.CloseClipboard()
-            else:
-                clipboard_content = pyperclip.paste()
-            user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
-            on_print("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
-
-        image_path = None
-        # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
-        if "/file" in user_input:
-            file_path = user_input.split("/file")[1].strip()
-            file_path = file_path.strip("'\"")
-            
-            # Check if the file is an image
-            _, ext = os.path.splitext(file_path)
-            if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as file:
-                        user_input = user_input.replace("/file", "")
-                        user_input += "\n" + file.read()
-                except FileNotFoundError:
-                    on_print("File not found. Please try again.", Fore.RED)
-                    continue
-            else:
-                user_input = user_input.split("/file")[0].strip()
-                image_path = file_path
-
-        # If user input starts with '/' and is not a command, ignore it.
-        if user_input.startswith('/') and not user_input.startswith('//'):
-            on_print("Invalid command. Please try again.", Fore.RED)
-            continue
-
-        # Add user input to conversation history
-        if image_path:
-            conversation.append({"role": "user", "content": user_input, "images": [image_path]})
-        elif len(user_input.strip()) > 0:
-            conversation.append({"role": "user", "content": user_input})
-
-        if memory_manager:
-            memory_manager.handle_user_query(conversation)
-
-        if thoughts:
-            thoughts = f"Thinking...\n{thoughts}\nEnd of internal thoughts.\n\nFinal response:"
-            if syntax_highlighting:
-                on_print(colorize(thoughts), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
-            else:
-                on_print(thoughts, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
-            
-            # Add the chain of thoughts to the conversation, as an assistant message
-            conversation.append({"role": "assistant", "content": thoughts})
-
-        # Generate response
-        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active, num_ctx=num_ctx)
-
-        alternate_bot_response = None
-        if alternate_model:
-            alternate_bot_response = ask_ollama_with_conversation(conversation, alternate_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN, stream_active=stream_active, num_ctx=num_ctx)
-        
-        bot_response_handled_by_plugin = False
-        for plugin in plugins:
-            if hasattr(plugin, "on_llm_response") and callable(getattr(plugin, "on_llm_response")):
-                plugin_response = getattr(plugin, "on_llm_response")(bot_response)
-                bot_response_handled_by_plugin = bot_response_handled_by_plugin or plugin_response
-
-        if not bot_response_handled_by_plugin:
-            if syntax_highlighting:
-                on_print(colorize(bot_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
-            
-                if alternate_bot_response:
-                    on_print(colorize(alternate_bot_response), Fore.CYAN, "\rAlt: " if interactive_mode else "")
-            elif not use_openai and len(selected_tools) > 0:
-                # Ollama cannot stream when tools are used
-                on_print(bot_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
-
-                if alternate_bot_response:
-                    on_print(alternate_bot_response, Fore.CYAN, "\rAlt: " if interactive_mode else "")
-
-        if alternate_bot_response:
-            # Ask user to select the preferred response
-            on_print(f"Select the preferred response:\n1. Original model ({current_model})\n2. Alternate model ({alternate_model})", Fore.WHITE + Style.DIM)
-            choice = on_user_input("Enter the number of your preferred response [1]: ") or "1"
-            bot_response = bot_response if choice == "1" else alternate_bot_response
-
-        # Add bot response to conversation history
-        conversation.append({"role": "assistant", "content": bot_response})
-
-        if auto_start_conversation:
-            auto_start_conversation = False
-
-        if output_file:
-            with open(output_file, 'a', encoding='utf-8') as f:
-                f.write(bot_response)
-                if verbose_mode:
-                    on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
-
-        # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
-        if bot_response and re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
-            on_print("Goodbye!", Style.RESET_ALL)
-            break
-
-        if answer_and_exit:
-            break
+            if not await conversation_manager.process_user_input(user_input):
+                break
 
     # Stop plugins, calling on_exit if available
     for plugin in plugins:
@@ -4417,10 +4569,139 @@ def run():
     if auto_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        if conversations_folder:
-            save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
+        if conversation_manager.conversations_folder:
+            await save_conversation_to_file(conversation_manager.conversation, os.path.join(conversation_manager.conversations_folder, f"conversation_{timestamp}.txt"))
         else:
-            save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
+            await save_conversation_to_file(conversation_manager.conversation, f"conversation_{timestamp}.txt")
 
+def load_config_from_json(json_file):
+    global number_of_documents_to_return_from_vector_db
+    global memory_collection_name
+    global long_term_memory_file
+
+    # Define default values
+    defaults = {
+        'chroma_path': None,
+        'chroma_host': 'localhost',
+        'chroma_port': 8000,
+        'docs_to_fetch_from_chroma': number_of_documents_to_return_from_vector_db,
+        'collection': None,
+        'use_openai': False,
+        'temperature': 0.1,
+        'disable_system_role': False,
+        'prompt_template': None,
+        'additional_chatbots': None,
+        'chatbot': None,
+        'verbose': False,
+        'embeddings_model': None,
+        'system_prompt': None,
+        'system_prompt_placeholders_json': None,
+        'prompt': None,
+        'model': None,
+        'thinking_model': None,
+        'thinking_model_reasoning_pattern': None,
+        'conversations_folder': None,
+        'auto_save': False,
+        'syntax_highlighting': True,
+        'index_documents': None,
+        'interactive': True,
+        'plugins_folder': None,
+        'stream': True,
+        'output': None,
+        'other_instance_url': None,
+        'listening_port': 8000,
+        'user_name': None,
+        'anonymous': False,
+        'memory': True,
+        'context_window': None,
+        'auto_start': False,
+        'tools': None,
+        'memory_collection_name': memory_collection_name,
+        'long_term_memory_file': long_term_memory_file
+    }
+
+    # Create the JSON file if it does not exist
+    if not os.path.exists(json_file):
+        with open(json_file, 'w') as f:
+            json.dump(defaults, f, indent=4)
+        return argparse.Namespace(**defaults)
+
+    # Load the JSON file
+    with open(json_file, 'r') as f:
+        config = json.load(f)
+
+    # Update defaults with values from the JSON file
+    for key in defaults:
+        if key in config:
+            defaults[key] = config[key]
+
+    # Create an object from the dictionary
+    return argparse.Namespace(**defaults)
+    
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())
+
+@cl.on_chat_start
+async def start_chat():
+    global use_chainlit
+
+    use_chainlit = True
+
+    print("Chat started")
+    cl.user_session.set("input_buffer", "")
+    conversation_manager = await init(load_config_from_json("config.json"), use_chainlit=True)
+    cl.user_session.set(
+        "conversation_manager",
+        conversation_manager
+    )
+    print("Conversation manager initialized")
+
+    '''
+    Possible commands:
+    "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
+    "/thinking_model", "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
+    "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
+    "/cb", "/file", "/quit", "/exit", "/bye"
+    '''
+    
+    # Format: {"id": "tools", "icon": "wrench", "description": "List available tools"}
+    commands = [
+        {"id": "agent", "icon": "user", "description": "Creates an agent to assist with the conversation"},
+        {"id": "context", "icon": "book", "description": "Displays the context window size"},
+        {"id": "index", "icon": "database", "description": "Indexes text files in the specified folder"},
+        {"id": "verbose", "icon": "info", "description": "Toggles verbose mode"},
+        {"id": "cot", "icon": "list", "description": "Lists available chatbots"},
+        {"id": "search", "icon": "search", "description": "Searches for similar documents in the vector database"},
+        {"id": "web", "icon": "globe", "description": "Performs a web search"},
+        {"id": "model", "icon": "cog", "description": "Selects the Ollama model to use"},
+        {"id": "thinking_model", "icon": "brain", "description": "Selects the thinking model to use"},
+        {"id": "model2", "icon": "cogs", "description": "Selects an alternate model to use"},
+        {"id": "tools", "icon": "wrench", "description": "Lists available tools"},
+        {"id": "save", "icon": "save", "description": "Saves the conversation to a file"},
+        {"id": "collection", "icon": "folder", "description": "Selects the vector database collection to use"},
+        {"id": "memory", "icon": "memory", "description": "Toggles memory manager"},
+        {"id": "remember", "icon": "save", "description": "Saves the conversation to memory"},
+        {"id": "forget", "icon": "trash", "description": "Deletes the memory collection"},
+        {"id": "editcollection", "icon": "edit", "description": "Edits the metadata of the vector database collection"},
+        {"id": "rmcollection", "icon": "trash", "description": "Removes the vector database collection"},
+        {"id": "deletecollection", "icon": "trash", "description": "Deletes the vector database collection"},
+        {"id": "chatbot", "icon": "user", "description": "Selects a chatbot personality"},
+        {"id": "cb", "icon": "clipboard", "description": "Appends clipboard content to user input"},
+        {"id": "file", "icon": "file", "description": "Reads the content of a file and appends it to user input"},
+        {"id": "quit", "icon": "power-off", "description": "Exits the chat"},
+        {"id": "exit", "icon": "power-off", "description": "Exits the chat"},
+        {"id": "bye", "icon": "power-off", "description": "Exits the chat"}
+    ]
+
+    await cl.context.emitter.set_commands(commands)
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    print(f"Message received: {message.content}")
+
+    message.content = message.content.strip()
+
+    if message.command:
+        message.content = "/" + message.command + " " + message.content
+
+    await cl.user_session.get("conversation_manager").process_user_input(message.content)
