@@ -1934,7 +1934,7 @@ Decision: [Your decision here] (possible values: 'use tool', 'research', 'delega
 
         if self.verbose:
             on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
-        prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
+        prompt = f"""Provide a short response to the subtask: '{subtask}' from the main task: '{main_task}'.
 
 The result from the previous subtask was:
 ```markdown
@@ -1945,6 +1945,7 @@ If I were to solve the subtask '{subtask}', I would do it as follows:
 {thoughts}
 
 You can follow a similar approach or provide a different response based on your own reasoning and understanding of the task.
+Keep the response concise and focused on the subtask at hand, no formatting needed, in plain text and without any additional explanations, introductions or conclusions.
 """
         result = ""
         tools = []
@@ -2005,63 +2006,86 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
     
     def process_task(self, task, return_intermediate_results=False):
         """
-        Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
+        Process the task by first generating a draft response and then progressively refining it 
+        until the response is deemed perfect. New subtasks may be identified during self-reflection 
+        and processed to further improve the final response.
         """
         try:
-            subtasks = self.decompose_task(task)
-            all_results = []
-            all_results.append("# " + task)
+            # Initial draft creation: decompose the main task into subtasks and process each one.
+            initial_subtasks = self.decompose_task(task)
+            draft_response = "# " + task + "\n"
+            if self.verbose:
+                on_print(f"Initial draft created for task: {task}", Fore.WHITE + Style.DIM)
+            
+            # Initialize variables to track the previous subtask and its result.
+            previous_subtask = None
+            previous_result = None
 
+            for subtask in initial_subtasks:
+                result = self.decide_and_execute_subtask(task, subtask, previous_subtask, previous_result)
+                if result:
+                    draft_response += f"## {subtask}\n{result}\n"
+                previous_subtask = subtask
+                previous_result = result
+
+            all_versions = [draft_response]
             iterations = 0
-            progress_bar = tqdm(total=len(subtasks), desc="Processing subtasks", unit="subtask", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
+            # Keep track of processed subtasks (starting with the initial ones)
+            processed_subtasks = set(initial_subtasks)
 
+            # Iteratively refine the draft response.
             while iterations < self.max_iterations:
                 iterations += 1
 
+                # Request the LLM to refine and polish the current draft.
+                refined_response = self.query_llm(
+                    f"Please refine and improve the following draft response. Make it more detailed, coherent, and perfect:\n\n{draft_response}",
+                    system_prompt="You are an expert editor that progressively perfects draft responses.",
+                    model=self.model
+                )
+                
+                all_versions.append(refined_response)
                 if self.verbose:
-                    on_print(f"\nIteration {iterations} - Decomposed subtasks: {subtasks}", Fore.WHITE + Style.DIM)
+                    on_print(f"Iteration {iterations} - Refined response:\n{refined_response}", Fore.WHITE + Style.DIM)
 
-                results = []
-                for subtask, subtask_index in zip(subtasks, range(len(subtasks))):
-                    progress_bar.set_description(f"Processing subtask: {subtask}")
-                    progress_bar.update(1)
-                    
-                    result_from_previous_subtask = results[-1] if results else None
-
-                    if result_from_previous_subtask:                
-                        # Use the LLM to summarize the previous results in a few sentences
-                        result_from_previous_subtask = self.query_llm(f"""Considering the task: '{task}', summarize the results from the previous subtask: '{subtask}' in a few sentences:\n{result_from_previous_subtask}""", system_prompt="You are an AI assistant helping with task processing.", model=self.model)
-
-                    previous_subtask = subtasks[subtask_index - 1] if subtask_index > 0 else None
-                    result = self.decide_and_execute_subtask(task, subtask, previous_subtask, result_from_previous_subtask)
-
-                    if result:
-                        results.append(f"## {subtask}\n{result}\n")
-
-                all_results.append("\n".join(results))
-
-                # Synthesize results at each iteration
-                synthesized_result = self.synthesize_results(task, all_results)
+                # Perform self-reflection on the refined response.
+                reflection = self.self_reflect(refined_response, task, list(processed_subtasks))
                 if self.verbose:
-                    on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
+                    on_print(f"Reflection after iteration {iterations}:\n{reflection}", Fore.WHITE + Style.DIM)
 
-                # Perform self-reflection on the synthesized result
-                reflection = self.self_reflect(synthesized_result, task, subtasks)
-                if self.verbose:
-                    on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
-
+                # First, check if the reflection signals that no further improvements are needed.
                 if "Task complete, no further actions required" in reflection:
-                    if self.verbose:
-                        on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
+                    draft_response = refined_response
                     break
 
-                subtasks = self.decompose_task(reflection)
+                # Identify new subtasks from the reflection.
+                new_subtasks = self.decompose_task(reflection)
+                additional_subtasks = [st for st in new_subtasks if st not in processed_subtasks]
+
+                if additional_subtasks:
+                    if self.verbose:
+                        on_print(f"New subtasks identified: {additional_subtasks}", Fore.WHITE + Style.DIM)
+                    additional_results = ""
+                    # For additional subtasks, maintain a local chain for previous subtask and result.
+                    prev_subtask = None
+                    prev_result = None
+                    for subtask in additional_subtasks:
+                        result = self.decide_and_execute_subtask(task, subtask, prev_subtask, prev_result)
+                        if result:
+                            additional_results += f"## {subtask}\n{result}\n"
+                        processed_subtasks.add(subtask)
+                        prev_subtask = subtask
+                        prev_result = result
+                    refined_response += "\n" + additional_results
+
+                # Update the draft for the next iteration.
+                draft_response = refined_response
 
             if return_intermediate_results:
-                return all_results
+                return all_versions
             else:
-                return synthesized_result
-        
+                return draft_response
+
         except Exception as e:
             return f"Error during task processing: {str(e)}"
 
@@ -2848,12 +2872,12 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     bm25 = BM25Okapi(preprocessed_docs)
     bm25_scores = bm25.get_scores(initial_question_preprocessed)
 
-    # Get top rerank_n documents based on BM25 score
+    # Sort the results by BM25 score
     reranked_results = sorted(
         enumerate(zip(metadatas, distances, documents, bm25_scores)),
         key=lambda x: x[1][3],  # Sort by BM25 score
         reverse=True
-    )[:n_results]
+    )[0:n_results * 2]
 
     # Filter re-ranked results by asking Ollama if each result is useful
     filtered_results = []
@@ -2867,6 +2891,9 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         
         if "yes" in usefulness_response.lower():
             filtered_results.append((metadata, distance, document, bm25_score))
+
+        if len(filtered_results) >= n_results:
+            break
 
     # Join all possible answers into one string
     answers = []
