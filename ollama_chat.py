@@ -49,7 +49,7 @@ openai_client = None
 chroma_client = None
 current_collection_name = None
 collection = None
-number_of_documents_to_return_from_vector_db = 5
+number_of_documents_to_return_from_vector_db = 8
 temperature = 0.1
 verbose_mode = False
 embeddings_model = None
@@ -86,7 +86,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 # List of available commands to autocomplete
 COMMANDS = [
     "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
-    "/thinking_model", "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
+    "/thinking_model", "/model2", "/tools", "/load", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
     "/cb", "/file", "/quit", "/exit", "/bye"
 ]
@@ -237,7 +237,7 @@ async def get_available_tools():
             available_collections.append(collection.name)
 
             if type(collection.metadata) == dict and "description" in collection.metadata:
-                available_collections_description.append(f"{collection.name}: {collection.metadata['description']}")
+                available_collections_description.append(f"'{collection.name}': {collection.metadata['description']}")
 
     default_tools = [{
         'type': 'function',
@@ -1801,6 +1801,170 @@ class DocumentIndexer:
             except KeyboardInterrupt:
                 break
 
+    
+def split_reasoning_and_final_response(response, thinking_model_reasoning_pattern):
+        """
+        Split the reasoning and final response from the thinking model's response.
+        """
+        if not thinking_model_reasoning_pattern:
+            return None, response
+
+        reasoning = None
+        final_response = response
+
+        match = re.search(thinking_model_reasoning_pattern, response, re.DOTALL)
+        if match and len(match.groups()) > 0:
+            reasoning = match.group(1)
+            final_response = response.replace(reasoning, "").strip()
+
+        return reasoning, final_response
+class AIRefinementAgent:
+    def __init__(self, 
+                 initial_content: str,
+                 thinking_model: str,
+                 rewrite_model: str,
+                 thinking_model_reasoning_pattern: str = None,
+                 target_score: int = 9, 
+                 max_iterations: int = 10, 
+                 system_prompt: str = "You are an AI writing assistant.",
+                 temperature: float = 0.7,
+                 num_ctx: int = 4096,
+                 verbose: bool = False):
+        """
+        Initialize the AI Refinement Agent.
+
+        Parameters:
+        - initial_content: The starting text.
+        - thinking_model: The LLM model used for reviewing.
+        - rewrite_model: The LLM model used for rewriting.
+        - thinking_model_reasoning_pattern: A regular expression pattern to match the reasoning pattern in the thinking model's responses.
+        - target_score: The quality score (1-10) at which the loop stops.
+        - max_iterations: Maximum number of improvement cycles.
+        - system_prompt: The default system prompt for LLM queries.
+        - temperature: The creativity level of responses.
+        - num_ctx: Context window size for the model.
+        - verbose: Whether to print debug logs.
+        """
+        self.content = initial_content
+        self.versions = [initial_content]
+        self.scores = []
+        self.target_score = target_score
+        self.max_iterations = max_iterations
+        self.thinking_model = thinking_model
+        self.rewrite_model = rewrite_model
+        self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
+        self.system_prompt = system_prompt
+        self.temperature = temperature
+        self.num_ctx = num_ctx
+        self.verbose = verbose
+
+    def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
+        """
+        Query the LLM with the given prompt and return the response.
+        """
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+
+        if model is None:
+            model = self.rewrite_model  # Default to review model if none specified
+
+        if self.verbose:
+            on_print(f"\n[DEBUG] System prompt:\n{system_prompt}")
+            on_print(f"[DEBUG] User prompt:\n{prompt}")
+            on_print(f"[DEBUG] Model: {model}")
+
+        llm_response = ask_ollama(
+            system_prompt, 
+            prompt, 
+            model, 
+            temperature=self.temperature, 
+            no_bot_prompt=True, 
+            stream_active=False, 
+            tools=tools, 
+            num_ctx=self.num_ctx
+        )
+
+        if self.verbose:
+            on_print(f"[DEBUG] Response:\n{llm_response}")
+
+        return llm_response
+
+    def review_text(self) -> dict:
+        """Review the current content and return structured JSON feedback."""
+        prompt = f"""
+Review the following text and provide a critique along with a score from 1 to 10. 
+Return only a JSON object with the keys "critique" (string) and "score" (integer).
+
+Text:
+{self.content}
+
+Example output:
+{{
+    "critique": "The text is clear but lacks engagement. The introduction needs more impact.",
+    "score": 7
+}}
+        """
+
+        response_text = self.query_llm(prompt, model=self.thinking_model)
+
+        thinking_model_is_different = self.thinking_model != self.rewrite_model
+
+        if thinking_model_is_different:
+            _, response_text = split_reasoning_and_final_response(response_text, self.thinking_model_reasoning_pattern)
+
+        try:
+            review_data = extract_json(response_text.strip())
+            return review_data
+        except Exception as e:
+            if self.verbose:
+                on_print(f"Error: LLM response is not valid JSON. Response: {response_text}, Error: {e}", Fore.RED)
+            return {"critique": "Invalid response. Retry needed.", "score": 0}
+
+    def rewrite_text(self, critique: str) -> str:
+        """Rewrite the content based on the given critique using the configured rewrite model."""
+        prompt = f"""
+Rewrite the following text based on the given critique.
+Ensure the revision improves clarity, engagement, and readability.
+
+Text:
+{self.content}
+
+Critique:
+{critique}
+
+Return only the improved version of the text.
+        """
+
+        return self.query_llm(prompt, model=self.rewrite_model)
+
+    def refine_document(self):
+        """Iteratively refine the document until it reaches the target score."""
+        for iteration in range(self.max_iterations):
+            if self.verbose:
+                on_print(f"\nIteration {iteration + 1}: Reviewing... (Model: {self.thinking_model})")
+
+            review_data = self.review_text()
+            score = review_data["score"]
+            critique = review_data["critique"]
+
+            if self.verbose:
+                on_print(f"Critique: {critique}\nScore: {score}")
+
+            if score >= self.target_score:
+                if self.verbose:
+                    on_print("✅ Target quality achieved! Stopping iterations.")
+                break
+            
+            if self.verbose:
+                on_print(f"Iteration {iteration + 1}: Rewriting... (Model: {self.rewrite_model})")
+            improved_text = self.rewrite_text(critique)
+            
+            self.versions.append(self.content)
+            self.content = improved_text
+            self.scores.append(score)
+
+        return self.content
+
 class Agent:
     # Static registry to store all agents
     agent_registry = {}
@@ -1844,23 +2008,6 @@ class Agent:
         Retrieve an agent instance by name from the registry.
         """
         return Agent.agent_registry.get(agent_name)
-
-    def split_reasoning_and_final_response(self, response):
-        """
-        Split the reasoning and final response from the thinking model's response.
-        """
-        if not self.thinking_model_reasoning_pattern:
-            return None, response
-
-        reasoning = None
-        final_response = response
-
-        match = re.search(self.thinking_model_reasoning_pattern, response, re.DOTALL)
-        if match and len(match.groups()) > 0:
-            reasoning = match.group(1)
-            final_response = response.replace(reasoning, "").strip()
-
-        return reasoning, final_response
 
     async def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
         """
@@ -1912,7 +2059,7 @@ Output each subtask on a new line. Output only the subtasks without any explanat
 
         if thinking_model_is_different:
             # Split the reasoning and final response from the thinking model's response
-            _, reasoning_response = self.split_reasoning_and_final_response(response)
+            _, reasoning_response = split_reasoning_and_final_response(response, self.thinking_model_reasoning_pattern)
 
             if reasoning_response:
                 reasoning = reasoning_response
@@ -2008,14 +2155,14 @@ Decision: [Your decision here] (possible values: 'use tool', 'research', 'delega
 
         if thinking_model_is_different:
             # Split the reasoning and final response from the thinking model's response
-            _, reasoning_response = self.split_reasoning_and_final_response(thoughts)
+            _, reasoning_response = split_reasoning_and_final_response(thoughts, self.thinking_model_reasoning_pattern)
 
             if reasoning_response:
                 thoughts = reasoning_response
 
         if self.verbose:
             await on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
-        prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
+        prompt = f"""Provide a short response to the subtask: '{subtask}' from the main task: '{main_task}'.
 
 The result from the previous subtask was:
 ```markdown
@@ -2026,6 +2173,7 @@ If I were to solve the subtask '{subtask}', I would do it as follows:
 {thoughts}
 
 You can follow a similar approach or provide a different response based on your own reasoning and understanding of the task.
+Keep the response concise and focused on the subtask at hand, no formatting needed, in plain text and without any additional explanations, introductions or conclusions.
 """
         result = ""
         tools = []
@@ -2086,63 +2234,91 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
     
     async def process_task(self, task, return_intermediate_results=False):
         """
-        Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
+        Process the task by first generating a draft response and then progressively refining it 
+        until the response is deemed perfect. New subtasks may be identified during self-reflection 
+        and processed to further improve the final response.
         """
         try:
-            subtasks = self.decompose_task(task)
-            all_results = []
-            all_results.append("# " + task)
+            # Initial draft creation: decompose the main task into subtasks and process each one.
+            initial_subtasks = self.decompose_task(task)
 
+            if self.verbose:
+                on_print(f"Initial subtasks identified: {initial_subtasks}", Fore.WHITE + Style.DIM)
+
+            if not initial_subtasks or len(initial_subtasks) == 0:
+                return "No subtasks identified. Unable to process the task."
+
+            draft_response = "# " + task + "\n"
+            
+            # Initialize variables to track the previous subtask and its result.
+            previous_subtask = None
+            previous_result = None
+
+            for subtask in initial_subtasks:
+                result = self.decide_and_execute_subtask(task, subtask, previous_subtask, previous_result)
+                if result:
+                    draft_response += f"## {subtask}\n{result}\n"
+                previous_subtask = subtask
+                previous_result = result
+
+            if self.verbose:
+                on_print(f"Initial draft created for task: {task}\n{draft_response}", Fore.WHITE + Style.DIM)
+
+            all_versions = [draft_response]
             iterations = 0
-            progress_bar = tqdm(total=len(subtasks), desc="Processing subtasks", unit="subtask", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
+            # Keep track of processed subtasks (starting with the initial ones)
+            processed_subtasks = set(initial_subtasks)
 
+            # Iteratively refine the draft response.
             while iterations < self.max_iterations:
                 iterations += 1
 
+                # Request the LLM to refine and polish the current draft.
+                refinement_agent = AIRefinementAgent(draft_response, self.thinking_model, self.model, max_iterations=self.max_iterations, verbose=self.verbose, num_ctx=self.num_ctx, thinking_model_reasoning_pattern=self.thinking_model_reasoning_pattern)
+                refined_response = refinement_agent.refine_document()
+                
+                all_versions.append(refined_response)
                 if self.verbose:
-                    await on_print(f"\nIteration {iterations} - Decomposed subtasks: {subtasks}", Fore.WHITE + Style.DIM)
+                    await on_print(f"Iteration {iterations} - Refined response:\n{refined_response}", Fore.WHITE + Style.DIM)
 
-                results = []
-                for subtask, subtask_index in zip(subtasks, range(len(subtasks))):
-                    progress_bar.set_description(f"Processing subtask: {subtask}")
-                    progress_bar.update(1)
-                    
-                    result_from_previous_subtask = results[-1] if results else None
-
-                    if result_from_previous_subtask:                
-                        # Use the LLM to summarize the previous results in a few sentences
-                        result_from_previous_subtask = self.query_llm(f"""Considering the task: '{task}', summarize the results from the previous subtask: '{subtask}' in a few sentences:\n{result_from_previous_subtask}""", system_prompt="You are an AI assistant helping with task processing.", model=self.model)
-
-                    previous_subtask = subtasks[subtask_index - 1] if subtask_index > 0 else None
-                    result = self.decide_and_execute_subtask(task, subtask, previous_subtask, result_from_previous_subtask)
-
-                    if result:
-                        results.append(f"## {subtask}\n{result}\n")
-
-                all_results.append("\n".join(results))
-
-                # Synthesize results at each iteration
-                synthesized_result = self.synthesize_results(task, all_results)
+                # Perform self-reflection on the refined response.
+                reflection = self.self_reflect(refined_response, task, list(processed_subtasks))
                 if self.verbose:
-                    await on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
+                    await on_print(f"Reflection after iteration {iterations}:\n{reflection}", Fore.WHITE + Style.DIM)
 
-                # Perform self-reflection on the synthesized result
-                reflection = self.self_reflect(synthesized_result, task, subtasks)
-                if self.verbose:
-                    await on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
-
+                # First, check if the reflection signals that no further improvements are needed.
                 if "Task complete, no further actions required" in reflection:
-                    if self.verbose:
-                        await on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
+                    draft_response = refined_response
                     break
 
-                subtasks = self.decompose_task(reflection)
+                # Identify new subtasks from the reflection.
+                new_subtasks = self.decompose_task(reflection)
+                additional_subtasks = [st for st in new_subtasks if st not in processed_subtasks]
+
+                if additional_subtasks:
+                    if self.verbose:
+                        await on_print(f"New subtasks identified: {additional_subtasks}", Fore.WHITE + Style.DIM)
+                    additional_results = ""
+                    # For additional subtasks, maintain a local chain for previous subtask and result.
+                    prev_subtask = None
+                    prev_result = None
+                    for subtask in additional_subtasks:
+                        result = self.decide_and_execute_subtask(task, subtask, prev_subtask, prev_result)
+                        if result:
+                            additional_results += f"## {subtask}\n{result}\n"
+                        processed_subtasks.add(subtask)
+                        prev_subtask = subtask
+                        prev_result = result
+                    refined_response += "\n" + additional_results
+
+                # Update the draft for the next iteration.
+                draft_response = refined_response
 
             if return_intermediate_results:
-                return all_results
+                return all_versions
             else:
-                return synthesized_result
-        
+                return draft_response
+
         except Exception as e:
             return f"Error during task processing: {str(e)}"
 
@@ -2577,6 +2753,7 @@ def print_possible_prompt_commands():
     /context <model context size>: Change the model's context window size. Default value: 2. Size must be a numeric value between 2 and 125.
     /index <folder path>: Index text files in the folder to the vector database.
     /cb: Replace /cb with the clipboard content.
+    /load <filename>: Load a conversation from a file.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
     /memory: Toggle memory assistant on or off.
@@ -2824,6 +3001,7 @@ async def query_vector_database(question, collection_name=current_collection_nam
     global embeddings_model
     global current_model
     global thinking_model
+    global thinking_model_reasoning_pattern
 
     # If question is empty, return empty string
     if not question or len(question) == 0:
@@ -2929,12 +3107,12 @@ async def query_vector_database(question, collection_name=current_collection_nam
     bm25 = BM25Okapi(preprocessed_docs)
     bm25_scores = bm25.get_scores(initial_question_preprocessed)
 
-    # Get top rerank_n documents based on BM25 score
+    # Sort the results by BM25 score
     reranked_results = sorted(
         enumerate(zip(metadatas, distances, documents, bm25_scores)),
         key=lambda x: x[1][3],  # Sort by BM25 score
         reverse=True
-    )[:n_results]
+    )[0:n_results * 2]
 
     # Filter re-ranked results by asking Ollama if each result is useful
     filtered_results = []
@@ -2944,7 +3122,9 @@ async def query_vector_database(question, collection_name=current_collection_nam
             await on_print(f"Usefulness prompt: {usefulness_prompt}", Fore.WHITE + Style.DIM)
             await on_print(f"Thinking model: {thinking_model}", Fore.WHITE + Style.DIM)
 
-        usefulness_response = await ask_ollama("", usefulness_prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+        if thinking_model_reasoning_pattern:
+            _, reasoning_response = split_reasoning_and_final_response(usefulness_response, thinking_model_reasoning_pattern)
+            usefulness_response = reasoning_response
 
         if verbose_mode:
             await on_print("Usefulness response:", Fore.WHITE + Style.DIM)
@@ -2952,6 +3132,9 @@ async def query_vector_database(question, collection_name=current_collection_nam
         
         if "yes" in usefulness_response.lower():
             filtered_results.append((metadata, distance, document, bm25_score))
+
+        if len(filtered_results) >= n_results:
+            break
 
     # Join all possible answers into one string
     answers = []
@@ -3712,10 +3895,13 @@ def get_personal_info():
     return personal_info
 
 async def save_conversation_to_file(conversation, file_path):
-    with open(file_path, 'w', encoding="utf8") as f:
-        # Convert conversation list of objects to a list of dict
-        conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
+    global verbose_mode
 
+    # Convert conversation list of objects to a list of dict
+    conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
+    
+    # Save the conversation to a text file (filter out system messages)
+    with open(file_path, 'w', encoding="utf8") as f:
         # Skip empty messages or system messages
         filtered_conversation = [entry for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"]
 
@@ -3729,7 +3915,16 @@ async def save_conversation_to_file(conversation, file_path):
             
             f.write(f"{role}: {message['content']}\n\n")
 
-    await on_print(f"Conversation saved to {file_path}", Fore.WHITE + Style.DIM)
+    if verbose_mode:
+        await on_print(f"Conversation saved to {file_path}", Fore.WHITE + Style.DIM)
+
+    # Save the conversation to a JSON file
+    json_file_path = file_path.replace(".txt", ".json")
+    with open(json_file_path, 'w', encoding="utf8") as f:
+        json.dump(conversation, f, indent=4)
+
+    if verbose_mode:
+        await on_print(f"Conversation saved to {json_file_path}", Fore.WHITE + Style.DIM)
 
 async def load_chroma_client():
     global chroma_client
@@ -4007,6 +4202,34 @@ class ConversationManager:
                 else:
                     await save_conversation_to_file(self.conversation, f"conversation_{timestamp}.txt")
             return True
+
+        if "/load" in user_input:
+            # If the user input contains /load and followed by a filename, load the conversation from that file (assumed to be a JSON file)
+            file_path = user_input.split("/load")[1].strip()
+            # Remove any leading or trailing spaces, single or double quotes
+            file_path = file_path.strip().strip('\'').strip('\"')
+
+            if file_path:
+                if os.path.exists(file_path):
+                    with open(file_path, 'r', encoding="utf8") as f:
+                        conversation = json.load(f)
+
+                        system_prompt = ""
+                        initial_message = None
+
+                        # Find system prompt in the conversation
+                        for entry in conversation:
+                            if "role" in entry and entry["role"] == "system":
+                                system_prompt = entry["content"]
+                                initial_message = {"role": "system", "content": system_prompt}
+                                break
+
+                    on_print(f"Conversation loaded from {file_path}", Fore.WHITE + Style.DIM)
+                else:
+                    on_print(f"Conversation file '{file_path}' not found.", Fore.RED)
+            else:
+                on_print("Please specify a file path to load the conversation.", Fore.RED)
+            continue
 
         if user_input == "/collection":
             collection_name, collection_description = await prompt_for_vector_database_collection()
