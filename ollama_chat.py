@@ -67,7 +67,6 @@ agent_crew_manager = None
 
 other_instance_url = None
 listening_port = None
-initial_message = None
 user_prompt = None
 
 # Default ChromaDB client host and port
@@ -3731,9 +3730,11 @@ async def select_ollama_model_if_available(model_name):
         if model["model"] == model_name:
             selected_model = model
     
+            '''
             if "gemma" in selected_model:
                 no_system_role=True
                 await on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
+            '''
 
             if verbose_mode:
                 await on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
@@ -3847,9 +3848,11 @@ async def prompt_for_ollama_model(default_model, current_model):
     # Use the chosen model
     selected_model = models[choice]['model']
 
+    '''
     if "gemma" in selected_model:
         no_system_role=True
         await on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
+    '''
 
     if verbose_mode:
         await on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
@@ -3952,7 +3955,9 @@ async def load_chroma_client():
         chroma_client = None
 
 class ConversationManager:
-    def __init__(self, conversation, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit):
+    def __init__(self, initial_message, conversation, chatbot, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit):
+        self.initial_message = initial_message
+        self.chatbot = chatbot
         self.default_model = default_model
         self.selected_model = selected_model
         self.current_model = selected_model
@@ -3980,6 +3985,7 @@ class ConversationManager:
     
     async def process_user_input(self, user_input):
         thoughts = None
+        user_input = user_input.strip()
 
         # Exit condition
         if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
@@ -3993,12 +3999,12 @@ class ConversationManager:
 
         if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
             await self.on_message("Conversation reset.", Style.RESET_ALL)
-            if initial_message:
-                self.conversation = [initial_message]
+            if self.initial_message:
+                self.conversation = [self.initial_message]
             else:
                 self.conversation = []
 
-            self.auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
+            self.auto_start_conversation = ("starts_conversation" in self.chatbot and self.chatbot["starts_conversation"])
             user_input = ""
             return True
 
@@ -4215,13 +4221,13 @@ class ConversationManager:
                         conversation = json.load(f)
 
                         system_prompt = ""
-                        initial_message = None
+                        self.initial_message = None
 
                         # Find system prompt in the conversation
                         for entry in conversation:
                             if "role" in entry and entry["role"] == "system":
                                 system_prompt = entry["content"]
-                                initial_message = {"role": "system", "content": system_prompt}
+                                self.initial_message = {"role": "system", "content": system_prompt}
                                 break
 
                     on_print(f"Conversation loaded from {file_path}", Fore.WHITE + Style.DIM)
@@ -4229,7 +4235,7 @@ class ConversationManager:
                     on_print(f"Conversation file '{file_path}' not found.", Fore.RED)
             else:
                 on_print("Please specify a file path to load the conversation.", Fore.RED)
-            continue
+            return True
 
         if user_input == "/collection":
             collection_name, collection_description = await prompt_for_vector_database_collection()
@@ -4270,19 +4276,22 @@ class ConversationManager:
             return True
 
         if user_input == "/chatbot":
-            chatbot = await prompt_for_chatbot()
-            if "tools" in chatbot and len(chatbot["tools"]) > 0:
+            self.chatbot = await prompt_for_chatbot()
+            if "tools" in self.chatbot and len(self.chatbot["tools"]) > 0:
                 # Append chatbot tools to selected_tools if not already in the array
                 if self.selected_tools is None:
                     self.selected_tools = []
                 
-                for tool in chatbot["tools"]:
+                for tool in self.chatbot["tools"]:
                     self.selected_tools = await select_tool_by_name(await get_available_tools(), self.selected_tools, tool)
 
-            system_prompt = chatbot["system_prompt"]
+            system_prompt = self.chatbot["system_prompt"]
             # Initial system message
             if not no_system_role and len(self.user_name) > 0:
                 first_name = self.user_name.split()[0]
+
+                # Get today's date
+                today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
                 system_prompt += f"\nThe user's name is {self.user_name}, first name: {first_name}. {today}"
 
             if len(system_prompt) > 0:
@@ -4293,12 +4302,12 @@ class ConversationManager:
                 if self.verbose_mode:
                     await self.on_message("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
 
-                initial_message = {"role": "system", "content": system_prompt}
-                self.conversation = [initial_message]
+                self.initial_message = {"role": "system", "content": system_prompt}
+                self.conversation = [self.initial_message]
             else:
                 self.conversation = []
             await self.on_message("Conversation reset.", Style.RESET_ALL)
-            self.auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or args.auto_start
+            self.auto_start_conversation = ("starts_conversation" in self.chatbot and self.chatbot["starts_conversation"])
             user_input = ""
             return True
 
@@ -4313,25 +4322,34 @@ class ConversationManager:
             user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
             await self.on_message("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
 
-        image_path = None
-        # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
-        if "/file " in user_input:
-            file_path = user_input.split("/file")[1].strip()
-            file_path = file_path.strip("'\"")
+        image_paths = []  # New list to hold multiple images
+        # Extract all file paths from user input using regex
+        file_commands = re.findall(r'/file\s+([^/]+)', user_input)
+        for file_path in file_commands:
+            file_path = file_path.strip("'\"").strip()
+
+            await on_print(f"File path: {file_path}", Fore.WHITE + Style.DIM)
             
             # Check if the file is an image
             _, ext = os.path.splitext(file_path)
+
+            await on_print(f"File extension: '{ext}'", Fore.WHITE + Style.DIM)
             if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
                 try:
+                    await on_print(f"Reading file: {file_path}", Fore.WHITE + Style.DIM)
+
                     with open(file_path, 'r', encoding='utf-8') as file:
-                        user_input = user_input.replace("/file", "")
+                        user_input = user_input.replace(f"/file {file_path}", "", 1)
                         user_input += "\n" + file.read()
                 except FileNotFoundError:
-                    await self.on_message("File not found. Please try again.", Fore.RED)
+                    await self.on_message(f"File not found: {file_path}. Please try again.", Fore.RED)
                     return True
             else:
-                user_input = user_input.split("/file")[0].strip()
-                image_path = file_path
+                user_input = user_input.replace(f"/file {file_path}", "", 1)
+                image_paths.append(file_path)
+                await on_print(f"Image added: {file_path}", Fore.WHITE + Style.DIM)
+                await on_print(f"Image paths: {image_paths}", Fore.WHITE + Style.DIM)
+                await on_print(f"User input: {user_input}", Fore.WHITE + Style.DIM)
 
         # If user input starts with '/' and is not a command, ignore it.
         if user_input.startswith('/') and not user_input.startswith('//'):
@@ -4339,8 +4357,8 @@ class ConversationManager:
             return True
 
         # Add user input to conversation history
-        if image_path:
-            self.conversation.append({"role": "user", "content": user_input, "images": [image_path]})
+        if image_paths:
+            self.conversation.append({"role": "user", "content": user_input, "images": image_paths})
         elif len(user_input.strip()) > 0:
             self.conversation.append({"role": "user", "content": user_input})
 
@@ -4430,6 +4448,7 @@ async def init(settings, use_chainlit=False):
     global current_model
     global memory_manager
     global thinking_model
+    global use_openai
 
     preferred_collection_name = settings.collection
     use_openai = settings.use_openai
@@ -4448,6 +4467,8 @@ async def init(settings, use_chainlit=False):
     thinking_model = settings.thinking_model
     thinking_model_reasoning_pattern = settings.thinking_model_reasoning_pattern
     number_of_documents_to_return_from_vector_db = settings.docs_to_fetch_from_chroma
+
+    initial_message = None
 
     if not thinking_model:
         thinking_model = preferred_model
@@ -4481,9 +4502,6 @@ async def init(settings, use_chainlit=False):
 
     if verbose_mode and num_ctx:
         await on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
-
-    # Get today's date
-    today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
 
     system_prompt_placeholders = {}
     if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):
@@ -4602,6 +4620,8 @@ async def init(settings, use_chainlit=False):
 
     if not no_system_role and len(user_name) > 0:
         first_name = user_name.split()[0]
+        # Get today's date
+        today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
         system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
 
     if len(system_prompt) > 0:
@@ -4655,7 +4675,7 @@ async def init(settings, use_chainlit=False):
     agent_crew_manager = AgentCrewManager(verbose=verbose_mode, num_ctx=num_ctx)
 
     # Main conversation loop
-    conversation_manager = ConversationManager(conversation, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit)
+    conversation_manager = ConversationManager(initial_message, conversation, chatbot, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit)
     return conversation_manager
 
 async def run():
