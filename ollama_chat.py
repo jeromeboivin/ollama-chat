@@ -3955,7 +3955,7 @@ async def load_chroma_client():
         chroma_client = None
 
 class ConversationManager:
-    def __init__(self, initial_message, conversation, chatbot, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit):
+    def __init__(self, initial_message, conversation, chatbot, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit, auto_save):
         self.initial_message = initial_message
         self.chatbot = chatbot
         self.default_model = default_model
@@ -3979,6 +3979,7 @@ class ConversationManager:
         self.num_ctx = num_ctx
         self.agent_crew_manager = agent_crew_manager
         self.use_chainlit = use_chainlit
+        self.auto_save = auto_save
 
     async def on_message(self, message, style="", prompt=""):
         await on_print(message, style, prompt)
@@ -4437,7 +4438,6 @@ async def init(settings, use_chainlit=False):
     global prompt_template
     global thinking_model_reasoning_pattern
     global number_of_documents_to_return_from_vector_db
-    global auto_save
     global syntax_highlighting
     global other_instance_url
     global listening_port
@@ -4675,7 +4675,7 @@ async def init(settings, use_chainlit=False):
     agent_crew_manager = AgentCrewManager(verbose=verbose_mode, num_ctx=num_ctx)
 
     # Main conversation loop
-    conversation_manager = ConversationManager(initial_message, conversation, chatbot, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit)
+    conversation_manager = ConversationManager(initial_message, conversation, chatbot, default_model, selected_model, alternate_model, thinking_model, thinking_model_reasoning_pattern, auto_start_conversation, selected_tools, memory_manager, use_memory_manager, stream_active, system_prompt_placeholders, conversations_folder, user_name, output_file, answer_and_exit, verbose_mode, num_ctx, agent_crew_manager, use_chainlit, auto_save)
     return conversation_manager
 
 async def run():
@@ -4794,7 +4794,7 @@ async def run():
             except EOFError:
                 break
             except KeyboardInterrupt:
-                auto_save = False
+                conversation_manager.auto_save = False
                 await on_print("\nGoodbye!", Style.RESET_ALL)
                 break
 
@@ -4809,7 +4809,7 @@ async def run():
         if hasattr(plugin, "on_exit") and callable(getattr(plugin, "on_exit")):
             getattr(plugin, "on_exit")()
     
-    if auto_save:
+    if conversation_manager.auto_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         if conversation_manager.conversations_folder:
