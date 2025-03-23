@@ -21,3 +21,5 @@ lxml
 python-pptx
 python-docx
 chainlit
+pdf2image
+pillow

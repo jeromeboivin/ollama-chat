@@ -8,6 +8,7 @@ import base64
 import getpass
 import chainlit as cl
 import asyncio
+from pdf2image import convert_from_path
 
 if platform.system() == "Windows":
     import win32clipboard
@@ -213,6 +214,35 @@ def on_stdout_flush():
 
     if not function_handled:
         sys.stdout.flush()
+
+def pdf_to_images(pdf_path, dpi=150, quality=80):
+    """
+    Converts a PDF file into JPG images, one per page, and saves them in a temporary directory.
+
+    Args:
+        pdf_path (str): Path to the input PDF file.
+        dpi (int, optional): Resolution of output images in DPI. Default is 150.
+        quality (int, optional): JPEG quality (1-100). Default is 80.
+
+    Returns:
+        list: A list of file paths to the generated JPG images.
+    """
+    # Ensure the temporary directory exists
+    temp_dir = tempfile.gettempdir()
+    output_paths = []
+
+    # Convert PDF pages to images
+    images = convert_from_path(pdf_path, dpi=dpi)
+
+    for i, image in enumerate(images):
+        # Generate a temporary file path
+        temp_filename = os.path.join(temp_dir, f"pdf_page_{i+1}.jpg")
+        
+        # Save the image as JPG with specified quality
+        image.save(temp_filename, "JPEG", quality=quality)
+        output_paths.append(temp_filename)
+
+    return output_paths
 
 async def get_available_tools():
     global custom_tools
@@ -4336,15 +4366,31 @@ class ConversationManager:
 
             await on_print(f"File extension: '{ext}'", Fore.WHITE + Style.DIM)
             if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
-                try:
-                    await on_print(f"Reading file: {file_path}", Fore.WHITE + Style.DIM)
+                # Check if it's a PDF file
+                if ext.lower() == ".pdf":
+                    try:
+                        await on_print(f"Processing PDF file: {file_path}", Fore.WHITE + Style.DIM)
+                        # Use the pdf_to_images function to convert the PDF to images
+                        pdf_images = pdf_to_images(file_path)
+                        if pdf_images and len(pdf_images) > 0:
+                            user_input = user_input.replace(f"/file {file_path}", "", 1)
+                            # Add all generated images to the image_paths list
+                            image_paths.extend(pdf_images)
+                            await on_print(f"PDF converted to {len(pdf_images)} images", Fore.WHITE + Style.DIM)
+                        else:
+                            await self.on_message(f"Failed to convert PDF to images: {file_path}", Fore.RED)
+                    except Exception as e:
+                        await self.on_message(f"Error processing PDF file {file_path}: {str(e)}", Fore.RED)
+                else:
+                    try:
+                        await on_print(f"Reading file: {file_path}", Fore.WHITE + Style.DIM)
 
-                    with open(file_path, 'r', encoding='utf-8') as file:
-                        user_input = user_input.replace(f"/file {file_path}", "", 1)
-                        user_input += "\n" + file.read()
-                except FileNotFoundError:
-                    await self.on_message(f"File not found: {file_path}. Please try again.", Fore.RED)
-                    return True
+                        with open(file_path, 'r', encoding='utf-8') as file:
+                            user_input = user_input.replace(f"/file {file_path}", "", 1)
+                            user_input += "\n" + file.read()
+                    except FileNotFoundError:
+                        await self.on_message(f"File not found: {file_path}. Please try again.", Fore.RED)
+                        return True
             else:
                 user_input = user_input.replace(f"/file {file_path}", "", 1)
                 image_paths.append(file_path)
