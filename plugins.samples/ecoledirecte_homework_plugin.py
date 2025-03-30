@@ -216,22 +216,50 @@ class EcoleDirecteAPI:
             "uuid": self.credentials['uuid'],
             "fa": self.credentials['fa']
         }
-
+    
         payload = f'data={json.dumps(login_data)}'
-        login_url = f'{self.base_url}/login.awp?v=4.60.5'
-
+    
+        if self.verbose:
+            print(f"Logging in with credentials: {login_data}")
+    
+        login_url_initial = f'{self.base_url}/login.awp?gtk=1&v=4.76.0'
+        login_url = f'{self.base_url}/login.awp?v=4.76.0'
+    
         try:
-            response = requests.post(login_url, headers=self.build_headers(), data=payload)
-            response.raise_for_status()
-
-            login_response = response.json()
-
-            if login_response.get('code') == 200:
-                token = login_response.get('token')
-                self.store_linked_accounts(login_response.get('data', {}).get('accounts', []))
-                return token
-            else:
-                raise Exception(f"Login failed: {login_response.get('message', 'Unknown error')}")
+            # Use a session to persist cookies
+            with requests.Session() as session:
+                # Initial call to set the cookie
+                initial_response = session.get(login_url_initial, headers=self.build_headers())
+                initial_response.raise_for_status()
+    
+                # Extract the GTK cookie value
+                gtk_cookie = initial_response.cookies.get('GTK')
+                if not gtk_cookie:
+                    raise Exception("GTK cookie not found in the initial response.")
+    
+                if self.verbose:
+                    print(f"Initial login response (cookie set): {initial_response.cookies}")
+                    print(f"Extracted GTK cookie: {gtk_cookie}")
+    
+                # Add the X-Gtk header for the second call
+                headers = self.build_headers()
+                headers['X-Gtk'] = gtk_cookie
+    
+                # Second call to log in
+                response = session.post(login_url, headers=headers, data=payload)
+                response.raise_for_status()
+    
+                login_response = response.json()
+    
+                if self.verbose:
+                    print(f"Login response: {login_response}")
+    
+                if login_response.get('code') == 200:
+                    token = login_response.get('token')
+                    self.store_linked_accounts(login_response.get('data', {}).get('accounts', []))
+                    return token
+                else:
+                    raise Exception(f"Login failed: {login_response.get('message', 'Unknown error')}")
         except requests.exceptions.RequestException as e:
             print(f"An error occurred during login: {e}")
             return None
@@ -245,7 +273,7 @@ class EcoleDirecteAPI:
 
     def renew_token_for_linked_account(self, id_login):
         """Renew the token for a linked account using idLogin."""
-        renew_url = f'{self.get_base_url()}/renewtoken.awp?verbe=post&v=4.60.5'
+        renew_url = f'{self.get_base_url()}/renewtoken.awp?verbe=post&v=4.76.0'
         payload = {
             "idUser": id_login,
             "uuid": ""
@@ -303,7 +331,7 @@ class EcoleDirecteAPI:
         """Fetches the homework for the student."""
         url = f'{self.get_base_url()}/Eleves/{self.student_id}/cahierdetexte.awp'
         self.check_linked_account()
-        params = {'verbe': 'get', 'v': '4.60.5'}
+        params = {'verbe': 'get', 'v': '4.76.0'}
         try:
             response = requests.post(url, headers=self.headers, data=self.payload, params=params)
             response.raise_for_status()
@@ -364,7 +392,7 @@ class EcoleDirecteAPI:
             'itemsPerPage': '100',
             'getAll': '0',
             'verbe': 'get',
-            'v': '4.60.5'
+            'v': '4.76.0'
         }
 
         response = requests.post(url, headers=self.headers, data={"data": json.dumps(data)}, params=params)
@@ -457,7 +485,7 @@ class EcoleDirecteAPI:
         """Fetches detailed homework for a specific due date."""
         url = f'{self.get_base_url()}/Eleves/{self.student_id}/cahierdetexte/{due_date}.awp'
         self.check_linked_account()
-        params = {'verbe': 'get', 'v': '4.60.5'}
+        params = {'verbe': 'get', 'v': '4.76.0'}
         try:
             response = requests.post(url, headers=self.headers, data=self.payload, params=params)
             response.raise_for_status()
