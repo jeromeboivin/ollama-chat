@@ -35,6 +35,7 @@ from rank_bm25 import BM25Okapi
 from pptx import Presentation
 from docx import Document
 from lxml import etree
+from tqdm import tqdm
 
 APP_NAME = "ollama-chat"
 APP_AUTHOR = ""
@@ -46,7 +47,7 @@ openai_client = None
 chroma_client = None
 current_collection_name = None
 collection = None
-number_of_documents_to_return_from_vector_db = 15
+number_of_documents_to_return_from_vector_db = 8
 temperature = 0.1
 verbose_mode = False
 embeddings_model = None
@@ -60,6 +61,7 @@ alternate_model = None
 thinking_model = None
 thinking_model_reasoning_pattern = None
 memory_manager = None
+agent_crew_manager = None
 
 other_instance_url = None
 listening_port = None
@@ -81,7 +83,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 # List of available commands to autocomplete
 COMMANDS = [
     "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
-    "/thinking_model", "/model2", "/tools", "/save", "/collection", "/memory", "/remember",
+    "/thinking_model", "/model2", "/tools", "/load", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
     "/cb", "/file", "/quit", "/exit", "/bye"
 ]
@@ -191,7 +193,7 @@ def get_available_tools():
             available_collections.append(collection.name)
 
             if type(collection.metadata) == dict and "description" in collection.metadata:
-                available_collections_description.append(f"{collection.name}: {collection.metadata['description']}")
+                available_collections_description.append(f"'{collection.name}': {collection.metadata['description']}")
 
     default_tools = [{
         'type': 'function',
@@ -204,6 +206,11 @@ def get_available_tools():
                     "query": {
                         "type": "string",
                         "description": "The search query"
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "Region for search results, e.g., 'us-en' for United States, 'fr-fr' for France, etc... or 'wt-wt' for No region",
+                        "default": "wt-wt"
                     }
                 },
                 "required": [
@@ -306,12 +313,58 @@ def get_available_tools():
                 "required": ["task", "system_prompt", "tools", "agent_name", "agent_description"]
             }
         }
+    },
+    {
+        'type': 'function',
+        'function': {
+            "name": "create_new_agent_with_tools",
+            "description": (
+                "Creates an new agent with a specified name and description, using a provided system prompt and a list of tools. "
+                "The tools must be chosen from a predefined set."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "The system prompt that defines the agent's behavior, personality, and approach to solving the task."
+                    },
+                    "tools": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": []
+                        },
+                        "description": "A list of tools to be used by the agent for solving the task. Must be provided as an array of tool names."
+                    },
+                    "agent_name": {
+                        "type": "string",
+                        "description": "A unique name for the agent that will be used for instantiation."
+                    },
+                    "agent_description": {
+                        "type": "string",
+                        "description": "A brief description of the agent's purpose and capabilities."
+                    }
+                },
+                "required": ["system_prompt", "tools", "agent_name", "agent_description"]
+            }
+        }
     }]
 
     # Find index of instantiate_agent_with_tools_and_process_task function
     index = -1
     for i, tool in enumerate(default_tools):
         if tool['function']['name'] == 'instantiate_agent_with_tools_and_process_task':
+            index = i
+            break
+
+    default_tools[index]["function"]["parameters"]["properties"]["tools"]["items"]["enum"] = [tool["function"]["name"] for tool in selected_tools]
+    default_tools[index]["function"]["parameters"]["properties"]["tools"]["description"] += f" Available tools: {', '.join([tool['function']['name'] for tool in selected_tools])}"
+
+    # Find index of create_new_agent_with_tools function
+    index = -1
+    for i, tool in enumerate(default_tools):
+        if tool['function']['name'] == 'create_new_agent_with_tools':
             index = i
             break
 
@@ -1580,7 +1633,6 @@ class DocumentIndexer:
 
         progress_bar = None
         if self.verbose:
-            from tqdm import tqdm
             # Progress bar for indexing
             progress_bar = tqdm(total=len(text_files), desc="Indexing files", unit="file", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
 
@@ -1668,6 +1720,170 @@ class DocumentIndexer:
             except KeyboardInterrupt:
                 break
 
+    
+def split_reasoning_and_final_response(response, thinking_model_reasoning_pattern):
+        """
+        Split the reasoning and final response from the thinking model's response.
+        """
+        if not thinking_model_reasoning_pattern:
+            return None, response
+
+        reasoning = None
+        final_response = response
+
+        match = re.search(thinking_model_reasoning_pattern, response, re.DOTALL)
+        if match and len(match.groups()) > 0:
+            reasoning = match.group(1)
+            final_response = response.replace(reasoning, "").strip()
+
+        return reasoning, final_response
+class AIRefinementAgent:
+    def __init__(self, 
+                 initial_content: str,
+                 thinking_model: str,
+                 rewrite_model: str,
+                 thinking_model_reasoning_pattern: str = None,
+                 target_score: int = 9, 
+                 max_iterations: int = 10, 
+                 system_prompt: str = "You are an AI writing assistant.",
+                 temperature: float = 0.7,
+                 num_ctx: int = 4096,
+                 verbose: bool = False):
+        """
+        Initialize the AI Refinement Agent.
+
+        Parameters:
+        - initial_content: The starting text.
+        - thinking_model: The LLM model used for reviewing.
+        - rewrite_model: The LLM model used for rewriting.
+        - thinking_model_reasoning_pattern: A regular expression pattern to match the reasoning pattern in the thinking model's responses.
+        - target_score: The quality score (1-10) at which the loop stops.
+        - max_iterations: Maximum number of improvement cycles.
+        - system_prompt: The default system prompt for LLM queries.
+        - temperature: The creativity level of responses.
+        - num_ctx: Context window size for the model.
+        - verbose: Whether to print debug logs.
+        """
+        self.content = initial_content
+        self.versions = [initial_content]
+        self.scores = []
+        self.target_score = target_score
+        self.max_iterations = max_iterations
+        self.thinking_model = thinking_model
+        self.rewrite_model = rewrite_model
+        self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
+        self.system_prompt = system_prompt
+        self.temperature = temperature
+        self.num_ctx = num_ctx
+        self.verbose = verbose
+
+    def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
+        """
+        Query the LLM with the given prompt and return the response.
+        """
+        if system_prompt is None:
+            system_prompt = self.system_prompt
+
+        if model is None:
+            model = self.rewrite_model  # Default to review model if none specified
+
+        if self.verbose:
+            on_print(f"\n[DEBUG] System prompt:\n{system_prompt}")
+            on_print(f"[DEBUG] User prompt:\n{prompt}")
+            on_print(f"[DEBUG] Model: {model}")
+
+        llm_response = ask_ollama(
+            system_prompt, 
+            prompt, 
+            model, 
+            temperature=self.temperature, 
+            no_bot_prompt=True, 
+            stream_active=False, 
+            tools=tools, 
+            num_ctx=self.num_ctx
+        )
+
+        if self.verbose:
+            on_print(f"[DEBUG] Response:\n{llm_response}")
+
+        return llm_response
+
+    def review_text(self) -> dict:
+        """Review the current content and return structured JSON feedback."""
+        prompt = f"""
+Review the following text and provide a critique along with a score from 1 to 10. 
+Return only a JSON object with the keys "critique" (string) and "score" (integer).
+
+Text:
+{self.content}
+
+Example output:
+{{
+    "critique": "The text is clear but lacks engagement. The introduction needs more impact.",
+    "score": 7
+}}
+        """
+
+        response_text = self.query_llm(prompt, model=self.thinking_model)
+
+        thinking_model_is_different = self.thinking_model != self.rewrite_model
+
+        if thinking_model_is_different:
+            _, response_text = split_reasoning_and_final_response(response_text, self.thinking_model_reasoning_pattern)
+
+        try:
+            review_data = extract_json(response_text.strip())
+            return review_data
+        except Exception as e:
+            if self.verbose:
+                on_print(f"Error: LLM response is not valid JSON. Response: {response_text}, Error: {e}", Fore.RED)
+            return {"critique": "Invalid response. Retry needed.", "score": 0}
+
+    def rewrite_text(self, critique: str) -> str:
+        """Rewrite the content based on the given critique using the configured rewrite model."""
+        prompt = f"""
+Rewrite the following text based on the given critique.
+Ensure the revision improves clarity, engagement, and readability.
+
+Text:
+{self.content}
+
+Critique:
+{critique}
+
+Return only the improved version of the text.
+        """
+
+        return self.query_llm(prompt, model=self.rewrite_model)
+
+    def refine_document(self):
+        """Iteratively refine the document until it reaches the target score."""
+        for iteration in range(self.max_iterations):
+            if self.verbose:
+                on_print(f"\nIteration {iteration + 1}: Reviewing... (Model: {self.thinking_model})")
+
+            review_data = self.review_text()
+            score = review_data["score"]
+            critique = review_data["critique"]
+
+            if self.verbose:
+                on_print(f"Critique: {critique}\nScore: {score}")
+
+            if score >= self.target_score:
+                if self.verbose:
+                    on_print("✅ Target quality achieved! Stopping iterations.")
+                break
+            
+            if self.verbose:
+                on_print(f"Iteration {iteration + 1}: Rewriting... (Model: {self.rewrite_model})")
+            improved_text = self.rewrite_text(critique)
+            
+            self.versions.append(self.content)
+            self.content = improved_text
+            self.scores.append(score)
+
+        return self.content
+
 class Agent:
     # Static registry to store all agents
     agent_registry = {}
@@ -1712,23 +1928,6 @@ class Agent:
         """
         return Agent.agent_registry.get(agent_name)
 
-    def split_reasoning_and_final_response(self, response):
-        """
-        Split the reasoning and final response from the thinking model's response.
-        """
-        if not self.thinking_model_reasoning_pattern:
-            return None, response
-
-        reasoning = None
-        final_response = response
-
-        match = re.search(self.thinking_model_reasoning_pattern, response, re.DOTALL)
-        if match and len(match.groups()) > 0:
-            reasoning = match.group(1)
-            final_response = response.replace(reasoning, "").strip()
-
-        return reasoning, final_response
-
     def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
         """
         Query the OpenAI API with the given prompt and return the response.
@@ -1769,16 +1968,20 @@ class Agent:
 Output each subtask on a new line. Output only the subtasks without any explanations, introductions, or conclusions, no formatting needed, just the subtasks themselves.
 """
         thinking_model_is_different = self.thinking_model != self.model
-        response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
+
+        if "deepseek-r1" in self.thinking_model:
+            # DeepSeek-R1 model requires an empty system prompt
+            prompt = f"""{self.system_prompt}\n{prompt}"""
+            response = self.query_llm(prompt, system_prompt="", model=self.thinking_model)
+        else:
+            response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
 
         if thinking_model_is_different:
             # Split the reasoning and final response from the thinking model's response
-            reasoning, response = self.split_reasoning_and_final_response(response)
+            _, reasoning_response = split_reasoning_and_final_response(response, self.thinking_model_reasoning_pattern)
 
-            if reasoning is None:
-                reasoning = response
-
-            reasoning = self.rewrite_thinking_instructions_to_second_person(reasoning)
+            if reasoning_response:
+                reasoning = reasoning_response
 
             # Use result from thinking model to guide the response from the main model
             prompt = f"""Break down the following task into smaller, manageable subtasks:
@@ -1787,10 +1990,13 @@ Output each subtask on a new line. Output only the subtasks without any explanat
 ## Available tools to assist with subtasks:
 {tools_description or 'No tools available.'}
 
-Output each subtask on a new line, nothing more.
-
-Initial thoughts to guide the response:
+If I were to break down the task '{task}' into subtasks, I would do it as follows:
 {reasoning}
+
+You can follow a similar approach or provide a different response based on your own reasoning and understanding of the task.
+
+## Output format:
+Output each subtask on a new line, nothing more.
 """
             response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.model)
 
@@ -1807,9 +2013,13 @@ Initial thoughts to guide the response:
         # Remove subtasks ending with ':' or '**'
         subtasks = [subtask for subtask in subtasks if not re.search(r':$', subtask) and not re.search(r'\*\*$', subtask)]
 
+        # Remove leading numbers or bullets from subtasks
+        subtasks = [re.sub(r'^\d+\.\s', '', subtask) for subtask in subtasks]
+        subtasks = [re.sub(r'^[\*\-]\s', '', subtask) for subtask in subtasks]
+
         return subtasks
 
-    def decide_and_execute_subtask(self, main_task, subtask, result_from_previous_subtask):
+    def decide_and_execute_subtask(self, main_task, subtask, previous_subtask, result_from_previous_subtask):
         """
         Decide the best approach for a subtask: research, use a tool, delegate to another agent, or directly respond.
 
@@ -1823,13 +2033,17 @@ Initial thoughts to guide the response:
         """
         # Prepare a list of available tools and agents with descriptions
         tools_description = render_tools(self.tools)
-        agents_description = "\n".join([f"{name}: {agent.description}" for name, agent in Agent.agent_registry.items()])
+
+        # Prepare a list of other agents with descriptions, excluding the current agent
+        agents_description = "\n".join([f"{name}: {agent.description}" for name, agent in Agent.agent_registry.items() if name != self.name])
 
         prompt = f"""
 You are solving the subtask: "{subtask}" from the main task: "{main_task}".
 
-## Result from previous subtask:
+## Result from previous subtask ({previous_subtask or 'No previous subtask as this is the first subtask.'}):
+```markdown
 {result_from_previous_subtask or 'No results available.'}
+```
 
 ## Available tools:
 {tools_description or 'No tools available.'}
@@ -1844,30 +2058,44 @@ Decide whether to:
 4. Provide a direct response without using tools, research, or delegation.
 
 Explain your reasoning, and if you decide to use a tool or delegate, specify the tool name or agent.
+
+# Output format:
+Reasoning: [Your reasoning here]
+Decision: [Your decision here] (possible values: 'use tool', 'research', 'delegate the task', 'direct response')
 """
-        thoughts = self.query_llm(prompt, model=self.thinking_model)
+        if "deepseek-r1" in self.thinking_model:
+            # DeepSeek-R1 model requires an empty system prompt
+            prompt = f"""{self.system_prompt}\n{prompt}"""
+            thoughts = self.query_llm(prompt, system_prompt="", model=self.thinking_model)
+        else:
+            thoughts = self.query_llm(prompt, model=self.thinking_model)
+
         thinking_model_is_different = self.thinking_model != self.model
 
         if thinking_model_is_different:
             # Split the reasoning and final response from the thinking model's response
-            reasoning, _ = self.split_reasoning_and_final_response(thoughts)
+            _, reasoning_response = split_reasoning_and_final_response(thoughts, self.thinking_model_reasoning_pattern)
 
-            if reasoning:
-                thoughts = reasoning
-
-            thoughts = self.rewrite_thinking_instructions_to_second_person(thoughts)
+            if reasoning_response:
+                thoughts = reasoning_response
 
         if self.verbose:
             on_print(f"\nThoughts for subtask '{subtask}':\n{thoughts}", Fore.WHITE + Style.DIM)
-        prompt = f"""Provide a detailed response to the subtask: '{subtask}' from the main task: '{main_task}'.
+        prompt = f"""Provide a short response to the subtask: '{subtask}' from the main task: '{main_task}'.
 
 The result from the previous subtask was:
+```markdown
 {result_from_previous_subtask or 'No results available.'}
+```
 
-Here are some initial thoughts on how to approach this subtask:
+If I were to solve the subtask '{subtask}', I would do it as follows:
 {thoughts}
+
+You can follow a similar approach or provide a different response based on your own reasoning and understanding of the task.
+Keep the response concise and focused on the subtask at hand, no formatting needed, in plain text and without any additional explanations, introductions or conclusions.
 """
         result = ""
+        tools = []
         # Parse the decision to determine next steps
         if "delegate the task" in thoughts.lower():
             for agent_name in Agent.agent_registry:
@@ -1879,9 +2107,11 @@ Here are some initial thoughts on how to approach this subtask:
 
                         result = agent.process_task(prompt)
                         break
+        elif "use tool" in thoughts.lower() or "research" in thoughts.lower():
+            tools = self.tools
         
         if len(result) == 0:
-            result = self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
+            result = self.query_llm(prompt, system_prompt=self.system_prompt, tools=tools)
 
         return result
 
@@ -1921,63 +2151,93 @@ Provide a response. If no further actions are needed, explicitly state: "Task co
         # Query the LLM with the detailed instructions
         return self.query_llm(user_prompt, system_prompt=self.system_prompt)
     
-    def rewrite_thinking_instructions_to_second_person(self, thinking_instructions):
-        """
-        Rewrite the thinking instructions to be in the second person.
-        """
-        system_prompt = """Convert any given text from the first person (I, me, my, mine) to the second person (you, your, yours). Output only the converted text without any explanations, introductions, or conclusions. Maintain the original tone, style, and context while ensuring grammatical correctness.
-If the input text refers to 'the user,' replace it with 'I' to maintain a natural conversational flow, as the original text is likely written from the perspective of someone addressing a system or guide."""
-        return self.query_llm(thinking_instructions, system_prompt=system_prompt)
-    
     def process_task(self, task, return_intermediate_results=False):
         """
-        Perform the entire process: decompose, plan, execute, self-reflect, and synthesize.
+        Process the task by first generating a draft response and then progressively refining it 
+        until the response is deemed perfect. New subtasks may be identified during self-reflection 
+        and processed to further improve the final response.
         """
         try:
-            subtasks = self.decompose_task(task)
-            all_results = []
-            all_results.append("Main task: " + task)
+            # Initial draft creation: decompose the main task into subtasks and process each one.
+            initial_subtasks = self.decompose_task(task)
 
+            if self.verbose:
+                on_print(f"Initial subtasks identified: {initial_subtasks}", Fore.WHITE + Style.DIM)
+
+            if not initial_subtasks or len(initial_subtasks) == 0:
+                return "No subtasks identified. Unable to process the task."
+
+            draft_response = "# " + task + "\n"
+            
+            # Initialize variables to track the previous subtask and its result.
+            previous_subtask = None
+            previous_result = None
+
+            for subtask in initial_subtasks:
+                result = self.decide_and_execute_subtask(task, subtask, previous_subtask, previous_result)
+                if result:
+                    draft_response += f"## {subtask}\n{result}\n"
+                previous_subtask = subtask
+                previous_result = result
+
+            if self.verbose:
+                on_print(f"Initial draft created for task: {task}\n{draft_response}", Fore.WHITE + Style.DIM)
+
+            all_versions = [draft_response]
             iterations = 0
+            # Keep track of processed subtasks (starting with the initial ones)
+            processed_subtasks = set(initial_subtasks)
 
+            # Iteratively refine the draft response.
             while iterations < self.max_iterations:
                 iterations += 1
 
+                # Request the LLM to refine and polish the current draft.
+                refinement_agent = AIRefinementAgent(draft_response, self.thinking_model, self.model, max_iterations=self.max_iterations, verbose=self.verbose, num_ctx=self.num_ctx, thinking_model_reasoning_pattern=self.thinking_model_reasoning_pattern)
+                refined_response = refinement_agent.refine_document()
+                
+                all_versions.append(refined_response)
                 if self.verbose:
-                    on_print(f"\nIteration {iterations} - Decomposed subtasks: {subtasks}", Fore.WHITE + Style.DIM)
+                    on_print(f"Iteration {iterations} - Refined response:\n{refined_response}", Fore.WHITE + Style.DIM)
 
-                results = []
-                for subtask in subtasks:
-                    if self.verbose:
-                        on_print(f"Executing: {subtask}", Fore.WHITE + Style.DIM)
-                    result_from_previous_subtask = results[-1] if results else None
-                    result = self.decide_and_execute_subtask(task, subtask, result_from_previous_subtask)
-                    results.append(f"Sub-task: {subtask}\nResult: {result}\n")
-
-                all_results.append("\n".join(results))
-
-                # Synthesize results at each iteration
-                synthesized_result = self.synthesize_results(task, all_results)
+                # Perform self-reflection on the refined response.
+                reflection = self.self_reflect(refined_response, task, list(processed_subtasks))
                 if self.verbose:
-                    on_print(f"Synthesized Result: {synthesized_result}", Fore.WHITE + Style.DIM)
+                    on_print(f"Reflection after iteration {iterations}:\n{reflection}", Fore.WHITE + Style.DIM)
 
-                # Perform self-reflection on the synthesized result
-                reflection = self.self_reflect(synthesized_result, task, subtasks)
-                if self.verbose:
-                    on_print(f"Reflection: {reflection}", Fore.WHITE + Style.DIM)
-
+                # First, check if the reflection signals that no further improvements are needed.
                 if "Task complete, no further actions required" in reflection:
-                    if self.verbose:
-                        on_print("Task completed successfully.", Fore.WHITE + Style.DIM)
+                    draft_response = refined_response
                     break
 
-                subtasks = self.decompose_task(reflection)
+                # Identify new subtasks from the reflection.
+                new_subtasks = self.decompose_task(reflection)
+                additional_subtasks = [st for st in new_subtasks if st not in processed_subtasks]
+
+                if additional_subtasks:
+                    if self.verbose:
+                        on_print(f"New subtasks identified: {additional_subtasks}", Fore.WHITE + Style.DIM)
+                    additional_results = ""
+                    # For additional subtasks, maintain a local chain for previous subtask and result.
+                    prev_subtask = None
+                    prev_result = None
+                    for subtask in additional_subtasks:
+                        result = self.decide_and_execute_subtask(task, subtask, prev_subtask, prev_result)
+                        if result:
+                            additional_results += f"## {subtask}\n{result}\n"
+                        processed_subtasks.add(subtask)
+                        prev_subtask = subtask
+                        prev_result = result
+                    refined_response += "\n" + additional_results
+
+                # Update the draft for the next iteration.
+                draft_response = refined_response
 
             if return_intermediate_results:
-                return all_results
+                return all_versions
             else:
-                return synthesized_result
-        
+                return draft_response
+
         except Exception as e:
             return f"Error during task processing: {str(e)}"
 
@@ -1992,6 +2252,7 @@ class AgentCrewManager:
         self.database_path = database_path
         self.verbose = verbose
         self.num_ctx = num_ctx
+
         # Load the database or initialize it if it doesn't exist
         if os.path.exists(self.database_path):
             with open(self.database_path, "r") as file:
@@ -2121,7 +2382,78 @@ class AgentCrewManager:
                 print(f"Warning: Agent with name '{name}' not found in the database.")
         return instantiated_agents
 
-def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str) -> str:
+def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str):
+    global agent_crew_manager
+    global verbose_mode
+    
+    # Make sure tools are unique
+    tools = list(set(tools))
+
+    if verbose_mode:
+        on_print("Agent Creation Parameters:", Fore.WHITE + Style.DIM)
+        on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
+        on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
+        on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+        on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
+
+    # Validate inputs
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        raise ValueError("System prompt must be a non-empty string.")
+    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        raise ValueError("Tools must be a list of strings.")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        raise ValueError("Agent name must be a non-empty string.")
+    
+    agent_tools = []
+    available_tools = get_available_tools()
+    for tool in tools:
+        # If tool name starts with 'functions.', remove it
+        if tool.startswith("functions."):
+            tool = tool.split(".", 1)[1]
+
+        for available_tool in available_tools:
+            if tool.lower() == available_tool['function']['name'].lower() and tool.lower() != "instantiate_agent_with_tools_and_process_task" and tool.lower() != "create_new_agent_with_tools":
+                agent_tools.append(available_tool)
+                break
+
+    if len(agent_tools) == 0:
+        agent_tools.clear()
+
+        # Some models are confused between collections and tools, so we need to check for this case
+        load_chroma_client()
+
+        # List existing collections
+        collections = None
+        if chroma_client:
+            collections = chroma_client.list_collections()
+
+        if collections:
+            all_tools_are_collections = all(tool in [collection.name for collection in collections] for tool in tools)
+            if all_tools_are_collections:
+                # If tool query_vector_database is available, add it to the agent tools
+                query_vector_database_tool = next((tool for tool in available_tools if tool['function']['name'] == 'query_vector_database'), None)
+                if query_vector_database_tool:
+                    agent_tools.append(query_vector_database_tool)
+
+    # Always include today's date to the system prompt, for context
+    system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%Y-%m-%d')}."
+    
+    # Instantiate the Agent with the provided parameters
+    agent = Agent(
+        name=agent_name,
+        description=agent_description,
+        model=current_model,
+        system_prompt=system_prompt,
+        temperature=0.7,
+        max_iterations=3,
+        tools=agent_tools,
+        verbose=verbose_mode
+    )
+
+    # Add the agent to the agent crew manager
+    agent_crew_manager.add_agent_from_instance(agent)
+
+def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str = None, process_task=True) -> str|Agent:
     """
     Instantiate an Agent with a given name, system prompt, a list of tools, and solve a given task.
 
@@ -2130,6 +2462,8 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     - system_prompt (str): The system prompt to guide the agent's behavior and approach.
     - tools (list[str]): A list of tools (from a predefined set) that the agent can use.
     - agent_name (str): A unique name for the agent.
+    - agent_description (str): A description of the agent's capabilities and purpose.
+    - process_task (bool): Whether to process the task immediately after instantiation.
 
     Returns:
     - str: The final result after the agent processes the task.
@@ -2139,9 +2473,6 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     global thinking_model
     global thinking_model_reasoning_pattern
 
-    # Make sure tools are unique
-    tools = list(set(tools))
-
     if verbose_mode:
         on_print("Agent Instantiation Parameters:", Fore.WHITE + Style.DIM)
         on_print(f"Task: {task}", Fore.WHITE + Style.DIM)
@@ -2150,15 +2481,29 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
         on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
 
+
+    # If tools is a string, it's probably a JSON string, so parse it
+    if isinstance(tools, str):
+        try:
+            tools = json.loads(tools)
+        except json.JSONDecodeError:
+            return "Error: Tools must be a list of strings."
+    elif not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        return "Error: Tools must be a list of strings."
+
     # Validate inputs
-    if not isinstance(task, str) or not task.strip():
+    if process_task and not isinstance(task, str) or not task.strip():
         return "Error: Task must be a non-empty string describing the problem or goal."
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         return "Error: System prompt must be a non-empty string."
-    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
-        return "Error: Tools must be a list of strings."
     if not isinstance(agent_name, str) or not agent_name.strip():
         return "Error: Agent name must be a non-empty string."
+
+    if not agent_description:
+        agent_description = f"An AI assistant named {agent_name} with system role: '{system_prompt}'."
+
+    # Make sure tools are unique
+    tools = list(set(tools))
 
     agent_tools = []
     available_tools = get_available_tools()
@@ -2168,9 +2513,28 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
             tool = tool.split(".", 1)[1]
 
         for available_tool in available_tools:
-            if tool.lower() == available_tool['function']['name'].lower() and tool.lower() != "instantiate_agent_with_tools_and_process_task":
+            if tool.lower() == available_tool['function']['name'].lower() and tool.lower() != "instantiate_agent_with_tools_and_process_task" and tool.lower() != "create_new_agent_with_tools":
                 agent_tools.append(available_tool)
                 break
+
+    if len(agent_tools) == 0:
+        agent_tools.clear()
+
+        # Some models are confused between collections and tools, so we need to check for this case
+        load_chroma_client()
+
+        # List existing collections
+        collections = None
+        if chroma_client:
+            collections = chroma_client.list_collections()
+
+        if collections and len(collections) > 0 and len(tools) > 0:
+            all_tools_are_collections = all(tool in [collection.name for collection in collections] for tool in tools)
+            if all_tools_are_collections:
+                # If tool query_vector_database is available, add it to the agent tools
+                query_vector_database_tool = next((tool for tool in available_tools if tool['function']['name'] == 'query_vector_database'), None)
+                if query_vector_database_tool:
+                    agent_tools.append(query_vector_database_tool)
 
     # Always include today's date to the system prompt, for context
     system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%Y-%m-%d')}."
@@ -2189,15 +2553,18 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         thinking_model_reasoning_pattern=thinking_model_reasoning_pattern
     )
 
-    # Process the task using the agent
-    try:
-        result = agent.process_task(task, return_intermediate_results=True)
-    except Exception as e:
-        return f"Error during task processing: {e}"
+    if process_task:
+        # Process the task using the agent
+        try:
+            result = agent.process_task(task, return_intermediate_results=True)
+        except Exception as e:
+            return f"Error during task processing: {e}"
 
-    return result
+        return result
 
-def web_search(query=None, n_results=5, web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
+    return agent
+
+def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
     global current_model
     global verbose_mode
     global plugins
@@ -2209,7 +2576,7 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
     urls = []
     # Add the search results to the chatbot response
     try:
-        search_results = search.text(query, max_results=n_results)
+        search_results = search.text(query, region=region, max_results=n_results)
         if search_results:
             for i, search_result in enumerate(search_results):
                 urls.append(search_result['href'])
@@ -2220,6 +2587,9 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
     if verbose_mode:
         on_print("Web Search Results:", Fore.WHITE + Style.DIM)
         on_print(urls, Fore.WHITE + Style.DIM)
+
+    if len(urls) == 0:
+        return "No search results found."
 
     webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins, num_ctx=num_ctx)
     # webCrawler.crawl(task=f"Highlight key-points about '{query}', using information provided. Format output as a list of bullet points.")
@@ -2250,7 +2620,17 @@ def web_search(query=None, n_results=5, web_cache_collection=web_cache_collectio
     os.rmdir(temp_folder)
 
     # Search the vector database for the query
-    return query_vector_database(query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
+    results = query_vector_database(query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
+
+    # If no results are found, refined search
+    if not results:
+        new_query = ask_ollama("", f"No relevant information found. Please provide a refined search query: {query}", current_model, temperature=0.7, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+        if new_query:
+            if verbose_mode:
+                on_print(f"Refined search query: {new_query}", Fore.WHITE + Style.DIM)
+            return web_search(new_query, n_results, region, web_cache_collection, web_embedding_model, num_ctx)
+
+    return results
 
 def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
@@ -2292,6 +2672,7 @@ def print_possible_prompt_commands():
     /context <model context size>: Change the model's context window size. Default value: 2. Size must be a numeric value between 2 and 125.
     /index <folder path>: Index text files in the folder to the vector database.
     /cb: Replace /cb with the clipboard content.
+    /load <filename>: Load a conversation from a file.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
     /verbose: Toggle verbose mode on or off.
     /memory: Toggle memory assistant on or off.
@@ -2538,10 +2919,14 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     global verbose_mode
     global embeddings_model
     global current_model
+    global thinking_model
+    global thinking_model_reasoning_pattern
 
     # If question is empty, return empty string
     if not question or len(question) == 0:
         return ""
+
+    initial_question = question
 
     # If n_results is a string, convert it to an integer
     if isinstance(n_results, str):
@@ -2585,14 +2970,23 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         set_current_collection(collection_name, create_new_collection_if_not_found=False)
 
     if expand_query:
+        expanded_query = None
         # Expand the query for better retrieval
         system_prompt = "You are an assistant that helps expand and clarify user questions to improve information retrieval. When a user provides a question, your task is to write a short passage that elaborates on the query by adding relevant background information, inferred details, and related concepts that can help with retrieval. The passage should remain concise and focused, without changing the original meaning of the question.\r\nGuidelines:\r\n1. Expand the question briefly by including additional context or background, staying relevant to the user's original intent.\r\n2. Incorporate inferred details or related concepts that help clarify or broaden the query in a way that aids retrieval.\r\n3. Keep the passage short, usually no more than 2-3 sentences, while maintaining clarity and depth.\r\n4. Avoid introducing unrelated or overly specific topics. Keep the expansion concise and to the point."
         if question_context:
             system_prompt += f"\n\nAdditional context about the user query:\n{question_context}"
 
-        response = ask_ollama(system_prompt, question, selected_model=current_model, no_bot_prompt=True, stream_active=False)
-        if response:
-            question += "\n" + response
+        if not thinking_model is None and thinking_model != current_model:
+            if "deepseek-r1" in thinking_model:
+                 # DeepSeek-R1 model requires an empty system prompt
+                prompt = f"""{system_prompt}\n{question}"""
+                expanded_query = ask_ollama("", prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+            else:
+                expanded_query = ask_ollama(system_prompt, question, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+        else:
+            expanded_query = ask_ollama(system_prompt, question, selected_model=current_model, no_bot_prompt=True, stream_active=False)
+        if expanded_query:
+            question += "\n" + expanded_query
             if verbose_mode:
                 on_print("Expanded query:", Fore.WHITE + Style.DIM)
                 on_print(question, Fore.WHITE + Style.DIM)
@@ -2625,24 +3019,44 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     metadatas = result["metadatas"][0]
 
     # Preprocess and re-rank using BM25
-    preprocessed_query = preprocess_text(question)
+    initial_question_preprocessed = preprocess_text(initial_question)
     preprocessed_docs = [preprocess_text(doc) for doc in documents]
 
     # Apply BM25 re-ranking
     bm25 = BM25Okapi(preprocessed_docs)
-    bm25_scores = bm25.get_scores(preprocessed_query)
+    bm25_scores = bm25.get_scores(initial_question_preprocessed)
 
-    # Get top rerank_n documents based on BM25 score
+    # Sort the results by BM25 score
     reranked_results = sorted(
         enumerate(zip(metadatas, distances, documents, bm25_scores)),
         key=lambda x: x[1][3],  # Sort by BM25 score
         reverse=True
-    )[:n_results]
+    )[0:n_results * 2]
+
+    # Filter re-ranked results by asking Ollama if each result is useful
+    filtered_results = []
+    for idx, (metadata, distance, document, bm25_score) in reranked_results:
+        usefulness_prompt = f"Is the following document useful to answer the query '{initial_question}'?\n\nDocument:\n{document}\n\nAnswer by 'yes' or 'no'."
+        usefulness_response = ask_ollama("", usefulness_prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
+
+        if thinking_model_reasoning_pattern:
+            _, reasoning_response = split_reasoning_and_final_response(usefulness_response, thinking_model_reasoning_pattern)
+            usefulness_response = reasoning_response
+
+        if verbose_mode:
+            on_print("Usefulness response:", Fore.WHITE + Style.DIM)
+            on_print(usefulness_response, Fore.WHITE + Style.DIM)
+        
+        if "yes" in usefulness_response.lower():
+            filtered_results.append((metadata, distance, document, bm25_score))
+
+        if len(filtered_results) >= n_results:
+            break
 
     # Join all possible answers into one string
     answers = []
     answer_index = 0
-    for idx, (metadata, distance, document, bm25_score) in reranked_results:
+    for metadata, distance, document, bm25_score in filtered_results:
         if answer_distance_threshold > 0 and distance > answer_distance_threshold:
             if verbose_mode:
                 on_print("Skipping answer with distance: " + str(distance), Fore.WHITE + Style.DIM)
@@ -3099,6 +3513,10 @@ def try_parse_json(json_str):
 
 def extract_json(garbage_str):
     global verbose_mode
+
+    if garbage_str is None:
+        return []
+
     # First, try to parse the entire input as JSON directly
     result = try_parse_json(garbage_str)
     if result is not None:
@@ -3389,10 +3807,13 @@ def get_personal_info():
     return personal_info
 
 def save_conversation_to_file(conversation, file_path):
-    with open(file_path, 'w', encoding="utf8") as f:
-        # Convert conversation list of objects to a list of dict
-        conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
+    global verbose_mode
 
+    # Convert conversation list of objects to a list of dict
+    conversation = [json.loads(json.dumps(obj, default=lambda o: vars(o))) for obj in conversation]
+    
+    # Save the conversation to a text file (filter out system messages)
+    with open(file_path, 'w', encoding="utf8") as f:
         # Skip empty messages or system messages
         filtered_conversation = [entry for entry in conversation if "content" in entry and entry["content"] and "role" in entry and entry["role"] != "system" and entry["role"] != "tool"]
 
@@ -3406,7 +3827,16 @@ def save_conversation_to_file(conversation, file_path):
             
             f.write(f"{role}: {message['content']}\n\n")
 
-    on_print(f"Conversation saved to {file_path}", Fore.WHITE + Style.DIM)
+    if verbose_mode:
+        on_print(f"Conversation saved to {file_path}", Fore.WHITE + Style.DIM)
+
+    # Save the conversation to a JSON file
+    json_file_path = file_path.replace(".txt", ".json")
+    with open(json_file_path, 'w', encoding="utf8") as f:
+        json.dump(conversation, f, indent=4)
+
+    if verbose_mode:
+        on_print(f"Conversation saved to {json_file_path}", Fore.WHITE + Style.DIM)
 
 def load_chroma_client():
     global chroma_client
@@ -3461,6 +3891,7 @@ def run():
     global memory_manager
     global thinking_model
     global thinking_model_reasoning_pattern
+    global number_of_documents_to_return_from_vector_db
     
     default_model = None
     prompt_template = None
@@ -3473,6 +3904,7 @@ def run():
     parser.add_argument('--chroma-path', type=str, help='ChromaDB database path', default=None)
     parser.add_argument('--chroma-host', type=str, help='ChromaDB client host', default="localhost")
     parser.add_argument('--chroma-port', type=int, help='ChromaDB client port', default=8000)
+    parser.add_argument('--docs-to-fetch-from-chroma', type=int, help="Number of documents to return from the vector database when querying for similar documents", default=number_of_documents_to_return_from_vector_db)
     parser.add_argument('--collection', type=str, help='ChromaDB collection name', default=None)
     parser.add_argument('--use-openai', type=bool, help='Use OpenAI API or Llama-CPP', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--temperature', type=float, help='Temperature for OpenAI API', default=0.1)
@@ -3524,6 +3956,7 @@ def run():
     preferred_model = args.model
     thinking_model = args.thinking_model
     thinking_model_reasoning_pattern = args.thinking_model_reasoning_pattern
+    number_of_documents_to_return_from_vector_db = args.docs_to_fetch_from_chroma
 
     if not thinking_model:
         thinking_model = preferred_model
@@ -3725,6 +4158,9 @@ def run():
         tool_name = tool_name.strip().strip('\'').strip('\"')
         selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool_name)
 
+    agent_crew_manager = AgentCrewManager(verbose=verbose_mode, num_ctx=num_ctx)
+
+    # Main conversation loop
     while True:
         thoughts = None
         if not auto_start_conversation:
@@ -3812,6 +4248,23 @@ def run():
                 on_print(f"Please specify context window size with /context <number>.", Fore.RED)
             continue
 
+        if "/system" in user_input:
+            system_prompt = user_input.replace("/system", "").strip()
+
+            if len(system_prompt) > 0:
+                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+                for key, value in system_prompt_placeholders.items():
+                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
+                if verbose_mode:
+                    on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
+
+                for entry in conversation:
+                    if "role" in entry and entry["role"] == "system":
+                        entry["content"] = system_prompt
+                        break
+            continue
+
         if "/index" in user_input:
             if not chroma_client:
                 on_print("ChromaDB client not initialized.", Fore.RED)
@@ -3852,26 +4305,8 @@ def run():
 
         if "/agent" in user_input:
             user_input = user_input.replace("/agent", "").strip()
-            conversation.append({"role": "user", "content": user_input})
-
-            agent = Agent("DefaultAgent",
-                            "A simple agent that uses Ollama or OpenAI to generate responses.",
-                            system_prompt=system_prompt,
-                            model=selected_model,
-                            thinking_model=thinking_model,
-                            temperature=temperature,
-                            tools=selected_tools,
-                            num_ctx=num_ctx,
-                            verbose=verbose_mode,
-                            thinking_model_reasoning_pattern=thinking_model_reasoning_pattern)
-            agent_response = agent.process_task(user_input)
             
-            if agent_response:
-                conversation.append({"role": "assistant", "content": agent_response})
-                if syntax_highlighting:
-                    on_print(colorize(agent_response), Style.RESET_ALL, "\rBot: " if interactive_mode else "")
-                else:
-                    on_print(agent_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
+            agent_crew_manager.create_agent(user_input)
             continue
 
         if "/cot" in user_input:
@@ -3991,6 +4426,34 @@ def run():
                     save_conversation_to_file(conversation, os.path.join(conversations_folder, f"conversation_{timestamp}.txt"))
                 else:
                     save_conversation_to_file(conversation, f"conversation_{timestamp}.txt")
+            continue
+
+        if "/load" in user_input:
+            # If the user input contains /load and followed by a filename, load the conversation from that file (assumed to be a JSON file)
+            file_path = user_input.split("/load")[1].strip()
+            # Remove any leading or trailing spaces, single or double quotes
+            file_path = file_path.strip().strip('\'').strip('\"')
+
+            if file_path:
+                if os.path.exists(file_path):
+                    with open(file_path, 'r', encoding="utf8") as f:
+                        conversation = json.load(f)
+
+                        system_prompt = ""
+                        initial_message = None
+
+                        # Find system prompt in the conversation
+                        for entry in conversation:
+                            if "role" in entry and entry["role"] == "system":
+                                system_prompt = entry["content"]
+                                initial_message = {"role": "system", "content": system_prompt}
+                                break
+
+                    on_print(f"Conversation loaded from {file_path}", Fore.WHITE + Style.DIM)
+                else:
+                    on_print(f"Conversation file '{file_path}' not found.", Fore.RED)
+            else:
+                on_print("Please specify a file path to load the conversation.", Fore.RED)
             continue
 
         if user_input == "/collection":
