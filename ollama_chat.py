@@ -1245,9 +1245,14 @@ class MemoryManager:
         """
         embedding = None
         if self.embedding_model_name:
+            ollama_options = {}
+            if self.num_ctx:
+                ollama_options["num_ctx"] = self.num_ctx
+
             response = ollama.embeddings(
                 prompt=text,
-                model=self.embedding_model_name
+                model=self.embedding_model_name,
+                options=ollama_options
             )
             embedding = response["embedding"]
         return embedding
@@ -1608,7 +1613,7 @@ class DocumentIndexer:
             except:
                 return None
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None):
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None):
         """
         Index all text files in the root folder.
         
@@ -1673,9 +1678,14 @@ class DocumentIndexer:
                         # Embed the content
                         embedding = None
                         if self.model:
+                            ollama_options = {}
+                            if num_ctx:
+                                ollama_options["num_ctx"] = num_ctx
+
                             response = ollama.embeddings(
                                 prompt=chunk,
-                                model=self.model
+                                model=self.model,
+                                options=ollama_options
                             )
                             embedding = response["embedding"]
                         
@@ -1697,9 +1707,14 @@ class DocumentIndexer:
                     # Embed the whole document
                     embedding = None
                     if self.model:
+                        ollama_options = {}
+                        if num_ctx:
+                            ollama_options["num_ctx"] = num_ctx
+
                         response = ollama.embeddings(
                             prompt=content,
-                            model=self.model
+                            model=self.model,
+                            options=ollama_options
                         )
                         embedding = response["embedding"]
 
@@ -4040,7 +4055,7 @@ def run():
     if args.index_documents:
         load_chroma_client()
         document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
-        document_indexer.index_documents()
+        document_indexer.index_documents(num_ctx=num_ctx)
 
     auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or auto_start_conversation
     system_prompt = chatbot["system_prompt"]
@@ -4288,7 +4303,7 @@ def run():
                 folder_to_index = temp_folder
 
             document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model)
-            document_indexer.index_documents()
+            document_indexer.index_documents(num_ctx=num_ctx)
 
             if temp_folder:
                 # Remove the temporary folder and its contents
