@@ -2579,7 +2579,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
 
     return agent
 
-def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model="nomic-embed-text", num_ctx=None):
+def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model=embeddings_model, num_ctx=None):
     global current_model
     global verbose_mode
     global plugins
@@ -4356,7 +4356,7 @@ def run():
                     on_print(user_input, Fore.WHITE + Style.DIM)
         elif "/web" in user_input:
             user_input = user_input.replace("/web", "").strip()
-            web_search_response = web_search(user_input, num_ctx=num_ctx)
+            web_search_response = web_search(user_input, num_ctx=num_ctx, web_embedding_model=embeddings_model)
             if web_search_response:
                 initial_user_input = user_input
                 user_input += "Context: " + web_search_response
