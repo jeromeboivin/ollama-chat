@@ -1613,7 +1613,7 @@ class DocumentIndexer:
             except:
                 return None
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None):
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True):
         """
         Index all text files in the root folder.
         
@@ -1621,6 +1621,7 @@ class DocumentIndexer:
         :param no_chunking_confirmation: Skip confirmation for chunking.
         :param split_paragraphs: Whether to split markdown content into paragraphs.
         :param additional_metadata: Optional dictionary to pass additional metadata by file name.
+        :param skip_existing: Whether to skip indexing if a document/chunk with the same ID already exists.
         """
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
@@ -1646,16 +1647,49 @@ class DocumentIndexer:
                 progress_bar.update(1)
 
             try:
+                document_id = os.path.splitext(os.path.basename(file_path))[0]
+
+                # Check if skipping existing documents and if the document ID exists (for non-chunked case)
+                if not allow_chunks and skip_existing:
+                    existing_doc = self.collection.get(ids=[document_id])
+                    if existing_doc and len(existing_doc.get('ids', [])) > 0:
+                        if self.verbose:
+                            on_print(f"Skipping existing document: {document_id}", Fore.WHITE + Style.DIM)
+                        continue
+
                 content = self.read_file(file_path)
 
                 if not content:
                     on_print(f"An error occurred while reading file: {file_path}", Fore.RED)
                     continue
-
-                document_id = os.path.splitext(os.path.basename(file_path))[0]
                 
                 # Add any additional metadata for the file
-                file_metadata = {'filename': file_path}
+                # Extract file name and base file information
+                file_name = os.path.basename(file_path)
+                file_name_without_ext = os.path.splitext(file_name)[0]
+                current_date = datetime.now().isoformat()
+                
+                # Create a more comprehensive metadata structure
+                file_metadata = {
+                    'published': current_date,
+                    'docSource': os.path.dirname(file_path),
+                    'docAuthor': 'Unknown',
+                    'description': f"Document from {file_path}",
+                    'title': file_name_without_ext,
+                    'id': document_id,
+                    'filePath': file_path
+                }
+                
+                # Convert the file path to url and add it to the metadata
+                file_metadata['url'] = urljoin("file://", file_path)
+                
+                # If windows, convert the file path to a URI
+                if os.name == 'nt':
+                    file_metadata['url'] = file_metadata['url'].replace("\\", "/")
+                    
+                    # Replace the drive letter with "file:///" prefix
+                    file_metadata['url'] = file_metadata['url'].replace("file://", "file:///")
+                
                 if additional_metadata and file_path in additional_metadata:
                     file_metadata.update(additional_metadata[file_path])
 
@@ -1674,6 +1708,14 @@ class DocumentIndexer:
                     
                     for i, chunk in enumerate(chunks):
                         chunk_id = f"{document_id}_{i}"
+
+                        # Check if skipping existing chunks and if the chunk ID exists
+                        if skip_existing:
+                            existing_chunk = self.collection.get(ids=[chunk_id])
+                            if existing_chunk and len(existing_chunk.get('ids', [])) > 0:
+                                if self.verbose:
+                                    on_print(f"Skipping existing chunk: {chunk_id}", Fore.WHITE + Style.DIM)
+                                continue
                         
                         # Embed the content
                         embedding = None
@@ -1704,7 +1746,7 @@ class DocumentIndexer:
                                 ids=[chunk_id]
                             )
                 else:
-                    # Embed the whole document
+                    # Embed the whole document (already checked for skip_existing above)
                     embedding = None
                     if self.model:
                         ollama_options = {}
@@ -1734,6 +1776,9 @@ class DocumentIndexer:
                         )
             except KeyboardInterrupt:
                 break
+            except Exception as e: # Catch other potential errors during processing
+                on_print(f"Error processing file {file_path}: {e}", Fore.RED)
+                continue # Continue to the next file
 
     
 def split_reasoning_and_final_response(response, thinking_model_reasoning_pattern):
@@ -2863,7 +2908,15 @@ def set_current_collection(collection_name, description=None, create_new_collect
     # Get or create the target collection
     try:
         if create_new_collection_if_not_found:
-            collection = chroma_client.get_or_create_collection(name=collection_name)
+            collection = chroma_client.get_or_create_collection(
+                name=collection_name,
+                configuration={
+                    "hnsw": {
+                        "space": "cosine",
+                        "ef_search": 1000,
+                        "ef_construction": 1000
+                    }
+            })
         else:
             collection = chroma_client.get_collection(name=collection_name)
 
@@ -4302,7 +4355,7 @@ def run():
                 scraper.scrape()
                 folder_to_index = temp_folder
 
-            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model)
+            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model, verbose=verbose_mode)
             document_indexer.index_documents(num_ctx=num_ctx)
 
             if temp_folder:
