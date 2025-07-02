@@ -6,6 +6,7 @@ import chromadb
 import readline
 import base64
 import getpass
+import math
 
 if platform.system() == "Windows":
     import win32clipboard
@@ -347,6 +348,38 @@ def get_available_tools():
                     }
                 },
                 "required": ["system_prompt", "tools", "agent_name", "agent_description"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'summarize_text_file',
+            'description': 'Summarizes a long text file by breaking it into chunks and summarizing them iteratively.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The long text file to summarize. Provide the full path to the file."
+                    },
+                    "chunk_size": {
+                        "type": "integer",
+                        "description": "The number of words in each text chunk.",
+                        "default": 400
+                    },
+                    "overlap": {
+                        "type": "integer",
+                        "description": "The number of words to overlap between consecutive chunks to maintain context.",
+                        "default": 50
+                    },
+                    "max_final_words": {
+                        "type": "integer",
+                        "description": "The maximum number of words desired for the final summary.",
+                        "default": 500
+                    }
+                },
+                "required": ["text"]
             }
         }
     }]
@@ -3930,6 +3963,108 @@ def load_chroma_client():
         if verbose_mode:
             on_print("ChromaDB client could not be initialized. Please check the host and port.", Fore.RED + Style.DIM)
         chroma_client = None
+        
+def summarize_chunk(text_chunk, model, max_summary_words, previous_summary=None, num_ctx=None):
+    """
+    Summarizes a single chunk of text using the provided LLM.
+
+    Args:
+        text_chunk (str): The piece of text to summarize.
+        model (str): The name of the LLM model to use for summarization.
+        max_summary_words (int): The approximate desired word count for the chunk's summary.
+        previous_summary (str, optional): The previous summary to include in the prompt. Defaults to None.
+        num_ctx (int, optional): The number of context tokens to use for the LLM. Defaults to None.
+
+    Returns:
+        str: The summarized text.
+    """
+    system_prompt = "You are an expert at summarizing text. Your task is to provide a concise summary of the given content, maintaining context from previous parts."
+    
+    # Add context from the previous summary to the prompt if it exists.
+    if previous_summary:
+        user_prompt = (
+            f"The summary of the previous text chunk is: \"{previous_summary}\"\n\n"
+            f"Based on that context, please summarize the following new text chunk in approximately {max_summary_words} words:\n\n"
+            f"---\n\n{text_chunk}"
+        )
+    else:
+        user_prompt = f"Please summarize the following text in approximately {max_summary_words} words:\n\n---\n\n{text_chunk}"
+
+    # This function call should interact with your local LLM.
+    summary = ask_ollama(system_prompt, user_prompt, model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+    return summary
+
+def summarize_text_file(file_path, model=None, chunk_size=400, overlap=50, max_final_words=500, num_ctx=None):
+    """
+    Summarizes a long text by breaking it into chunks, summarizing them,
+    and then iteratively summarizing the summaries until the final text is
+    under a specified word count.
+
+    Args:
+        file_path (str): The complete text file to summarize.
+        model (str): The model name to be used for the summarization (e.g., 'llama3').
+        chunk_size (int): The number of words in each text chunk.
+        overlap (int): The number of words to overlap between consecutive chunks to maintain context.
+        max_final_words (int): The maximum number of words desired for the final summary.
+        num_ctx (int, optional): The number of context tokens to use for the LLM. Defaults to None.
+        verbose_mode (bool): If True, print detailed information about the summarization process.
+
+    Returns:
+        str: The final, concise summary.
+    """
+    global current_model
+    global verbose_mode
+    
+    if not model:
+        model = current_model
+    
+    # Read the full text from the file
+    with open(file_path, 'r', encoding='utf-8') as f:
+        full_text = f.read()
+    
+    words = full_text.split()
+    current_text_words = words
+
+    while len(current_text_words) > max_final_words:
+        if verbose_mode:
+            on_print(f"\n>>> Iteration: Processing {len(current_text_words)} words...", Fore.WHITE + Style.DIM)
+
+        # Determine the size of the summary for each chunk in this iteration
+        # We want the total summary to be smaller than the current text length
+        num_chunks_approx = math.ceil(len(current_text_words) / (chunk_size - overlap))
+        # Aim for summaries that are collectively about half the size of the current text
+        # but don't make individual summaries smaller than a reasonable minimum.
+        per_chunk_summary_words = max(25, (len(current_text_words) // 2) // num_chunks_approx)
+
+
+        chunks = []
+        start = 0
+        while start < len(current_text_words):
+            end = start + chunk_size
+            chunks.append(" ".join(current_text_words[start:end]))
+            start += chunk_size - overlap
+            if start >= len(current_text_words):
+                break
+
+        summaries = []
+        previous_summary = None # Keep track of the last summary
+        for i, chunk in enumerate(chunks):
+            if verbose_mode:
+                on_print(f"Processing chunk {i+1}/{len(chunks)} with {len(chunk.split())} words", Fore.WHITE + Style.DIM)
+            summary = summarize_chunk(chunk, model, per_chunk_summary_words, previous_summary=previous_summary, num_ctx=num_ctx)
+            summaries.append(summary)
+            previous_summary = summary # Update the previous summary for the next iteration
+
+        # The new text to be summarized is the concatenation of the summaries from this round
+        combined_summaries = " ".join(summaries)
+        current_text_words = combined_summaries.split()
+
+        if verbose_mode:
+            on_print(f"<<< Iteration Complete: {len(summaries)} summaries created, new word count is {len(current_text_words)}", Fore.WHITE + Style.DIM)
+            on_print(f"Current text after summarization: {combined_summaries[:100]}...", Fore.WHITE + Style.DIM)
+
+    final_summary = " ".join(current_text_words)
+    return final_summary
 
 def run():
     global current_collection_name
