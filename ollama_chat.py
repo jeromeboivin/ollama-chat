@@ -3598,7 +3598,7 @@ def render_tools(tools):
         tool_descriptions.append(tool_info)
     return "\n".join(tool_descriptions)
 
-def try_parse_json(json_str):
+def try_parse_json(json_str, verbose=False):
     """Helper function to attempt JSON parsing and return the result if successful."""
     result = None
 
@@ -3607,7 +3607,9 @@ def try_parse_json(json_str):
 
     try:
         result = json.loads(json_str)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        if verbose:
+            on_print(f"JSON parsing error: {e}", Fore.RED)
         pass
 
     return result
@@ -3619,7 +3621,7 @@ def extract_json(garbage_str):
         return []
 
     # First, try to parse the entire input as JSON directly
-    result = try_parse_json(garbage_str)
+    result = try_parse_json(garbage_str, verbose=verbose_mode)
     if result is not None:
         return result
     
@@ -3683,7 +3685,7 @@ def extract_json(garbage_str):
         # Attempt to load the JSON to verify it's correct
         if verbose_mode:
             on_print(f"Extracted JSON: '{json_str}'", Fore.WHITE + Style.DIM)
-        result = try_parse_json(json_str)
+        result = try_parse_json(json_str, verbose=verbose_mode)
         if result is not None:
             return result
         else:
@@ -3743,10 +3745,6 @@ def select_ollama_model_if_available(model_name):
     for model in models:
         if model["model"] == model_name:
             selected_model = model
-    
-            if "gemma" in selected_model:
-                no_system_role=True
-                on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
             if verbose_mode:
                 on_print(f"Selected model: {model_name}", Fore.WHITE + Style.DIM)
@@ -3859,10 +3857,6 @@ def prompt_for_ollama_model(default_model, current_model):
 
     # Use the chosen model
     selected_model = models[choice]['model']
-
-    if "gemma" in selected_model:
-        no_system_role=True
-        on_print("The selected model does not support the 'system' role. Merging the system message with the first user message.")
 
     if verbose_mode:
         on_print(f"Selected model: {selected_model}", Fore.WHITE + Style.DIM)
