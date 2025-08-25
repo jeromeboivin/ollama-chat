@@ -6,7 +6,7 @@ pywin32; platform_system == 'Windows'
 readline; platform_system != 'Windows'
 argparse
 pygments
-duckduckgo-search
+ddgs
 beautifulsoup4
 markdownify
 requests

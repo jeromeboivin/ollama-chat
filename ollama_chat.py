@@ -25,7 +25,7 @@ from datetime import date, datetime
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from markdownify import MarkdownConverter
@@ -43,6 +43,7 @@ APP_AUTHOR = ""
 APP_VERSION = "1.0.0"
 
 use_openai = False
+use_azure_openai = False
 no_system_role=False
 openai_client = None
 chroma_client = None
@@ -1617,6 +1618,12 @@ class DocumentIndexer:
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self.verbose = verbose
 
+        if verbose:
+            on_print(f"DocumentIndexer initialized with model: {self.model}", Fore.WHITE + Style.DIM)
+            on_print(f"Using collection: {self.collection.name}", Fore.WHITE + Style.DIM)
+            on_print(f"Verbose mode is {'on' if self.verbose else 'off'}", Fore.WHITE + Style.DIM)
+            on_print(f"Using embeddings model: {self.model}", Fore.WHITE + Style.DIM)
+
     def get_text_files(self):
         """
         Recursively find all .txt, .md, .tex files in the root folder.
@@ -1756,6 +1763,9 @@ class DocumentIndexer:
                             ollama_options = {}
                             if num_ctx:
                                 ollama_options["num_ctx"] = num_ctx
+                                
+                            if self.verbose:
+                                on_print(f"Generating embedding for chunk {chunk_id} using {self.model}", Fore.WHITE + Style.DIM)
 
                             response = ollama.embeddings(
                                 prompt=chunk,
@@ -1785,6 +1795,9 @@ class DocumentIndexer:
                         ollama_options = {}
                         if num_ctx:
                             ollama_options["num_ctx"] = num_ctx
+                            
+                        if self.verbose:
+                            on_print(f"Generating embedding for document {document_id} using {self.model}", Fore.WHITE + Style.DIM)
 
                         response = ollama.embeddings(
                             prompt=content,
@@ -2701,9 +2714,12 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         with open(temp_file_path, 'w', encoding='utf-8') as f:
             f.write(article['text'])
             additional_metadata[temp_file_path] = {'url': article['url']}
+            
+    if web_embedding_model is None or web_embedding_model == "":
+        web_embedding_model = embeddings_model
 
     # Index the articles in the vector database
-    document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model)
+    document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model, verbose=verbose_mode)
     document_indexer.index_documents(no_chunking_confirmation=True, additional_metadata=additional_metadata)
 
     # Remove the temporary folder and its contents
@@ -2873,7 +2889,7 @@ def edit_collection_metadata(collection_name):
     except:
         raise Exception(f"Collection {collection_name} not found")
 
-def prompt_for_vector_database_collection(prompt_create_new=True):
+def prompt_for_vector_database_collection(prompt_create_new=True, include_web_cache=False):
     global chroma_client
     global web_cache_collection_name
     global memory_collection_name
@@ -2893,8 +2909,16 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
         new_collection_desc = on_user_input("Enter a description for the new collection: ")
         return new_collection_name, new_collection_desc
 
-    # Filter out the web_cache_collection_name
-    filtered_collections = [collection for collection in collections if collection.name != web_cache_collection_name and collection.name != memory_collection_name]
+    # Filter out collections based on parameters
+    filtered_collections = []
+    for collection in collections:
+        # Always exclude memory collection
+        if collection.name == memory_collection_name:
+            continue
+        # Exclude web cache collection unless explicitly included
+        if collection.name == web_cache_collection_name and not include_web_cache:
+            continue
+        filtered_collections.append(collection)
 
     if not filtered_collections:
         on_print("No collections found", Fore.RED)
@@ -2912,7 +2936,9 @@ def prompt_for_vector_database_collection(prompt_create_new=True):
         else:
             collection_metadata = "No description"
 
-        on_print(f"{i}. {collection_name} - {collection_metadata}")
+        # Add indicator for web cache collection
+        cache_indicator = " (Web Cache)" if collection_name == web_cache_collection_name else ""
+        on_print(f"{i}. {collection_name}{cache_indicator} - {collection_metadata}")
 
     if prompt_create_new:
         # Propose to create a new collection
@@ -3092,6 +3118,9 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
                 on_print("Expanded query:", Fore.WHITE + Style.DIM)
                 on_print(question, Fore.WHITE + Style.DIM)
     
+    if verbose_mode:
+        on_print(f"Using query embeddings model: {query_embeddings_model}", Fore.WHITE + Style.DIM) 
+
     if query_embeddings_model is None:
         result = collection.query(
             query_texts=[question],
@@ -3132,32 +3161,12 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         enumerate(zip(metadatas, distances, documents, bm25_scores)),
         key=lambda x: x[1][3],  # Sort by BM25 score
         reverse=True
-    )[0:n_results * 2]
-
-    # Filter re-ranked results by asking Ollama if each result is useful
-    filtered_results = []
-    for idx, (metadata, distance, document, bm25_score) in reranked_results:
-        usefulness_prompt = f"Is the following document useful to answer the query '{initial_question}'?\n\nDocument:\n{document}\n\nAnswer by 'yes' or 'no'."
-        usefulness_response = ask_ollama("", usefulness_prompt, selected_model=thinking_model, no_bot_prompt=True, stream_active=False)
-
-        if thinking_model_reasoning_pattern:
-            _, reasoning_response = split_reasoning_and_final_response(usefulness_response, thinking_model_reasoning_pattern)
-            usefulness_response = reasoning_response
-
-        if verbose_mode:
-            on_print("Usefulness response:", Fore.WHITE + Style.DIM)
-            on_print(usefulness_response, Fore.WHITE + Style.DIM)
-        
-        if "yes" in usefulness_response.lower():
-            filtered_results.append((metadata, distance, document, bm25_score))
-
-        if len(filtered_results) >= n_results:
-            break
+    )[0:n_results]
 
     # Join all possible answers into one string
     answers = []
     answer_index = 0
-    for metadata, distance, document, bm25_score in filtered_results:
+    for idx, (metadata, distance, document, bm25_score) in reranked_results:
         if answer_distance_threshold > 0 and distance > answer_distance_threshold:
             if verbose_mode:
                 on_print("Skipping answer with distance: " + str(distance), Fore.WHITE + Style.DIM)
@@ -4068,6 +4077,7 @@ def run():
     global chroma_client
     global openai_client
     global use_openai
+    global use_azure_openai
     global no_system_role
     global prompt_template
     global verbose_mode
@@ -4089,6 +4099,7 @@ def run():
     global thinking_model
     global thinking_model_reasoning_pattern
     global number_of_documents_to_return_from_vector_db
+    global agent_crew_manager
     
     default_model = None
     prompt_template = None
@@ -4104,6 +4115,7 @@ def run():
     parser.add_argument('--docs-to-fetch-from-chroma', type=int, help="Number of documents to return from the vector database when querying for similar documents", default=number_of_documents_to_return_from_vector_db)
     parser.add_argument('--collection', type=str, help='ChromaDB collection name', default=None)
     parser.add_argument('--use-openai', type=bool, help='Use OpenAI API or Llama-CPP', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--use-azure-openai', type=bool, help='Use Azure OpenAI API', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--temperature', type=float, help='Temperature for OpenAI API', default=0.1)
     parser.add_argument('--disable-system-role', type=bool, help='Specify if the selected model does not support the system role, like Google Gemma models', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--prompt-template', type=str, help='Prompt template to use for Llama-CPP', default=None)
@@ -4129,7 +4141,7 @@ def run():
     parser.add_argument('--listening-port', type=int, help=f"Listening port for the current {__name__} instance", default=8000)
     parser.add_argument('--user-name', type=str, help='User name', default=None)
     parser.add_argument('--anonymous', type=bool, help='Do not use the user name from the environment variables', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--memory', type=str, help='Use memory manager for context management', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--memory', type=str, help='Use memory manager for context management', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--context-window', type=int, help='Ollama context window size, if not specified, the default value is used, which is 2048 tokens', default=None) 
     parser.add_argument('--auto-start', type=bool, help="Start the conversation automatically", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--tools', type=str, help="List of tools to activate and use in the conversation, separated by commas", default=None)
@@ -4139,6 +4151,7 @@ def run():
 
     preferred_collection_name = args.collection
     use_openai = args.use_openai
+    use_azure_openai = args.use_azure_openai
     chroma_client_host = args.chroma_host
     chroma_client_port = args.chroma_port
     chroma_db_path = args.chroma_path
@@ -4242,17 +4255,56 @@ def run():
     auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or auto_start_conversation
     system_prompt = chatbot["system_prompt"]
     use_openai = use_openai or (hasattr(chatbot, 'use_openai') and getattr(chatbot, 'use_openai'))
+    use_azure_openai = use_azure_openai or (hasattr(chatbot, 'use_azure_openai') and getattr(chatbot, 'use_azure_openai'))
     if "preferred_model" in chatbot:
         default_model = chatbot["preferred_model"]
     if preferred_model:
         default_model = preferred_model
 
-    if not use_openai:
+    if not use_openai and not use_azure_openai:
         # If default model does not contain ":", append ":latest" to the model name
         if ":" not in default_model:
             default_model += ":latest"
 
         selected_model = select_ollama_model_if_available(default_model)
+    elif use_azure_openai:
+        from openai import AzureOpenAI
+        
+        # Get API key from environment variable
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        if not api_key:
+            on_print("No Azure OpenAI API key found in the environment variables, make sure to set the AZURE_OPENAI_API_KEY.", Fore.RED)
+            use_azure_openai = False
+        else:
+            on_print("Azure OpenAI API key found in the environment variables, redirecting to Azure OpenAI API.", Fore.WHITE + Style.DIM)
+            azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+
+            if not azure_endpoint:
+                on_print("No Azure OpenAI endpoint found in the environment variables, make sure to set the AZURE_OPENAI_ENDPOINT.", Fore.RED)
+                use_azure_openai = False
+
+            deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+            if not deployment:
+                on_print("No Azure OpenAI deployment found in the environment variables, make sure to set the AZURE_OPENAI_DEPLOYMENT.", Fore.RED)
+                use_azure_openai = False
+
+            if use_azure_openai:
+                if verbose_mode:
+                    on_print("Using Azure OpenAI API, endpoint: " + azure_endpoint + ", deployment: " + deployment, Fore.WHITE + Style.DIM)
+
+                openai_client = AzureOpenAI(
+                    api_version="2024-02-15-preview",
+                    azure_endpoint=azure_endpoint,
+                    api_key=api_key,
+                    azure_deployment=deployment
+                )
+                
+                selected_model = deployment
+                current_model = selected_model
+                use_openai = True
+                stream_active = False
+                syntax_highlighting = True
     else:
         from openai import OpenAI
 
@@ -4276,6 +4328,7 @@ def run():
 
     if selected_model is None:
         selected_model = prompt_for_model(default_model, current_model)
+        current_model = selected_model
         if selected_model is None:
             return
 
@@ -4678,7 +4731,7 @@ def run():
                 collection_name = user_input.split("/deletecollection")[1].strip()
 
             if not collection_name:
-                collection_name, _ = prompt_for_vector_database_collection(prompt_create_new=False)
+                collection_name, _ = prompt_for_vector_database_collection(prompt_create_new=False, include_web_cache=True)
 
             if not collection_name:
                 continue
@@ -4798,7 +4851,7 @@ def run():
             
                 if alternate_bot_response:
                     on_print(colorize(alternate_bot_response), Fore.CYAN, "\rAlt: " if interactive_mode else "")
-            elif not use_openai and len(selected_tools) > 0:
+            elif not use_openai and not use_azure_openai and len(selected_tools) > 0:
                 # Ollama cannot stream when tools are used
                 on_print(bot_response, Style.RESET_ALL, "\rBot: " if interactive_mode else "")
 
