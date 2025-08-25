@@ -4699,6 +4699,17 @@ def run():
                                 initial_message = {"role": "system", "content": system_prompt}
                                 break
 
+                        # Reformat each entry tool_calls.function.arguments to be a valid dictionary, unless it's already a dictionary
+                        for entry in conversation:
+                            if "tool_calls" in entry:
+                                for tool_call in entry["tool_calls"]:
+                                    if "function" in tool_call and "arguments" in tool_call["function"]:
+                                        if isinstance(tool_call["function"]["arguments"], str):
+                                            try:
+                                                tool_call["function"]["arguments"] = json.loads(tool_call["function"]["arguments"])
+                                            except json.JSONDecodeError:
+                                                pass
+
                     on_print(f"Conversation loaded from {file_path}", Fore.WHITE + Style.DIM)
                 else:
                     on_print(f"Conversation file '{file_path}' not found.", Fore.RED)
