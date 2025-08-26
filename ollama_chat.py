@@ -64,6 +64,7 @@ thinking_model = None
 thinking_model_reasoning_pattern = None
 memory_manager = None
 agent_crew_manager = None
+think_mode_on = False
 
 other_instance_url = None
 listening_port = None
@@ -87,7 +88,7 @@ COMMANDS = [
     "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/thinking_model", "/model2", "/tools", "/load", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
-    "/cb", "/file", "/quit", "/exit", "/bye"
+    "/think", "/cb", "/file", "/quit", "/exit", "/bye"
 ]
 
 def completer(text, state):
@@ -142,6 +143,19 @@ def on_llm_token_response(token, style="", prompt=""):
     for plugin in plugins:
         if hasattr(plugin, "on_llm_token_response") and callable(getattr(plugin, "on_llm_token_response")):
             plugin_response = getattr(plugin, "on_llm_token_response")(token)
+            function_handled = function_handled or plugin_response
+
+    if not function_handled:
+        if style or prompt:
+            sys.stdout.write(f"{style}{prompt}{token}")
+        else:
+            sys.stdout.write(token)
+
+def on_llm_thinking_token_response(token, style="", prompt=""):
+    function_handled = False
+    for plugin in plugins:
+        if hasattr(plugin, "on_llm_thinking_token_response") and callable(getattr(plugin, "on_llm_thinking_token_response")):
+            plugin_response = getattr(plugin, "on_llm_thinking_token_response")(token)
             function_handled = function_handled or plugin_response
 
     if not function_handled:
@@ -3422,7 +3436,7 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
     
     return bot_response
 
-def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None, num_ctx=None):
+def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, prompt="Bot", prompt_color=None, num_ctx=None, use_think_mode=False):
     global no_system_role
     global syntax_highlighting
     global interactive_mode
@@ -3430,6 +3444,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     global plugins
     global alternate_model
     global use_openai
+    global think_mode_on
 
     # Some models do not support the "system" role, merge the system message with the first user message
     if no_system_role and len(conversation) > 1 and conversation[0]["role"] == "system" and not conversation[0]["content"] is None and not conversation[1]["content"] is None:
@@ -3479,10 +3494,16 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             return None
 
     bot_response = ""
+    bot_thinking_response = ""
     bot_response_is_tool_calls = False
     ollama_options = {"temperature": temperature}
     if num_ctx:
         ollama_options["num_ctx"] = num_ctx
+
+    think = use_think_mode or think_mode_on
+    
+    if verbose_mode and think:
+        on_print("Thinking...", Fore.WHITE + Style.DIM)
 
     try:
         stream = ollama.chat(
@@ -3491,7 +3512,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
             # If tools are selected, deactivate the stream to get the full response (Ollama API limitation)
             stream=False if len(tools) > 0 else stream_active,
             options=ollama_options,
-            tools=tools
+            tools=tools,
+            think=think
         )
     except ollama.ResponseError as e:
         if "does not support tools" in str(e):
@@ -3528,9 +3550,18 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
                     chunk_count += 1
 
+                    thinking_delta = ""
+                    if think:
+                        thinking_delta = chunk['message'].get('thinking', '')
+                        
+                        if thinking_delta is None:
+                            thinking_delta = ""
+                        else:
+                            bot_thinking_response += thinking_delta
+
                     delta = chunk['message'].get('content', '')
 
-                    if len(bot_response) == 0:
+                    if len(bot_response) == 0 and len(thinking_delta) == 0:
                         delta = delta.strip()
 
                         if len(delta) == 0:
@@ -3541,8 +3572,12 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                     if syntax_highlighting and interactive_mode:
                         print_spinning_wheel(chunk_count)
                     else:
-                        on_llm_token_response(delta)
+                        if think and len(thinking_delta) > 0:
+                            on_llm_thinking_token_response(thinking_delta, Fore.WHITE + Style.DIM)
+                        else:
+                            on_llm_token_response(delta, Fore.WHITE + Style.NORMAL)
                         on_stdout_flush()
+
                 on_llm_token_response("\n")
                 on_stdout_flush()
             else:
@@ -3556,6 +3591,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                     bot_response = tool_calls
                     bot_response_is_tool_calls = True
                 else:
+                    if think:
+                        bot_thinking_response = stream['message'].get('thinking', '')
                     bot_response = stream['message']['content']
         except KeyboardInterrupt:
             stream.close()
@@ -3586,9 +3623,9 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     else:
         return None
 
-def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, num_ctx=None):
+def ask_ollama(system_prompt, user_input, selected_model, temperature=0.1, prompt_template=None, tools=[], no_bot_prompt=False, stream_active=True, num_ctx=None, use_think_mode=False):
     conversation = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
-    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active, num_ctx=num_ctx)
+    return ask_ollama_with_conversation(conversation, selected_model, temperature, prompt_template, tools, no_bot_prompt, stream_active, num_ctx=num_ctx, use_think_mode=use_think_mode)
 
 def find_latest_user_message(conversation):
     # Iterate through the conversation list in reverse order
@@ -4100,6 +4137,7 @@ def run():
     global thinking_model_reasoning_pattern
     global number_of_documents_to_return_from_vector_db
     global agent_crew_manager
+    global think_mode_on
     
     default_model = None
     prompt_template = None
@@ -4818,6 +4856,17 @@ def run():
             else:
                 user_input = user_input.split("/file")[0].strip()
                 image_path = file_path
+
+        if user_input == "/think":
+            if not think_mode_on:
+                think_mode_on = True
+                if verbose_mode:
+                    on_print("Think mode activated.", Fore.WHITE + Style.DIM)
+            else:
+                think_mode_on = False
+                if verbose_mode:
+                    on_print("Think mode deactivated.", Fore.WHITE + Style.DIM)
+            continue
 
         # If user input starts with '/' and is not a command, ignore it.
         if user_input.startswith('/') and not user_input.startswith('//'):
