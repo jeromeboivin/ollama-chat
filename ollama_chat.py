@@ -4721,7 +4721,13 @@ def run():
 
         if user_input == "/model":
             thinking_model_is_same = thinking_model == current_model
-            selected_model = prompt_for_model(default_model, current_model)
+            
+            if use_azure_openai:
+                # For Azure OpenAI, just ask for the deployment name
+                selected_model = on_user_input(f"Enter Azure OpenAI deployment name [{current_model}]: ").strip() or current_model
+            else:
+                selected_model = prompt_for_model(default_model, current_model)
+            
             current_model = selected_model
 
             if thinking_model_is_same:
@@ -4755,7 +4761,12 @@ def run():
             continue
 
         if user_input == "/model2":
-            alternate_model = prompt_for_model(default_model, current_model)
+            if use_azure_openai:
+                # For Azure OpenAI, just ask for the deployment name
+                current_alt = alternate_model if alternate_model else current_model
+                alternate_model = on_user_input(f"Enter Azure OpenAI deployment name for alternate model [{current_alt}]: ").strip() or current_alt
+            else:
+                alternate_model = prompt_for_model(default_model, current_model)
             continue
 
         if user_input == "/tools":
