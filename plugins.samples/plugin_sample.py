@@ -7,7 +7,7 @@ class PluginSample:
 
     def set_web_crawler(self, web_crawler_class):
         """
-        Set the web crawler class to be used by the plugin.
+        Optional method to set the web crawler class to be used by the plugin.
 
         :param web_crawler_class: The web crawler class to be used.
         """
@@ -15,7 +15,7 @@ class PluginSample:
 
     def on_user_input(self, input_prompt):
         """
-        Handle user input before it is processed by the main program.
+        Optional method to handle user input before it is processed by the main program.
 
         :param input_prompt: The user input prompt.
         :return: Modified user input prompt or None.
@@ -25,7 +25,7 @@ class PluginSample:
 
     def on_print(self, message):
         """
-        Handle print messages before they are printed to the console.
+        Optional method to handle print messages before they are printed to the console.
 
         :param message: The message to be printed.
         :return: True if the message was handled, False otherwise.
@@ -36,7 +36,7 @@ class PluginSample:
 
     def on_stdout_write(self, message):
         """
-        Handle stdout write messages before they are written to the console.
+        Optional method to handle stdout write messages before they are written to the console.
 
         :param message: The message to be written to stdout.
         :return: True if the message was handled, False otherwise.
@@ -47,7 +47,7 @@ class PluginSample:
 
     def on_llm_token_response(self, token):
         """
-        Handle LLM token responses before they are written to the console.
+        Optional method to handle LLM token responses before they are written to the console.
 
         :param token: The LLM token response.
         :return: True if the token response was handled, False otherwise.
@@ -58,7 +58,7 @@ class PluginSample:
 
     def on_prompt(self, prompt):
         """
-        Handle prompts before they are written to the console.
+        Optional method to handle prompts before they are written to the console.
 
         :param prompt: The prompt to be written.
         :return: True if the prompt was handled, False otherwise.
@@ -69,7 +69,7 @@ class PluginSample:
 
     def on_stdout_flush(self):
         """
-        Handle stdout flush events before they are flushed to the console.
+        Optional method to handle stdout flush events before they are flushed to the console.
 
         :return: True if the flush event was handled, False otherwise.
         """
@@ -80,7 +80,7 @@ class PluginSample:
 
     def stop_generation(self):
         """
-        Determine whether to stop the response generation.
+        Optional method to determine whether to stop the response generation.
 
         :return: True to stop generation, False otherwise.
         """
@@ -92,7 +92,7 @@ class PluginSample:
 
     def on_llm_response(self, response):
         """
-        Handle LLM responses before they are processed by the main program.
+        Optional method to handle LLM responses before they are processed by the main program.
 
         :param response: The LLM response.
         :return: True if the response was handled, False otherwise.
@@ -103,7 +103,7 @@ class PluginSample:
 
     def on_user_input_done(self, user_input, verbose_mode=False):
         """
-        Handle user input after it is processed by the main program.
+        Optional method to handle user input after it is processed by the main program.
 
         :param user_input: The user input.
         :param verbose_mode: Whether verbose mode is enabled.
@@ -114,7 +114,7 @@ class PluginSample:
 
     def on_exit(self):
         """
-        Handle cleanup tasks before the program exits.
+        Optional method to handle cleanup tasks before the program exits.
 
         :return: None
         """
@@ -123,7 +123,7 @@ class PluginSample:
 
     def get_tool_definition(self):
         """
-        Provide a custom tool definition for the plugin.
+        Optional method to provide a custom tool definition for the plugin.
 
         :return: A dictionary representing the tool definition.
         """
