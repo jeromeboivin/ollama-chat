@@ -4221,6 +4221,7 @@ def run():
 
     # If specified as script named arguments, use the provided ChromaDB client host (--chroma-host) and port (--chroma-port)
     parser = argparse.ArgumentParser(description='Run the Ollama chatbot.')
+    parser.add_argument('--list-tools', action='store_true', help='List available tools and exit')
     parser.add_argument('--chroma-path', type=str, help='ChromaDB database path', default=None)
     parser.add_argument('--chroma-host', type=str, help='ChromaDB client host', default="localhost")
     parser.add_argument('--chroma-port', type=int, help='ChromaDB client port', default=8000)
@@ -4260,6 +4261,52 @@ def run():
     parser.add_argument('--memory-collection-name', type=str, help="Name of the memory collection to use for context management", default=memory_collection_name)
     parser.add_argument('--long-term-memory-file', type=str, help="Long-term memory file name", default=long_term_memory_file)
     args = parser.parse_args()
+
+    plugins_folder = args.plugins_folder
+    verbose_mode = args.verbose
+    
+    # Discover plugins before listing tools
+    if args.list_tools:
+        # Load plugins first
+        global plugins
+        plugins = discover_plugins(plugins_folder)
+        if verbose_mode:
+            print(f"\nDiscovered {len(plugins)} plugins")
+        
+        tools = get_available_tools()
+        print("\nAvailable tools:")
+        
+        # Split tools into built-in and plugin tools
+        builtin_tools = [tool for tool in tools if not any(pt['function']['name'] == tool['function']['name'] for p in plugins for pt in ([p.get_tool_definition()] if hasattr(p, 'get_tool_definition') and callable(getattr(p, 'get_tool_definition')) else []))]
+        plugin_tools = [tool for tool in tools if tool not in builtin_tools]
+        
+        # Print built-in tools
+        if builtin_tools:
+            print("\nBuilt-in tools:")
+            for tool in builtin_tools:
+                print(f"\n{tool['function']['name']}:")
+                print(f"  Description: {tool['function']['description']}")
+                if 'parameters' in tool['function']:
+                    if 'properties' in tool['function']['parameters']:
+                        print("  Parameters:")
+                        for param_name, param_info in tool['function']['parameters']['properties'].items():
+                            required = param_name in tool['function']['parameters'].get('required', [])
+                            print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
+        
+        # Print plugin tools
+        if plugin_tools:
+            print("\nPlugin tools:")
+            for tool in plugin_tools:
+                print(f"\n{tool['function']['name']}:")
+                print(f"  Description: {tool['function']['description']}")
+                if 'parameters' in tool['function']:
+                    if 'properties' in tool['function']['parameters']:
+                        print("  Parameters:")
+                        for param_name, param_info in tool['function']['parameters']['properties'].items():
+                            required = param_name in tool['function']['parameters'].get('required', [])
+                            print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
+        
+        sys.exit(0)
 
     preferred_collection_name = args.collection
     use_openai = args.use_openai
