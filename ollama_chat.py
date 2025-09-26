@@ -1667,7 +1667,41 @@ class DocumentIndexer:
             except:
                 return None
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True):
+    def extract_text_between_strings(self, content, start_string, end_string):
+        """
+        Extract text between two specified strings.
+        
+        :param content: The full text content.
+        :param start_string: The string marking the start of extraction.
+        :param end_string: The string marking the end of extraction.
+        :return: The extracted text, or the full content if strings are not found.
+        """
+        if not start_string or not end_string:
+            return content
+            
+        start_index = content.find(start_string)
+        if start_index == -1:
+            if self.verbose:
+                on_print(f"Start string '{start_string}' not found, using full content", Fore.YELLOW)
+            return content
+            
+        # Move past the start string
+        start_index += len(start_string)
+        
+        end_index = content.find(end_string, start_index)
+        if end_index == -1:
+            if self.verbose:
+                on_print(f"End string '{end_string}' not found after start string, using content from start string to end", Fore.YELLOW)
+            return content[start_index:]
+            
+        extracted_text = content[start_index:end_index]
+        
+        if self.verbose:
+            on_print(f"Extracted {len(extracted_text)} characters between '{start_string}' and '{end_string}'", Fore.WHITE + Style.DIM)
+            
+        return extracted_text
+
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True, extract_start=None, extract_end=None):
         """
         Index all text files in the root folder.
         
@@ -1676,11 +1710,30 @@ class DocumentIndexer:
         :param split_paragraphs: Whether to split markdown content into paragraphs.
         :param additional_metadata: Optional dictionary to pass additional metadata by file name.
         :param skip_existing: Whether to skip indexing if a document/chunk with the same ID already exists.
+        :param extract_start: Optional string marking the start of the text to extract for embedding computation.
+        :param extract_end: Optional string marking the end of the text to extract for embedding computation.
         """
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
             on_print("Large documents will be chunked into smaller pieces for indexing.")
             allow_chunks = on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
+
+        # Ask the user for extraction strings if not provided
+        if extract_start is None and extract_end is None:
+            on_print("\nOptional: You can extract only a specific part of each document for embedding computation.")
+            on_print("This allows you to focus on relevant sections while still storing the full document.")
+            use_extraction = on_user_input("Do you want to extract specific text sections for embedding? [y/n]: ").lower() in ['y', 'yes']
+            
+            if use_extraction:
+                extract_start = on_user_input("Enter the start string (text that marks the beginning of the section): ").strip()
+                extract_end = on_user_input("Enter the end string (text that marks the end of the section): ").strip()
+                
+                if not extract_start or not extract_end:
+                    on_print("Warning: Empty start or end string provided. Text extraction will be disabled.", Fore.YELLOW)
+                    extract_start = None
+                    extract_end = None
+                else:
+                    on_print(f"Text extraction enabled: extracting content between '{extract_start}' and '{extract_end}'", Fore.GREEN)
 
         if allow_chunks:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -1747,18 +1800,32 @@ class DocumentIndexer:
                 if additional_metadata and file_path in additional_metadata:
                     file_metadata.update(additional_metadata[file_path])
 
+                # Extract text for embedding if start and end strings are provided
+                embedding_content = content
+                if extract_start and extract_end:
+                    embedding_content = self.extract_text_between_strings(content, extract_start, extract_end)
+                    # Add metadata to indicate partial extraction was used
+                    file_metadata['extraction_used'] = True
+                    file_metadata['extract_start'] = extract_start
+                    file_metadata['extract_end'] = extract_end
+                    file_metadata['extracted_length'] = len(embedding_content)
+                    file_metadata['original_length'] = len(content)
+
                 if allow_chunks:
                     chunks = []
+                    # Use embedding_content for chunking (which may be extracted text)
+                    content_to_chunk = embedding_content
+                    
                     # Split Markdown files into sections if needed
                     if is_html(file_path):
                         # Convert to Markdown before splitting
-                        markdown_splitter = MarkdownSplitter(extract_text_from_html(content), split_paragraphs=split_paragraphs)
+                        markdown_splitter = MarkdownSplitter(extract_text_from_html(content_to_chunk), split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
                     elif is_markdown(file_path):
-                        markdown_splitter = MarkdownSplitter(content, split_paragraphs=split_paragraphs)
+                        markdown_splitter = MarkdownSplitter(content_to_chunk, split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
                     else:
-                        chunks = text_splitter.split_text(content)
+                        chunks = text_splitter.split_text(content_to_chunk)
                     
                     for i, chunk in enumerate(chunks):
                         chunk_id = f"{document_id}_{i}"
@@ -1771,7 +1838,7 @@ class DocumentIndexer:
                                     on_print(f"Skipping existing chunk: {chunk_id}", Fore.WHITE + Style.DIM)
                                 continue
                         
-                        # Embed the content
+                        # Embed the chunk content (from extracted text)
                         embedding = None
                         if self.model:
                             ollama_options = {}
@@ -1779,7 +1846,8 @@ class DocumentIndexer:
                                 ollama_options["num_ctx"] = num_ctx
                                 
                             if self.verbose:
-                                on_print(f"Generating embedding for chunk {chunk_id} using {self.model}", Fore.WHITE + Style.DIM)
+                                embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
+                                on_print(f"Generating embedding for chunk {chunk_id} using {self.model} ({embedding_info})", Fore.WHITE + Style.DIM)
 
                             response = ollama.embeddings(
                                 prompt=chunk,
@@ -1788,22 +1856,26 @@ class DocumentIndexer:
                             )
                             embedding = response["embedding"]
                         
-                        # Upsert the chunk with additional metadata if available
+                        # Store the original full document content as the document, but use extracted content for embedding
+                        chunk_metadata = file_metadata.copy()
+                        chunk_metadata['chunk_index'] = i
+                        
+                        # Upsert the chunk with full document content but embedding from extracted text
                         if embedding:
                             self.collection.upsert(
-                                documents=[chunk],
-                                metadatas=[file_metadata],
+                                documents=[chunk],  # Store the actual chunk content
+                                metadatas=[chunk_metadata],
                                 ids=[chunk_id],
-                                embeddings=[embedding]
+                                embeddings=[embedding]  # Embedding computed from extracted text
                             )
                         else:
                             self.collection.upsert(
                                 documents=[chunk],
-                                metadatas=[file_metadata],
+                                metadatas=[chunk_metadata],
                                 ids=[chunk_id]
                             )
                 else:
-                    # Embed the whole document (already checked for skip_existing above)
+                    # Embed the extracted content but store the whole document
                     embedding = None
                     if self.model:
                         ollama_options = {}
@@ -1811,26 +1883,28 @@ class DocumentIndexer:
                             ollama_options["num_ctx"] = num_ctx
                             
                         if self.verbose:
-                            on_print(f"Generating embedding for document {document_id} using {self.model}", Fore.WHITE + Style.DIM)
+                            embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
+                            on_print(f"Generating embedding for document {document_id} using {self.model} ({embedding_info})", Fore.WHITE + Style.DIM)
 
+                        # Use extracted content for embedding computation
                         response = ollama.embeddings(
-                            prompt=content,
+                            prompt=embedding_content,
                             model=self.model,
                             options=ollama_options
                         )
                         embedding = response["embedding"]
 
-                    # Upsert the document with additional metadata if available
+                    # Store the full document content but use embedding from extracted text
                     if embedding:
                         self.collection.upsert(
-                            documents=[content],
+                            documents=[content],  # Store full document content
                             metadatas=[file_metadata],
                             ids=[document_id],
-                            embeddings=[embedding]
+                            embeddings=[embedding]  # Embedding computed from extracted text
                         )
                     else:
                         self.collection.upsert(
-                            documents=[content],
+                            documents=[content],  # Store full document content
                             metadatas=[file_metadata],
                             ids=[document_id]
                         )
@@ -4301,7 +4375,7 @@ def run():
 
     if not use_openai and not use_azure_openai:
         # If default model does not contain ":", append ":latest" to the model name
-        if ":" not in default_model:
+        if default_model and ":" not in default_model:
             default_model += ":latest"
 
         selected_model = select_ollama_model_if_available(default_model)
@@ -4647,7 +4721,13 @@ def run():
 
         if user_input == "/model":
             thinking_model_is_same = thinking_model == current_model
-            selected_model = prompt_for_model(default_model, current_model)
+            
+            if use_azure_openai:
+                # For Azure OpenAI, just ask for the deployment name
+                selected_model = on_user_input(f"Enter Azure OpenAI deployment name [{current_model}]: ").strip() or current_model
+            else:
+                selected_model = prompt_for_model(default_model, current_model)
+            
             current_model = selected_model
 
             if thinking_model_is_same:
@@ -4681,7 +4761,12 @@ def run():
             continue
 
         if user_input == "/model2":
-            alternate_model = prompt_for_model(default_model, current_model)
+            if use_azure_openai:
+                # For Azure OpenAI, just ask for the deployment name
+                current_alt = alternate_model if alternate_model else current_model
+                alternate_model = on_user_input(f"Enter Azure OpenAI deployment name for alternate model [{current_alt}]: ").strip() or current_alt
+            else:
+                alternate_model = prompt_for_model(default_model, current_model)
             continue
 
         if user_input == "/tools":
