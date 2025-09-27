@@ -2180,59 +2180,148 @@ Assistant: """
         else:
             return "direct_response", response, None
     
-    def process_task(self, task, max_tool_iterations=3):
-        """
-        Process a task, using tools when necessary.
+    def _identify_subtasks(self, task):
+        """Break down a complex task into subtasks."""
+        subtask_prompt = f"""Analyze this task and break it down into specific subtasks if needed: "{task}"
+
+Available tools:
+{self._format_tools_for_prompt()}
+
+If this task can be completed directly without breaking it down, respond with:
+DIRECT_TASK: The task is simple enough to handle directly.
+
+If the task needs to be broken down, respond with:
+SUBTASKS:
+1. First subtask
+2. Second subtask
+3. Third subtask
+...
+
+Consider what information or steps are needed to complete the main task thoroughly."""
+
+        response = self._query_llm(subtask_prompt)
         
-        Parameters:
-        - task: The task to complete
-        - max_tool_iterations: Maximum number of tool use attempts
+        if "DIRECT_TASK:" in response:
+            self._log("Task identified as direct - no subtasks needed")
+            return []
         
-        Returns:
-        - Final response to the task
-        """
-        self._log(f"Processing task: {task}")
+        # Extract subtasks
+        subtasks = []
+        lines = response.split('\n')
+        capture_subtasks = False
         
-        current_message = task
+        for line in lines:
+            line = line.strip()
+            if line == "SUBTASKS:":
+                capture_subtasks = True
+                continue
+            elif capture_subtasks and line:
+                # Remove numbering and bullets
+                import re
+                clean_subtask = re.sub(r'^\d+\.\s*', '', line)
+                clean_subtask = re.sub(r'^[-*]\s*', '', clean_subtask)
+                if clean_subtask:
+                    subtasks.append(clean_subtask)
+        
+        self._log(f"Identified {len(subtasks)} subtasks: {subtasks}")
+        return subtasks
+    
+    def _execute_subtask(self, subtask, context="", max_tool_iterations=2):
+        """Execute a single subtask with tool support."""
+        self._log(f"Executing subtask: {subtask}")
+        
+        # Prepare the subtask message with context
+        if context:
+            message = f"""Context from previous subtasks:
+{context}
+
+Current subtask to complete: {subtask}
+
+Use available tools if needed, or provide a direct response."""
+        else:
+            message = f"Complete this subtask: {subtask}"
+        
         tool_iterations = 0
+        current_message = message
         
         while tool_iterations < max_tool_iterations:
-            # Get response from LLM
             response = self._query_llm(current_message)
-            
-            # Parse the response
             response_type, content, tool_input = self._parse_response(response)
             
             if response_type == "direct_response":
-                # LLM provided a direct answer
-                self._log("Task completed with direct response")
+                self._log(f"Subtask completed: {subtask}")
                 return content
             
             elif response_type == "tool_use":
-                # LLM wants to use a tool
                 tool_name = content
-                self._log(f"Using tool: {tool_name}")
+                self._log(f"Subtask using tool: {tool_name}")
                 
-                # Execute the tool
                 tool_result = self._execute_tool(tool_name, tool_input)
                 
-                # Prepare the next message with tool result
-                current_message = f"""Previous request: {current_message}
+                current_message = f"""Subtask: {subtask}
+Context: {context}
 
 Tool used: {tool_name}
 Tool result: {tool_result}
 
-Please provide a final response based on this information, or use another tool if needed."""
+Please complete the subtask based on this information."""
                 
                 tool_iterations += 1
-            
             else:
-                # Fallback
                 return response
         
-        # If we've reached max iterations, ask for final response
-        self._log("Max tool iterations reached, requesting final response")
-        final_response = self._query_llm(f"{current_message}\n\nPlease provide a final response without using any more tools.")
+        # Fallback if max iterations reached
+        final_response = self._query_llm(f"{current_message}\n\nPlease provide a final response for this subtask without using more tools.")
+        return final_response
+    
+    def process_task(self, task, max_tool_iterations=3):
+        """
+        Process a task by identifying subtasks and executing them systematically.
+        
+        Parameters:
+        - task: The task to complete
+        - max_tool_iterations: Maximum number of tool use attempts per subtask
+        
+        Returns:
+        - Final comprehensive response to the task
+        """
+        self._log(f"Processing task: {task}")
+        
+        # Step 1: Identify if task needs to be broken down
+        subtasks = self._identify_subtasks(task)
+        
+        if not subtasks:
+            # Task is simple enough to handle directly
+            return self._execute_subtask(task, max_tool_iterations=max_tool_iterations)
+        
+        # Step 2: Execute each subtask in sequence
+        subtask_results = []
+        accumulated_context = ""
+        
+        for i, subtask in enumerate(subtasks):
+            self._log(f"Processing subtask {i+1}/{len(subtasks)}: {subtask}")
+            
+            # Execute subtask with context from previous results
+            result = self._execute_subtask(subtask, accumulated_context, max_tool_iterations)
+            subtask_results.append(result)
+            
+            # Update context for next subtask
+            accumulated_context += f"\nSubtask {i+1} ({subtask}): {result}"
+        
+        # Step 3: Synthesize all subtask results into final response
+        self._log("Synthesizing final response from all subtasks")
+        
+        synthesis_prompt = f"""Original task: {task}
+
+I have completed the following subtasks with these results:
+
+{chr(10).join([f"Subtask {i+1}: {subtasks[i]}\nResult: {subtask_results[i]}" for i in range(len(subtasks))])}
+
+Please provide a comprehensive final response to the original task using all the information gathered from the subtasks. Make sure to address the main task completely and coherently."""
+        
+        final_response = self._query_llm(synthesis_prompt)
+        self._log("Task processing completed")
+        
         return final_response
 
 class AgentCrewManager:
@@ -4517,6 +4606,16 @@ def run():
                 selected_tools = []
             selected_tools = select_tool_by_name(get_available_tools(), selected_tools, "instantiate_agent_with_tools_and_process_task")
             bot_response = ask_ollama("You are an agent manager. Given a task, call the function instantiate_agent_with_tools_and_process_task to create and run an agent to accomplish the task.", "Task: " + user_input, current_model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx, tools=selected_tools, use_think_mode=think_mode_on)
+
+            # Ask Ollama if the task was completed successfully or not. The response should be either "Task completed successfully." or "New task: <task description>"
+            follow_up_response = ask_ollama("You are an agent manager. Given the report from an agent about a task, respond with either 'Task completed successfully.' if the task was completed successfully, or 'New task: <task description>' if the task was not completed successfully and a new task needs to be created to accomplish the original task.", bot_response, current_model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
+            if re.search(r'Task completed successfully', follow_up_response, re.IGNORECASE):
+                on_print("Agent task completed successfully.", Fore.GREEN)
+            elif re.search(r'New task:\s*(.*)', follow_up_response, re.IGNORECASE):
+                new_task = re.search(r'New task:\s*(.*)', follow_up_response, re.IGNORECASE).group(1)
+                bot_response = ask_ollama("You are an agent manager. Given a task, call the function instantiate_agent_with_tools_and_process_task to create and run an agent to accomplish the task.", "Task: " + new_task, current_model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx, tools=selected_tools, use_think_mode=think_mode_on)
+            else:
+                on_print("Agent task response not recognized.", Fore.RED)
 
         if "/cot" in user_input:
             user_input = user_input.replace("/cot", "").strip()
