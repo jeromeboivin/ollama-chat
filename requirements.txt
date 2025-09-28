@@ -20,3 +20,4 @@ appdirs
 lxml
 python-pptx
 python-docx
+markdown

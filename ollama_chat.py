@@ -85,7 +85,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 
 # List of available commands to autocomplete
 COMMANDS = [
-    "/agent", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
+    "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/thinking_model", "/model2", "/tools", "/load", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
     "/think", "/cb", "/file", "/quit", "/exit", "/bye"
@@ -320,9 +320,13 @@ def get_available_tools():
                     "agent_name": {
                         "type": "string",
                         "description": "A unique name for the agent that will be used for instantiation."
+                    },
+                    "agent_description": {
+                        "type": "string",
+                        "description": "A brief description of the agent's purpose and capabilities."
                     }
                 },
-                "required": ["task", "system_prompt", "tools", "agent_name"]
+                "required": ["task", "system_prompt", "tools", "agent_name", "agent_description"]
             }
         }
     },
@@ -352,9 +356,13 @@ def get_available_tools():
                     "agent_name": {
                         "type": "string",
                         "description": "A unique name for the agent that will be used for instantiation."
+                    },
+                    "agent_description": {
+                        "type": "string",
+                        "description": "A brief description of the agent's purpose and capabilities."
                     }
                 },
-                "required": ["system_prompt", "tools", "agent_name"]
+                "required": ["system_prompt", "tools", "agent_name", "agent_description"]
             }
         }
     },
@@ -1923,317 +1931,209 @@ def split_reasoning_and_final_response(response, thinking_model_reasoning_patter
             final_response = response.replace(reasoning, "").strip()
 
         return reasoning, final_response
-class AIRefinementAgent:
-    def __init__(self, 
-                 initial_content: str,
-                 thinking_model: str,
-                 rewrite_model: str,
-                 thinking_model_reasoning_pattern: str = None,
-                 target_score: int = 9, 
-                 max_iterations: int = 10, 
-                 system_prompt: str = "You are an AI writing assistant.",
-                 temperature: float = 0.7,
-                 num_ctx: int = 4096,
-                 verbose: bool = False):
+
+class Agent:
+    # Static registry to store all agents
+    agent_registry = {}
+
+    def __init__(self, name, description, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=3, tools=None, verbose=False, num_ctx=None, thinking_model_reasoning_pattern=None):
         """
-        Initialize the AI Refinement Agent.
+        Initialize the Agent with a name, system prompt, tools, and other parameters.
 
         Parameters:
-        - initial_content: The starting text.
-        - thinking_model: The LLM model used for reviewing.
-        - rewrite_model: The LLM model used for rewriting.
-        - thinking_model_reasoning_pattern: A regular expression pattern to match the reasoning pattern in the thinking model's responses.
-        - target_score: The quality score (1-10) at which the loop stops.
-        - max_iterations: Maximum number of improvement cycles.
-        - system_prompt: The default system prompt for LLM queries.
-        - temperature: The creativity level of responses.
-        - num_ctx: Context window size for the model.
-        - verbose: Whether to print debug logs.
+        - name: A unique identifier for this agent.
+        - system_prompt: The foundational instruction that drives the agent's behavior and personality.
+        - model: The language model used by the agent.
+        - thinking_model: The language model used for thinking and decision-making.
+        - temperature: The creativity of the responses.
+        - max_iterations: The maximum number of iterations for the task processing loop.
+        - tools: A dictionary of tools with descriptions and callable functions.
+        - verbose: Whether to print verbose output.
+        - num_ctx: The context length for the language model.
+        - thinking_model_reasoning_pattern: A regular expression pattern to match the reasoning pattern in the thinking model's responses. For example, "<think>.*?</think>".
         """
-        self.content = initial_content
-        self.versions = [initial_content]
-        self.scores = []
-        self.target_score = target_score
-        self.max_iterations = max_iterations
-        self.thinking_model = thinking_model
-        self.rewrite_model = rewrite_model
-        self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
-        self.system_prompt = system_prompt
+        self.name = name
+        self.description = description
+        self.system_prompt = system_prompt or "You are a helpful assistant capable of handling complex tasks."
+        self.model = model
         self.temperature = temperature
-        self.num_ctx = num_ctx
+        self.max_iterations = max_iterations
+        self.tools = tools or {}
         self.verbose = verbose
+        self.num_ctx = num_ctx
+        self.thinking_model = thinking_model or model
+
+        # thinking_model_reasoning_pattern is a regular expression pattern to match the reasoning pattern in the thinking model's responses, for example everything between "<think>" and "</think>".
+        self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
+
+        # Register this agent in the global agent registry
+        Agent.agent_registry[name] = self
+
+    @staticmethod
+    def get_agent(agent_name):
+        """
+        Retrieve an agent instance by name from the registry.
+        """
+        return Agent.agent_registry.get(agent_name)
 
     def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
         """
-        Query the LLM with the given prompt and return the response.
+        Query the OpenAI API with the given prompt and return the response.
         """
         if system_prompt is None:
             system_prompt = self.system_prompt
 
         if model is None:
-            model = self.rewrite_model  # Default to review model if none specified
+            model = self.model
 
         if self.verbose:
-            on_print(f"\n[DEBUG] System prompt:\n{system_prompt}")
-            on_print(f"[DEBUG] User prompt:\n{prompt}")
-            on_print(f"[DEBUG] Model: {model}")
+            on_print(f"System prompt:\n{system_prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"User prompt:\n{prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"Model: {model}", Fore.WHITE + Style.DIM)
 
-        llm_response = ask_ollama(
-            system_prompt, 
-            prompt, 
-            model, 
-            temperature=self.temperature, 
-            no_bot_prompt=True, 
-            stream_active=False, 
-            tools=tools, 
-            num_ctx=self.num_ctx
-        )
+        llm_response = ask_ollama(system_prompt, prompt, model, temperature=self.temperature, no_bot_prompt=True, stream_active=False, tools=tools, num_ctx=self.num_ctx)
 
         if self.verbose:
-            on_print(f"[DEBUG] Response:\n{llm_response}")
+            on_print(f"Response:\n{llm_response}", Fore.WHITE + Style.DIM)
 
         return llm_response
-
-    def review_text(self) -> dict:
-        """Review the current content and return structured JSON feedback."""
-        prompt = f"""
-Review the following text and provide a critique along with a score from 1 to 10. 
-Return only a JSON object with the keys "critique" (string) and "score" (integer).
-
-Text:
-{self.content}
-
-Example output:
-{{
-    "critique": "The text is clear but lacks engagement. The introduction needs more impact.",
-    "score": 7
-}}
+    
+    def decompose_task(self, task):
+        """
+        Decompose a task into subtasks using the system prompt for guidance.
         """
 
-        response_text = self.query_llm(prompt, model=self.thinking_model)
+        # Prepare a list of available tools and agents with descriptions
+        tools_description = render_tools(self.tools)
 
-        thinking_model_is_different = self.thinking_model != self.rewrite_model
+        prompt = f"""Instructions: Break down the following task into smaller, manageable subtasks:
+{task}
+
+## Available tools to assist with subtasks:
+{tools_description or 'No tools available.'}
+
+## Output format:
+Output each subtask on a new line. Output only the subtasks without any explanations, introductions, or conclusions, no formatting needed, just the subtasks themselves.
+"""
+        thinking_model_is_different = self.thinking_model != self.model
+
+        response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
 
         if thinking_model_is_different:
-            _, response_text = split_reasoning_and_final_response(response_text, self.thinking_model_reasoning_pattern)
+            # Split the reasoning and final response from the thinking model's response
+            _, reasoning_response = split_reasoning_and_final_response(response, self.thinking_model_reasoning_pattern)
 
-        try:
-            review_data = extract_json(response_text.strip())
-            return review_data
-        except Exception as e:
-            if self.verbose:
-                on_print(f"Error: LLM response is not valid JSON. Response: {response_text}, Error: {e}", Fore.RED)
-            return {"critique": "Invalid response. Retry needed.", "score": 0}
+            if reasoning_response:
+                reasoning = reasoning_response
 
-    def rewrite_text(self, critique: str) -> str:
-        """Rewrite the content based on the given critique using the configured rewrite model."""
-        prompt = f"""
-Rewrite the following text based on the given critique.
-Ensure the revision improves clarity, engagement, and readability.
+            # Use result from thinking model to guide the response from the main model
+            prompt = f"""Break down the following task into smaller, manageable subtasks:
+{task}
 
-Text:
-{self.content}
+## Available tools to assist with subtasks:
+{tools_description or 'No tools available.'}
 
-Critique:
-{critique}
+If I were to break down the task '{task}' into subtasks, I would do it as follows:
+{reasoning}
 
-Return only the improved version of the text.
-        """
+You can follow a similar approach or provide a different response based on your own reasoning and understanding of the task.
 
-        return self.query_llm(prompt, model=self.rewrite_model)
+## Output format:
+Output each subtask on a new line, nothing more.
+"""
+            response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.model)
 
-    def refine_document(self):
-        """Iteratively refine the document until it reaches the target score."""
-        for iteration in range(self.max_iterations):
-            if self.verbose:
-                on_print(f"\nIteration {iteration + 1}: Reviewing... (Model: {self.thinking_model})")
-
-            review_data = self.review_text()
-            score = review_data["score"]
-            critique = review_data["critique"]
-
-            if self.verbose:
-                on_print(f"Critique: {critique}\nScore: {score}")
-
-            if score >= self.target_score:
-                if self.verbose:
-                    on_print("✅ Target quality achieved! Stopping iterations.")
-                break
-            
-            if self.verbose:
-                on_print(f"Iteration {iteration + 1}: Rewriting... (Model: {self.rewrite_model})")
-            improved_text = self.rewrite_text(critique)
-            
-            self.versions.append(self.content)
-            self.content = improved_text
-            self.scores.append(score)
-
-        return self.content
-
-class Agent:
-    """A simple LLM agent that can use tools to complete tasks."""
-    
-    def __init__(self, name, system_prompt=None, model="gpt-3.5-turbo", temperature=0.7, tools=None, verbose=False):
-        """
-        Initialize the Agent.
-        
-        Parameters:
-        - name: Agent identifier
-        - system_prompt: Instructions that define the agent's behavior
-        - model: LLM model to use
-        - temperature: Response creativity (0.0 to 1.0)
-        - tools: Dictionary of available tools {name: {"description": str, "function": callable}}
-        - verbose: Whether to print debug information
-        """
-        self.name = name
-        self.system_prompt = system_prompt or "You are a helpful assistant."
-        self.model = model
-        self.temperature = temperature
-        self.tools = tools or {}
-        self.verbose = verbose
-        self.conversation_history = []
-    
-    def _log(self, message):
-        """Print debug information if verbose mode is enabled."""
         if self.verbose:
-            print(f"[{self.name}] {message}")
-    
-    def _format_tools_for_prompt(self):
-        """Format available tools for the LLM prompt."""
-        if not self.tools:
-            return "No tools available."
-        
-        tool_descriptions = []
-        for tool_name, tool_info in self.tools.items():
-            description = tool_info.get("description", "No description available")
-            tool_descriptions.append(f"- {tool_name}: {description}")
-        
-        return "\n".join(tool_descriptions)
-    
-    def _query_llm(self, user_message):
-        """Send a message to the LLM and get a response."""
-        # This would be replaced with actual LLM API call (OpenAI, Anthropic, etc.)
-        # For now, this is a placeholder
-        self._log(f"Querying LLM with: {user_message}")
-        
-        # Build the full prompt
-        full_prompt = f"""System: {self.system_prompt}
+            on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
+        subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
 
-Available tools:
-{self._format_tools_for_prompt()}
+        # If among the subtasks lines of text we have numbered or bulleted lists, extract the list items and ignore the rest, otherwise return the subtasks as is
+        contains_list = any(re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask) for subtask in subtasks)
+        if contains_list:
+            # Remove non-list items that are not subtasks
+            subtasks = [subtask for subtask in subtasks if re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask)]
 
-If you need to use a tool, respond with:
-TOOL_USE: tool_name
-TOOL_INPUT: input_for_tool
+        # Remove subtasks ending with ':' or '**'
+        subtasks = [subtask for subtask in subtasks if not re.search(r':$', subtask) and not re.search(r'\*\*$', subtask)]
 
-Otherwise, provide a direct response.
+        # Remove leading numbers or bullets from subtasks
+        subtasks = [re.sub(r'^\d+\.\s', '', subtask) for subtask in subtasks]
+        subtasks = [re.sub(r'^[\*\-]\s', '', subtask) for subtask in subtasks]
 
-User: {user_message}
-Assistant: """
-        
-        # Placeholder for actual LLM call
-        # response = openai.chat.completions.create(
-        #     model=self.model,
-        #     messages=[{"role": "user", "content": full_prompt}],
-        #     temperature=self.temperature
-        # )
-        # return response.choices[0].message.content
-        
-        return "This is a placeholder response. Replace with actual LLM API call."
-    
-    def _execute_tool(self, tool_name, tool_input):
-        """Execute a tool and return the result."""
-        if tool_name not in self.tools:
-            return f"Error: Tool '{tool_name}' not found."
-        
-        try:
-            tool_function = self.tools[tool_name]["function"]
-            result = tool_function(tool_input)
-            self._log(f"Tool '{tool_name}' executed successfully")
-            return result
-        except Exception as e:
-            error_msg = f"Error executing tool '{tool_name}': {str(e)}"
-            self._log(error_msg)
-            return error_msg
-    
-    def _parse_response(self, response):
-        """Parse LLM response to check if it wants to use a tool."""
-        lines = response.strip().split('\n')
-        
-        tool_name = None
-        tool_input = None
-        
-        for i, line in enumerate(lines):
-            if line.startswith("TOOL_USE:"):
-                tool_name = line.replace("TOOL_USE:", "").strip()
-            elif line.startswith("TOOL_INPUT:"):
-                tool_input = line.replace("TOOL_INPUT:", "").strip()
-                # If input spans multiple lines, grab the rest
-                if i + 1 < len(lines):
-                    remaining_lines = lines[i + 1:]
-                    if remaining_lines:
-                        tool_input += "\n" + "\n".join(remaining_lines)
-                break
-        
-        if tool_name and tool_input:
-            return "tool_use", tool_name, tool_input
-        else:
-            return "direct_response", response, None
-    
-    def process_task(self, task, max_tool_iterations=3):
+        return subtasks
+
+    def execute_subtask(self, main_task, subtask, previous_subtask, result_from_previous_subtask):
         """
-        Process a task, using tools when necessary.
-        
+        Execute a subtask using available tools.
+
         Parameters:
-        - task: The task to complete
-        - max_tool_iterations: Maximum number of tool use attempts
-        
+        - main_task: The main task being solved.
+        - subtask: The subtask to be executed.
+        - previous_subtask: The previous subtask that was executed.
+        - result_from_previous_subtask: The results from the previous subtask.
+
         Returns:
-        - Final response to the task
+        - The result of the subtask execution.
         """
-        self._log(f"Processing task: {task}")
-        
-        current_message = task
-        tool_iterations = 0
-        
-        while tool_iterations < max_tool_iterations:
-            # Get response from LLM
-            response = self._query_llm(current_message)
-            
-            # Parse the response
-            response_type, content, tool_input = self._parse_response(response)
-            
-            if response_type == "direct_response":
-                # LLM provided a direct answer
-                self._log("Task completed with direct response")
-                return content
-            
-            elif response_type == "tool_use":
-                # LLM wants to use a tool
-                tool_name = content
-                self._log(f"Using tool: {tool_name}")
-                
-                # Execute the tool
-                tool_result = self._execute_tool(tool_name, tool_input)
-                
-                # Prepare the next message with tool result
-                current_message = f"""Previous request: {current_message}
+        # Create the prompt for executing the subtask
+        prompt = f"""Provide a response to the subtask: '{subtask}' from the main task: '{main_task}'.
 
-Tool used: {tool_name}
-Tool result: {tool_result}
+    The result from the previous subtask ({previous_subtask or 'No previous subtask as this is the first subtask.'}) was:
+    ```markdown
+    {result_from_previous_subtask or 'No results available.'}
+    ```
 
-Please provide a final response based on this information, or use another tool if needed."""
-                
-                tool_iterations += 1
+    Keep the response focused on the subtask at hand, without additional introductions or conclusions.
+    """
+        
+        if self.verbose:
+            on_print(f"\nExecuting subtask: '{subtask}'", Fore.WHITE + Style.DIM)
+        
+        # Execute the subtask with available tools
+        result = self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
+        
+        return result
+    
+    def process_task(self, task, return_intermediate_results=False):
+        """
+        Process the task by decomposing it into subtasks and executing each one.
+        """
+        try:
+            # Decompose the main task into subtasks
+            subtasks = self.decompose_task(task)
+
+            if self.verbose:
+                on_print(f"Subtasks identified: {subtasks}", Fore.WHITE + Style.DIM)
+
+            if not subtasks:
+                return "No subtasks identified. Unable to process the task."
+
+            # Execute each subtask sequentially
+            results = []
+            all_versions = []
+            previous_subtask = None
+
+            for subtask in subtasks:
+                # Pass all previous results as context
+                all_previous_results = "\n\n".join(results) if results else None
+                result = self.execute_subtask(task, subtask, previous_subtask, all_previous_results)
+                if result:
+                    results.append(result)
+                    # Store intermediate version after each subtask
+                    intermediate_response = "\n\n".join(results)
+                    all_versions.append(intermediate_response)
+                previous_subtask = subtask
+
+            # Combine all results
+            final_response = "\n\n".join(results)
             
+            if return_intermediate_results:
+                return all_versions
             else:
-                # Fallback
-                return response
-        
-        # If we've reached max iterations, ask for final response
-        self._log("Max tool iterations reached, requesting final response")
-        final_response = self._query_llm(f"{current_message}\n\nPlease provide a final response without using any more tools.")
-        return final_response
+                return final_response
+
+        except Exception as e:
+            return f"Error during task processing: {str(e)}"
 
 class AgentCrewManager:
     def __init__(self, database_path="agents.json", verbose=False, num_ctx=None):
@@ -2362,6 +2262,7 @@ class AgentCrewManager:
                 details = self.agents_db[name]
                 agent = Agent(
                     name=name,
+                    description=details["description"],
                     model=details["model"],
                     system_prompt=details["system_prompt"],
                     temperature=details["temperature"],
@@ -2375,7 +2276,7 @@ class AgentCrewManager:
                 print(f"Warning: Agent with name '{name}' not found in the database.")
         return instantiated_agents
 
-def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str):
+def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str):
     global agent_crew_manager
     global verbose_mode
     
@@ -2387,6 +2288,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
         on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
         on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+        on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
 
     # Validate inputs
     if not isinstance(system_prompt, str) or not system_prompt.strip():
@@ -2433,6 +2335,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
     # Instantiate the Agent with the provided parameters
     agent = Agent(
         name=agent_name,
+        description=agent_description,
         model=current_model,
         system_prompt=system_prompt,
         temperature=0.7,
@@ -2444,7 +2347,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
     # Add the agent to the agent crew manager
     agent_crew_manager.add_agent_from_instance(agent)
 
-def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, process_task=True) -> str|Agent:
+def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str = None, process_task=True) -> str|Agent:
     """
     Instantiate an Agent with a given name, system prompt, a list of tools, and solve a given task.
 
@@ -2453,6 +2356,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     - system_prompt (str): The system prompt to guide the agent's behavior and approach.
     - tools (list[str]): A list of tools (from a predefined set) that the agent can use.
     - agent_name (str): A unique name for the agent.
+    - agent_description (str): A description of the agent's capabilities and purpose.
     - process_task (bool): Whether to process the task immediately after instantiation.
 
     Returns:
@@ -2469,6 +2373,8 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         on_print(f"System Prompt: {system_prompt}", Fore.WHITE + Style.DIM)
         on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
         on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
+        on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
+
 
     # If tools is a string, it's probably a JSON string, so parse it
     if isinstance(tools, str):
@@ -2486,6 +2392,9 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         return "Error: System prompt must be a non-empty string."
     if not isinstance(agent_name, str) or not agent_name.strip():
         return "Error: Agent name must be a non-empty string."
+
+    if not agent_description:
+        agent_description = f"An AI assistant named {agent_name} with system role: '{system_prompt}'."
 
     # Make sure tools are unique
     tools = list(set(tools))
@@ -2527,6 +2436,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
     # Instantiate the Agent with the provided parameters
     agent = Agent(
         name=agent_name,
+        description=agent_description,
         model=current_model,
         thinking_model=thinking_model,
         system_prompt=system_prompt,
@@ -4362,7 +4272,6 @@ def run():
     # Main conversation loop
     while True:
         thoughts = None
-        bot_response = None
         if not auto_start_conversation:
             try:
                 if interactive_mode:
@@ -4502,18 +4411,6 @@ def run():
             verbose_mode = not verbose_mode
             on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
             continue
-
-        if "/agent" in user_input:
-            user_input = user_input.replace("/agent", "").strip()
-            if len(user_input) == 0:
-                on_print("Please provide a task for the agent to accomplish.", Fore.RED)
-                continue
-
-            # Make sure the tool 'instantiate_agent_with_tools_and_process_task' is in the selected_tools array
-            if selected_tools is None:
-                selected_tools = []
-            selected_tools = select_tool_by_name(get_available_tools(), selected_tools, "instantiate_agent_with_tools_and_process_task")
-            bot_response = ask_ollama("You are an agent manager. Given a task, call the function instantiate_agent_with_tools_and_process_task to create and run an agent to accomplish the task.", "Task: " + user_input, current_model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx, tools=selected_tools, use_think_mode=think_mode_on)
 
         if "/cot" in user_input:
             user_input = user_input.replace("/cot", "").strip()
@@ -4822,8 +4719,7 @@ def run():
             conversation.append({"role": "assistant", "content": thoughts})
 
         # Generate response
-        if bot_response is None:
-            bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active, num_ctx=num_ctx)
+        bot_response = ask_ollama_with_conversation(conversation, selected_model, temperature=temperature, prompt_template=prompt_template, tools=selected_tools, stream_active=stream_active, num_ctx=num_ctx)
 
         alternate_bot_response = None
         if alternate_model:
