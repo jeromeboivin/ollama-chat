@@ -163,8 +163,8 @@ class EmailPlugin:
             if html:
                 html_content = body  # HTML content provided directly
             else:
-                # Convert markdown to HTML
-                html_content = markdown.markdown(body, output_format='html5')
+                # Convert markdown to HTML with the 'nl2br' extension
+                html_content = markdown.markdown(body, extensions=['nl2br'], output_format='html5')
             
             html_part = MIMEText(html_content, 'html', 'utf-8')
             alt_part.attach(html_part)

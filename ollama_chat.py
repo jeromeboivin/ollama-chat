@@ -1936,21 +1936,9 @@ class Agent:
     # Static registry to store all agents
     agent_registry = {}
 
-    def __init__(self, name, description, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=3, tools=None, verbose=False, num_ctx=None, thinking_model_reasoning_pattern=None):
+    def __init__(self, name, description, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=15, tools=None, verbose=False, num_ctx=None, thinking_model_reasoning_pattern=None):
         """
         Initialize the Agent with a name, system prompt, tools, and other parameters.
-
-        Parameters:
-        - name: A unique identifier for this agent.
-        - system_prompt: The foundational instruction that drives the agent's behavior and personality.
-        - model: The language model used by the agent.
-        - thinking_model: The language model used for thinking and decision-making.
-        - temperature: The creativity of the responses.
-        - max_iterations: The maximum number of iterations for the task processing loop.
-        - tools: A dictionary of tools with descriptions and callable functions.
-        - verbose: Whether to print verbose output.
-        - num_ctx: The context length for the language model.
-        - thinking_model_reasoning_pattern: A regular expression pattern to match the reasoning pattern in the thinking model's responses. For example, "<think>.*?</think>".
         """
         self.name = name
         self.description = description
@@ -1962,9 +1950,12 @@ class Agent:
         self.verbose = verbose
         self.num_ctx = num_ctx
         self.thinking_model = thinking_model or model
-
-        # thinking_model_reasoning_pattern is a regular expression pattern to match the reasoning pattern in the thinking model's responses, for example everything between "<think>" and "</think>".
         self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
+
+        # State management variables for the TODO list
+        self.todo_list = []
+        self.completed_tasks = []
+        self.task_results = {}
 
         # Register this agent in the global agent registry
         Agent.agent_registry[name] = self
@@ -1978,7 +1969,7 @@ class Agent:
 
     def query_llm(self, prompt, system_prompt=None, tools=[], model=None):
         """
-        Query the OpenAI API with the given prompt and return the response.
+        Query the Ollama API with the given prompt and return the response.
         """
         if system_prompt is None:
             system_prompt = self.system_prompt
@@ -2002,10 +1993,7 @@ class Agent:
         """
         Decompose a task into subtasks using the system prompt for guidance.
         """
-
-        # Prepare a list of available tools and agents with descriptions
         tools_description = render_tools(self.tools)
-
         prompt = f"""Instructions: Break down the following task into smaller, manageable subtasks:
 {task}
 
@@ -2016,17 +2004,12 @@ class Agent:
 Output each subtask on a new line. Output only the subtasks without any explanations, introductions, or conclusions, no formatting needed, just the subtasks themselves.
 """
         thinking_model_is_different = self.thinking_model != self.model
-
         response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
 
         if thinking_model_is_different:
-            # Split the reasoning and final response from the thinking model's response
             _, reasoning_response = split_reasoning_and_final_response(response, self.thinking_model_reasoning_pattern)
-
             if reasoning_response:
                 reasoning = reasoning_response
-
-            # Use result from thinking model to guide the response from the main model
             prompt = f"""Break down the following task into smaller, manageable subtasks:
 {task}
 
@@ -2046,46 +2029,47 @@ Output each subtask on a new line, nothing more.
         if self.verbose:
             on_print(f"Decomposed subtasks:\n{response}", Fore.WHITE + Style.DIM)
         subtasks = [subtask.strip() for subtask in response.split("\n") if subtask.strip()]
-
-        # If among the subtasks lines of text we have numbered or bulleted lists, extract the list items and ignore the rest, otherwise return the subtasks as is
         contains_list = any(re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask) for subtask in subtasks)
         if contains_list:
-            # Remove non-list items that are not subtasks
             subtasks = [subtask for subtask in subtasks if re.match(r'^\d+\.\s', subtask) or re.match(r'^[\*\-]\s', subtask)]
-
-        # Remove subtasks ending with ':' or '**'
         subtasks = [subtask for subtask in subtasks if not re.search(r':$', subtask) and not re.search(r'\*\*$', subtask)]
-
-        # Remove leading numbers or bullets from subtasks
         subtasks = [re.sub(r'^\d+\.\s', '', subtask) for subtask in subtasks]
         subtasks = [re.sub(r'^[\*\-]\s', '', subtask) for subtask in subtasks]
-
         return subtasks
 
-    def execute_subtask(self, main_task, subtask, previous_subtask, result_from_previous_subtask):
+    def execute_subtask(self, main_task, subtask):
         """
-        Execute a subtask using available tools.
+        Executes a subtask using available tools and full context from the agent's state.
 
         Parameters:
         - main_task: The main task being solved.
         - subtask: The subtask to be executed.
-        - previous_subtask: The previous subtask that was executed.
-        - result_from_previous_subtask: The results from the previous subtask.
 
         Returns:
         - The result of the subtask execution.
         """
-        # Create the prompt for executing the subtask
-        prompt = f"""Provide a response to the subtask: '{subtask}' from the main task: '{main_task}'.
+        # Build a richer context for the prompt using the agent's state
+        completed_tasks_summary = "\n".join([f"- {t}: {self.task_results.get(t, 'Done.')}" for t in self.completed_tasks])
+        remaining_tasks_summary = "\n".join([f"- {t}" for t in self.todo_list])
 
-    The result from the previous subtask ({previous_subtask or 'No previous subtask as this is the first subtask.'}) was:
-    ```markdown
-    {result_from_previous_subtask or 'No results available.'}
-    ```
+        prompt = f"""You are executing a plan to solve the main task: '{main_task}'.
 
-    Keep the response focused on the subtask at hand, without additional introductions or conclusions.
-    """
-        
+## Completed Tasks & Results:
+```markdown
+{completed_tasks_summary or 'No tasks completed yet.'}
+```
+
+## Remaining Tasks (TODO List):
+```markdown
+{remaining_tasks_summary or 'This is the last task.'}
+```
+
+## Current Task:
+Your current objective is to execute only this subtask: '{subtask}'
+
+Based on the context of the completed tasks and the remaining plan, provide a response for the current task. Keep the response focused on this single subtask without additional introductions or conclusions.
+"""
+
         if self.verbose:
             on_print(f"\nExecuting subtask: '{subtask}'", Fore.WHITE + Style.DIM)
         
@@ -2093,42 +2077,56 @@ Output each subtask on a new line, nothing more.
         result = self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
         
         return result
-    
+
     def process_task(self, task, return_intermediate_results=False):
         """
-        Process the task by decomposing it into subtasks and executing each one.
+        Process the task by decomposing it into subtasks and executing each one,
+        while maintaining a TODO list to track progress.
         """
         try:
-            # Decompose the main task into subtasks
-            subtasks = self.decompose_task(task)
-
+            # Reset state for each new main task
+            self.todo_list = self.decompose_task(task)
+            self.completed_tasks = []
+            self.task_results = {}
+            
             if self.verbose:
-                on_print(f"Subtasks identified: {subtasks}", Fore.WHITE + Style.DIM)
+                on_print(f"Initial TODO list: {self.todo_list}", Fore.WHITE + Style.DIM)
 
-            if not subtasks:
+            if not self.todo_list:
                 return "No subtasks identified. Unable to process the task."
 
-            # Execute each subtask sequentially
-            results = []
-            all_versions = []
-            previous_subtask = None
+            # Use a while loop to process the dynamic TODO list
+            iteration_count = 0
+            while self.todo_list and iteration_count < self.max_iterations:
+                # Get the next subtask to execute
+                current_subtask = self.todo_list.pop(0)
 
-            for subtask in subtasks:
-                # Pass all previous results as context
-                all_previous_results = "\n\n".join(results) if results else None
-                result = self.execute_subtask(task, subtask, previous_subtask, all_previous_results)
+                # Prevent re-doing work
+                if current_subtask in self.completed_tasks:
+                    if self.verbose:
+                        on_print(f"Skipping already completed subtask: '{current_subtask}'", Fore.WHITE + Style.DIM)
+                    continue
+
+                # Execute the subtask using the new context-aware method
+                result = self.execute_subtask(task, current_subtask)
+                
                 if result:
-                    results.append(result)
-                    # Store intermediate version after each subtask
-                    intermediate_response = "\n\n".join(results)
-                    all_versions.append(intermediate_response)
-                previous_subtask = subtask
+                    # Mark as complete and store the result for future context
+                    self.completed_tasks.append(current_subtask)
+                    self.task_results[current_subtask] = result
 
-            # Combine all results
-            final_response = "\n\n".join(results)
+                iteration_count += 1
+                if self.verbose:
+                    on_print(f"Finished iteration {iteration_count}. Remaining tasks: {len(self.todo_list)}", Fore.WHITE + Style.DIM)
+
+
+            # Consolidate final response from all stored results
+            final_response = "\n\n".join(self.task_results.values())
             
             if return_intermediate_results:
-                return all_versions
+                # The concept of "intermediate versions" changes slightly.
+                # Here we return just the final consolidated result in a list.
+                return [final_response] 
             else:
                 return final_response
 
@@ -2339,7 +2337,6 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         model=current_model,
         system_prompt=system_prompt,
         temperature=0.7,
-        max_iterations=3,
         tools=agent_tools,
         verbose=verbose_mode
     )
@@ -2441,7 +2438,6 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         thinking_model=thinking_model,
         system_prompt=system_prompt,
         temperature=0.7,
-        max_iterations=3,
         tools=agent_tools,
         verbose=verbose_mode,
         thinking_model_reasoning_pattern=thinking_model_reasoning_pattern
