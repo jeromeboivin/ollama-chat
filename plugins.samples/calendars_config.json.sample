@@ -1,0 +1,7 @@
+{
+    "Personal": "https://calendar.example.com/personal/your-calendar-id.ics",
+    "Work": "https://calendar.example.com/work/your-work-calendar.ics",
+    "Family": "https://calendar.example.com/shared/family-calendar.ics",
+    "Hobbies": "https://calendar.example.com/clubs/hobby-group.ics"
+    /* Add more calendars as needed */
+}
