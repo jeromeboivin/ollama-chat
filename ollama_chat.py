@@ -3352,6 +3352,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
                 on_stdout_flush()
             else:
                 tool_calls = stream['message'].get('tool_calls', [])
+                if tool_calls is None:
+                    tool_calls = []
 
                 if len(tool_calls) > 0:
                     conversation.append(stream['message'])
