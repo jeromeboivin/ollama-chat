@@ -378,23 +378,18 @@ def get_available_tools():
                         "type": "string",
                         "description": "The long text file to summarize. Provide the full path to the file."
                     },
-                    "chunk_size": {
-                        "type": "integer",
-                        "description": "The number of words in each text chunk.",
-                        "default": 400
-                    },
-                    "overlap": {
-                        "type": "integer",
-                        "description": "The number of words to overlap between consecutive chunks to maintain context.",
-                        "default": 50
-                    },
                     "max_final_words": {
                         "type": "integer",
                         "description": "The maximum number of words desired for the final summary.",
                         "default": 500
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Language in which intermediate and final summaries should be produced (e.g. 'English', 'French'). Use language specified by the user, or the language of the conversation if known.",
+                        "default": "English"
                     }
                 },
-                "required": ["text"]
+                "required": ["file_path"]
             }
         }
     }]
@@ -3776,7 +3771,7 @@ def load_chroma_client():
             on_print("ChromaDB client could not be initialized. Please check the host and port.", Fore.RED + Style.DIM)
         chroma_client = None
         
-def summarize_chunk(text_chunk, model, max_summary_words, previous_summary=None, num_ctx=None):
+def summarize_chunk(text_chunk, model, max_summary_words, previous_summary=None, num_ctx=None, language='English'):
     """
     Summarizes a single chunk of text using the provided LLM.
 
@@ -3790,23 +3785,32 @@ def summarize_chunk(text_chunk, model, max_summary_words, previous_summary=None,
     Returns:
         str: The summarized text.
     """
-    system_prompt = "You are an expert at summarizing text. Your task is to provide a concise summary of the given content, maintaining context from previous parts."
-    
+    # Instruct the model to produce the summary in the requested language.
+    system_prompt = (
+        "You are an expert at summarizing text. Your task is to provide a concise summary of the given content, "
+        "maintaining context from previous parts. Always produce the summary in the requested language."
+    )
+
     # Add context from the previous summary to the prompt if it exists.
     if previous_summary:
         user_prompt = (
-            f"The summary of the previous text chunk is: \"{previous_summary}\"\n\n"
-            f"Based on that context, please summarize the following new text chunk in approximately {max_summary_words} words:\n\n"
+            f"The summary of the previous text chunk (written in {language}) is: \"{previous_summary}\"\n\n"
+            f"Based on that context, please summarize the following new text chunk in approximately {max_summary_words} words. "
+            f"Make sure the summary is written in {language} and do not include extra commentary:\n\n"
             f"---\n\n{text_chunk}"
         )
     else:
-        user_prompt = f"Please summarize the following text in approximately {max_summary_words} words:\n\n---\n\n{text_chunk}"
+        user_prompt = (
+            f"Please summarize the following text in approximately {max_summary_words} words. "
+            f"Make sure the summary is written in {language} and do not include extra commentary:\n\n---\n\n{text_chunk}"
+        )
 
-    # This function call should interact with your local LLM.
+    # This function call should interact with your local LLM. Enforce language in the call.
     summary = ask_ollama(system_prompt, user_prompt, model, no_bot_prompt=True, stream_active=False, num_ctx=num_ctx)
-    return summary
+    # If the LLM returns an empty or None response, return an empty string to avoid breaking callers
+    return summary or ""
 
-def summarize_text_file(file_path, model=None, chunk_size=400, overlap=50, max_final_words=500, num_ctx=None):
+def summarize_text_file(file_path, model=None, chunk_size=400, overlap=50, max_final_words=500, num_ctx=None, language='English'):
     """
     Summarizes a long text by breaking it into chunks, summarizing them,
     and then iteratively summarizing the summaries until the final text is
@@ -3819,6 +3823,7 @@ def summarize_text_file(file_path, model=None, chunk_size=400, overlap=50, max_f
         overlap (int): The number of words to overlap between consecutive chunks to maintain context.
         max_final_words (int): The maximum number of words desired for the final summary.
         num_ctx (int, optional): The number of context tokens to use for the LLM. Defaults to None.
+        language (str): Language in which intermediate and final summaries should be produced. Defaults to 'English'.
         verbose_mode (bool): If True, print detailed information about the summarization process.
 
     Returns:
@@ -3863,7 +3868,7 @@ def summarize_text_file(file_path, model=None, chunk_size=400, overlap=50, max_f
         for i, chunk in enumerate(chunks):
             if verbose_mode:
                 on_print(f"Processing chunk {i+1}/{len(chunks)} with {len(chunk.split())} words", Fore.WHITE + Style.DIM)
-            summary = summarize_chunk(chunk, model, per_chunk_summary_words, previous_summary=previous_summary, num_ctx=num_ctx)
+            summary = summarize_chunk(chunk, model, per_chunk_summary_words, previous_summary=previous_summary, num_ctx=num_ctx, language=language)
             summaries.append(summary)
             previous_summary = summary # Update the previous summary for the next iteration
 
