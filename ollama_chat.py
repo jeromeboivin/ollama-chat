@@ -3137,7 +3137,7 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                 # if parameters is a string, convert it to a dictionary
                 if isinstance(parameters, str):
                     try:
-                        parameters = json.loads(parameters)
+                        parameters = extract_json(parameters)
                     except:
                         parameters = {}
 
