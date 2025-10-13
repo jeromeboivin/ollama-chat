@@ -1696,7 +1696,7 @@ class DocumentIndexer:
             
         return extracted_text
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True, extract_start=None, extract_end=None):
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True, extract_start=None, extract_end=None, add_summary=True):
         """
         Index all text files in the root folder.
         
@@ -1707,6 +1707,7 @@ class DocumentIndexer:
         :param skip_existing: Whether to skip indexing if a document/chunk with the same ID already exists.
         :param extract_start: Optional string marking the start of the text to extract for embedding computation.
         :param extract_end: Optional string marking the end of the text to extract for embedding computation.
+        :param add_summary: Whether to generate and prepend a summary to each chunk (default: True).
         """
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
@@ -1822,6 +1823,39 @@ class DocumentIndexer:
                     else:
                         chunks = text_splitter.split_text(content_to_chunk)
                     
+                    # Generate document summary once if add_summary is enabled
+                    document_summary = None
+                    if add_summary and self.model:
+                        if self.verbose:
+                            on_print(f"Generating summary for document {document_id}", Fore.WHITE + Style.DIM)
+                        
+                        summary_prompt = f"""Provide a brief summary (2-5 sentences) of the following document. Focus on the main topic and key points:
+
+{content_to_chunk[:2000]}"""  # Limit to first 2000 chars for summary generation
+                        
+                        try:
+                            ollama_options = {}
+                            if num_ctx:
+                                ollama_options["num_ctx"] = num_ctx
+                            
+                            summary_response = ask_ollama(
+                                "You are a helpful assistant that creates concise document summaries.",
+                                summary_prompt,
+                                self.model,
+                                temperature=0.3,
+                                no_bot_prompt=True,
+                                stream_active=False,
+                                num_ctx=num_ctx
+                            )
+                            document_summary = f"[Document Summary: {summary_response.strip()}]\n\n"
+                            
+                            if self.verbose:
+                                on_print(f"Summary generated: {summary_response.strip()}", Fore.GREEN)
+                        except Exception as e:
+                            if self.verbose:
+                                on_print(f"Failed to generate summary: {e}", Fore.YELLOW)
+                            document_summary = None
+                    
                     for i, chunk in enumerate(chunks):
                         chunk_id = f"{document_id}_{i}"
 
@@ -1833,7 +1867,12 @@ class DocumentIndexer:
                                     on_print(f"Skipping existing chunk: {chunk_id}", Fore.WHITE + Style.DIM)
                                 continue
                         
-                        # Embed the chunk content (from extracted text)
+                        # Prepend document summary to chunk if available
+                        chunk_with_summary = chunk
+                        if document_summary:
+                            chunk_with_summary = document_summary + chunk
+                        
+                        # Embed the chunk content (from extracted text) with summary prepended
                         embedding = None
                         if self.model:
                             ollama_options = {}
@@ -1842,30 +1881,33 @@ class DocumentIndexer:
                                 
                             if self.verbose:
                                 embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
-                                on_print(f"Generating embedding for chunk {chunk_id} using {self.model} ({embedding_info})", Fore.WHITE + Style.DIM)
+                                summary_info = " with summary" if document_summary else ""
+                                on_print(f"Generating embedding for chunk {chunk_id} using {self.model} ({embedding_info}{summary_info})", Fore.WHITE + Style.DIM)
 
                             response = ollama.embeddings(
-                                prompt=chunk,
+                                prompt=chunk_with_summary,
                                 model=self.model,
                                 options=ollama_options
                             )
                             embedding = response["embedding"]
                         
-                        # Store the original full document content as the document, but use extracted content for embedding
+                        # Store the chunk with summary prepended
                         chunk_metadata = file_metadata.copy()
                         chunk_metadata['chunk_index'] = i
+                        if document_summary:
+                            chunk_metadata['has_summary'] = True
                         
-                        # Upsert the chunk with full document content but embedding from extracted text
+                        # Upsert the chunk with summary and embedding
                         if embedding:
                             self.collection.upsert(
-                                documents=[chunk],  # Store the actual chunk content
+                                documents=[chunk_with_summary],  # Store chunk with summary
                                 metadatas=[chunk_metadata],
                                 ids=[chunk_id],
-                                embeddings=[embedding]  # Embedding computed from extracted text
+                                embeddings=[embedding]  # Embedding computed from chunk with summary
                             )
                         else:
                             self.collection.upsert(
-                                documents=[chunk],
+                                documents=[chunk_with_summary],
                                 metadatas=[chunk_metadata],
                                 ids=[chunk_id]
                             )
