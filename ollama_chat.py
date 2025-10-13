@@ -1701,7 +1701,7 @@ class DocumentIndexer:
         Index all text files in the root folder.
         
         :param allow_chunks: Whether to chunk large documents.
-        :param no_chunking_confirmation: Skip confirmation for chunking.
+        :param no_chunking_confirmation: Skip confirmation for chunking and extraction prompts.
         :param split_paragraphs: Whether to split markdown content into paragraphs.
         :param additional_metadata: Optional dictionary to pass additional metadata by file name.
         :param skip_existing: Whether to skip indexing if a document/chunk with the same ID already exists.
@@ -1715,7 +1715,8 @@ class DocumentIndexer:
             allow_chunks = on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
 
         # Ask the user for extraction strings if not provided
-        if extract_start is None and extract_end is None:
+        # Skip asking if no_chunking_confirmation is True (automated indexing)
+        if extract_start is None and extract_end is None and not no_chunking_confirmation:
             on_print("\nOptional: You can extract only a specific part of each document for embedding computation.")
             on_print("This allows you to focus on relevant sections while still storing the full document.")
             use_extraction = on_user_input("Do you want to extract specific text sections for embedding? [y/n]: ").lower() in ['y', 'yes']
