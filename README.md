@@ -198,7 +198,42 @@ Here's a step-by-step guide on how to use it:
       - `--expand-query`: Enable/disable query expansion for better retrieval (default: enabled)
       - `--output <file>`: Save query results to a file
 
-18. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
+18. **Perform a web search**: Use `--web-search "<your question>"` to perform a web search and get an answer based on search results from the command line.
+    - **Web search options**:
+      - `--web-search-results <number>`: Number of web search results to fetch (default: 5)
+      - `--web-search-region <region>`: Region for web search (default: wt-wt for worldwide)
+      - `--web-search-show-intermediate`: Show intermediate results (search results, URLs, crawled content, vector DB retrieval)
+      - `--output <file>`: Save the query, context, and answer to a file
+      - `--model <model>`: Specify which model to use for generating the answer
+    - **Examples**:
+      ```bash
+      # Basic web search
+      python ollama_chat.py --web-search "What are the latest developments in AI?"
+      
+      # Web search with more results and specific region
+      python ollama_chat.py --web-search "Python best practices" --web-search-results 10 --web-search-region us-en
+      
+      # Web search with intermediate results displayed
+      python ollama_chat.py --web-search "Machine learning basics" --web-search-show-intermediate
+      
+      # Web search with output to file
+      python ollama_chat.py --web-search "Climate change effects" --output results.txt
+      
+      # Web search with specific model
+      python ollama_chat.py --web-search "Quantum computing basics" --model llama3.1:8b
+      
+      # Web search in non-interactive mode (useful for automation)
+      python ollama_chat.py --web-search "Market trends" --no-interactive --output report.txt
+      
+      # Comprehensive search with all options
+      python ollama_chat.py --web-search "Artificial Intelligence trends" \
+        --web-search-results 10 \
+        --web-search-show-intermediate \
+        --verbose \
+        --output ai_report.txt
+      ```
+
+19. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
 
 19. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
 

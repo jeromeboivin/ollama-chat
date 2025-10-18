@@ -251,7 +251,7 @@ class OllamaChatMCPServer {
       return !hasPluginTools;
     }
     
-    // Default: disable plugins for MCP server (uses only built-in tools: web_search, chat, RAG)
+    // Default: disable plugins for MCP server (uses only built-in tools: web_search, RAG)
     return true;
   }
 
@@ -283,7 +283,7 @@ class OllamaChatMCPServer {
         },
         {
           name: "web_search",
-          description: "Perform a comprehensive web search similar to Perplexity. This tool searches the web using DuckDuckGo, crawls the top results, extracts content, indexes it in a vector database, and returns relevant information synthesized from multiple sources.",
+          description: "Perform a comprehensive web search similar to Perplexity. This tool searches the web using DuckDuckGo, crawls the top results, extracts content, indexes it in a vector database, and returns relevant information synthesized from multiple sources. Intermediate results (search results, URLs crawled, content previews, and vector database retrieval) are always displayed for transparency and debugging.",
           inputSchema: {
             type: "object",
             properties: {
@@ -312,33 +312,6 @@ class OllamaChatMCPServer {
               },
             },
             required: ["query"],
-          },
-        },
-        {
-          name: "chat",
-          description: "Have a conversation with the chat assistant. This can be used for general questions, analysis, or any task that doesn't require web search.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              message: {
-                type: "string",
-                description: "The message or question to send to the assistant",
-              },
-              model: {
-                type: "string",
-                description: "Model to use (optional, uses configured model if not specified)",
-              },
-              temperature: {
-                type: "number",
-                description: "Temperature for LLM responses (0.0-1.0, default: 0.7)",
-                default: 0.7,
-              },
-              system_prompt: {
-                type: "string",
-                description: "Custom system prompt to set the assistant's behavior (optional)",
-              },
-            },
-            required: ["message"],
           },
         },
         {
@@ -513,8 +486,6 @@ class OllamaChatMCPServer {
           return await this.handleListAvailableTools(args);
         } else if (name === "web_search") {
           return await this.handleWebSearch(args);
-        } else if (name === "chat") {
-          return await this.handleChat(args);
         } else if (name === "index_documents") {
           return await this.handleIndexDocuments(args);
         } else if (name === "query_documents") {
@@ -569,61 +540,24 @@ class OllamaChatMCPServer {
       throw new Error("Query parameter is required");
     }
 
-    // Build command arguments for ollama_chat.py
+    // Build command arguments for ollama_chat.py using new --web-search CLI
     const cmdArgs = [
       OLLAMA_CHAT_PATH,
       ...this.buildProviderArgs(),  // Add provider-specific flags
-      ...this.buildModelArgs(model),  // Add model configuration
+      ...this.buildModelArgs(model),  // Add model configuration (includes --embeddings-model)
       ...this.buildToolsArgs(),  // Add tools configuration
       ...this.buildPluginArgs(['web_search']),  // Optimize: disable plugins (web_search is built-in)
-      "--no-interactive",
+      "--no-interactive",  // Mandatory: non-interactive mode
       "--no-syntax-highlighting",
-      `--chroma-path=${this.config.chromaDBPath}`,  // Use configured ChromaDB database path
-      `--prompt=/web ${query}`,
+      `--chroma-path=${this.config.chromaDBPath}`,  // Mandatory: ChromaDB database path
+      `--web-search=${query}`,  // Mandatory: web search query
+      `--web-search-results=${n_results}`,
+      `--web-search-region=${region}`,
+      "--web-search-show-intermediate",  // Mandatory: show intermediate results
     ];
 
     if (temperature !== 0.1) {
       cmdArgs.push(`--temperature=${temperature}`);
-    }
-
-    // Execute the Python script
-    const result = await this.executePythonScript(cmdArgs);
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: result,
-        },
-      ],
-    };
-  }
-
-  async handleChat(args) {
-    const { message, model, temperature = 0.7, system_prompt } = args;
-
-    if (!message) {
-      throw new Error("Message parameter is required");
-    }
-
-    // Build command arguments for ollama_chat.py
-    const cmdArgs = [
-      OLLAMA_CHAT_PATH,
-      ...this.buildProviderArgs(),  // Add provider-specific flags
-      ...this.buildModelArgs(model),  // Add model configuration
-      ...this.buildToolsArgs(),  // Add tools configuration
-      ...this.buildPluginArgs([]),  // Optimize: disable plugins (chat doesn't need any tools by default)
-      "--no-interactive",
-      "--no-syntax-highlighting",
-      `--prompt=${message}`,
-    ];
-
-    if (temperature !== 0.7) {
-      cmdArgs.push(`--temperature=${temperature}`);
-    }
-
-    if (system_prompt) {
-      cmdArgs.push(`--system-prompt=${system_prompt}`);
     }
 
     // Execute the Python script
@@ -985,36 +919,13 @@ class OllamaChatMCPServer {
       console.error(error.stack);
     }
 
-    // Test 4: Chat (simpler, faster test first)
+    // Test 4: Web Search
     console.log("=".repeat(60));
-    console.log("Test 4: Testing chat tool");
-    console.log("-".repeat(60));
-    console.log("Message: 'What is 2+2? Answer in one sentence.'");
-    console.log("Model: qwen3:4b");
-    console.log("Executing chat...\n");
-    
-    try {
-      const chatResult = await this.handleChat({
-        message: "What is 2+2? Answer in one sentence.",
-        model: "qwen3:4b",
-        temperature: 0.3
-      });
-      
-      console.log("Chat Result:");
-      console.log("-".repeat(60));
-      console.log(chatResult.content[0].text);
-      console.log("\n✅ Chat test passed\n");
-    } catch (error) {
-      console.error("❌ Chat test failed:", error.message);
-      console.error(error.stack);
-    }
-
-    // Test 5: Web Search
-    console.log("=".repeat(60));
-    console.log("Test 5: Testing web_search tool");
+    console.log("Test 4: Testing web_search tool");
     console.log("-".repeat(60));
     console.log("Query: 'What is the Model Context Protocol?'");
     console.log("Model: Using default (Azure OpenAI if configured, otherwise auto-detect)");
+    console.log("Intermediate results: always enabled (mandatory)");
     console.log("Note: This may take 30-60 seconds (searching, crawling, indexing)...\n");
     
     try {
@@ -1047,9 +958,9 @@ class OllamaChatMCPServer {
       console.error(error.stack);
     }
 
-    // Test 6: RAG - Index Documents (if test documents exist)
+    // Test 5: RAG - Index Documents (if test documents exist)
     console.log("=".repeat(60));
-    console.log("Test 6: Testing index_documents tool (RAG)");
+    console.log("Test 5: Testing index_documents tool (RAG)");
     console.log("-".repeat(60));
     console.log("Note: This test requires a 'test_docs' folder with sample documents.");
     console.log("Skipping if folder doesn't exist...\n");
@@ -1077,9 +988,9 @@ class OllamaChatMCPServer {
         console.log(indexResult.content[0].text);
         console.log("\n✅ Document indexing test passed!\n");
         
-        // Test 7: RAG - Query Documents
+        // Test 6: RAG - Query Documents
         console.log("=".repeat(60));
-        console.log("Test 7: Testing query_documents tool (RAG)");
+        console.log("Test 6: Testing query_documents tool (RAG)");
         console.log("-".repeat(60));
         console.log("Query: 'What information is in these documents?'");
         console.log("Collection: mcp_test_collection\n");

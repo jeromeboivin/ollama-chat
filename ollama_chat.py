@@ -1657,16 +1657,19 @@ def retrieve_relevant_memory(query_text, top_k=3):
     return memory_manager.retrieve_relevant_memory(query_text, top_k)
 
 class DocumentIndexer:
-    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False):
+    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False, summary_model=None):
         self.root_folder = root_folder
         self.collection_name = collection_name
         self.client = chroma_client
-        self.model = embeddings_model
+        self.model = embeddings_model  # For embeddings only
+        self.summary_model = summary_model
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self.verbose = verbose
 
         if verbose:
-            on_print(f"DocumentIndexer initialized with model: {self.model}", Fore.WHITE + Style.DIM)
+            on_print(f"DocumentIndexer initialized with embedding model: {self.model}", Fore.WHITE + Style.DIM)
+            if self.summary_model:
+                on_print(f"Using summary model: {self.summary_model}", Fore.WHITE + Style.DIM)
             on_print(f"Using collection: {self.collection.name}", Fore.WHITE + Style.DIM)
             on_print(f"Verbose mode is {'on' if self.verbose else 'off'}", Fore.WHITE + Style.DIM)
             on_print(f"Using embeddings model: {self.model}", Fore.WHITE + Style.DIM)
@@ -1864,30 +1867,33 @@ class DocumentIndexer:
                     
                     # Generate document summary once if add_summary is enabled
                     document_summary = None
-                    if add_summary and self.model:
+                    # Use summary_model for summary generation, fallback to current_model if available
+                    summary_model = self.summary_model
+                    if summary_model is None:
+                        try:
+                            summary_model = current_model
+                        except NameError:
+                            summary_model = None
+                    if add_summary and summary_model:
                         if self.verbose:
-                            on_print(f"Generating summary for document {document_id}", Fore.WHITE + Style.DIM)
-                        
+                            on_print(f"Generating summary for document {document_id} using model: {summary_model}", Fore.WHITE + Style.DIM)
                         summary_prompt = f"""Provide a brief summary (2-5 sentences) of the following document. Focus on the main topic and key points:
 
 {content_to_chunk[:2000]}"""  # Limit to first 2000 chars for summary generation
-                        
                         try:
                             ollama_options = {}
                             if num_ctx:
                                 ollama_options["num_ctx"] = num_ctx
-                            
                             summary_response = ask_ollama(
                                 "You are a helpful assistant that creates concise document summaries.",
                                 summary_prompt,
-                                self.model,
+                                summary_model,
                                 temperature=0.3,
                                 no_bot_prompt=True,
                                 stream_active=False,
                                 num_ctx=num_ctx
                             )
                             document_summary = f"[Document Summary: {summary_response.strip()}]\n\n"
-                            
                             if self.verbose:
                                 on_print(f"Summary generated: {summary_response.strip()}", Fore.GREEN)
                         except Exception as e:
@@ -2385,29 +2391,36 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
 
     return agent
 
-def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model=embeddings_model, num_ctx=None):
+def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model=embeddings_model, num_ctx=None, return_intermediate=False):
     global current_model
     global verbose_mode
     global plugins
     global chroma_client
 
     if not query:
+        if return_intermediate:
+            return "", {}
         return ""
 
     # Initialize ChromaDB client if not already initialized
     load_chroma_client()
     
     if not chroma_client:
-        return "Web search requires ChromaDB to be running. Please start ChromaDB server or configure a persistent database path."
+        error_msg = "Web search requires ChromaDB to be running. Please start ChromaDB server or configure a persistent database path."
+        if return_intermediate:
+            return error_msg, {}
+        return error_msg
 
     search = DDGS()
     urls = []
+    search_results_list = []
     # Add the search results to the chatbot response
     try:
         search_results = search.text(query, region=region, max_results=n_results)
         if search_results:
             for i, search_result in enumerate(search_results):
                 urls.append(search_result['href'])
+                search_results_list.append(search_result)
     except:
         # TODO: handle retries in case of duckduckgo_search.exceptions.RatelimitException
         pass
@@ -2417,6 +2430,8 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         on_print(urls, Fore.WHITE + Style.DIM)
 
     if len(urls) == 0:
+        if return_intermediate:
+            return "No search results found.", {}
         return "No search results found."
 
     webCrawler = SimpleWebCrawler(urls, llm_enabled=True, system_prompt="You are a web crawler assistant.", selected_model=current_model, temperature=0.1, verbose=verbose_mode, plugins=plugins, num_ctx=num_ctx)
@@ -2441,7 +2456,7 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         web_embedding_model = embeddings_model
 
     # Index the articles in the vector database
-    document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model, verbose=verbose_mode)
+    document_indexer = DocumentIndexer(temp_folder, web_cache_collection, chroma_client, web_embedding_model, verbose=verbose_mode, summary_model=current_model)
     document_indexer.index_documents(no_chunking_confirmation=True, additional_metadata=additional_metadata)
 
     # Remove the temporary folder and its contents
@@ -2459,8 +2474,18 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         if new_query:
             if verbose_mode:
                 on_print(f"Refined search query: {new_query}", Fore.WHITE + Style.DIM)
-            return web_search(new_query, n_results, region, web_cache_collection, web_embedding_model, num_ctx)
+            return web_search(new_query, n_results, region, web_cache_collection, web_embedding_model, num_ctx, return_intermediate)
 
+    # Return intermediate results if requested
+    if return_intermediate:
+        intermediate_data = {
+            'search_results': search_results_list,
+            'urls': urls,
+            'articles': articles,
+            'vector_db_results': results
+        }
+        return results, intermediate_data
+    
     return results
 
 def print_spinning_wheel(print_char_index):
@@ -3933,19 +3958,25 @@ def run():
     parser.add_argument('--agent-name', type=str, help='Name for the agent', default=None)
     parser.add_argument('--agent-description', type=str, help='Description of the agent', default=None)
     
+    # Web search arguments
+    parser.add_argument('--web-search', type=str, help='Perform a web search with the given query and answer using search results', default=None)
+    parser.add_argument('--web-search-results', type=int, help='Number of web search results to fetch (default: 5)', default=5)
+    parser.add_argument('--web-search-region', type=str, help='Region for web search (default: wt-wt for worldwide)', default='wt-wt')
+    parser.add_argument('--web-search-show-intermediate', type=bool, help='Show intermediate results during web search (URLs, crawled content, etc.)', default=False, action=argparse.BooleanOptionalAction)
+    
     args = parser.parse_args()
 
     plugins_folder = args.plugins_folder
     verbose_mode = args.verbose
     disable_plugins = args.disable_plugins
     
-    # Automatically disable plugins when using RAG-specific parameters (indexing or querying)
+    # Automatically disable plugins when using RAG-specific parameters (indexing, querying, or web search)
     # These operations don't need plugins and disabling them speeds up execution
-    rag_operations_requested = args.index_documents or args.query
+    rag_operations_requested = args.index_documents or args.query or args.web_search
     if rag_operations_requested and not disable_plugins:
         disable_plugins = True
         if verbose_mode:
-            on_print("Plugins automatically disabled for RAG operations (indexing/querying).", Fore.YELLOW)
+            on_print("Plugins automatically disabled for RAG operations (indexing/querying/web-search).", Fore.YELLOW)
     
     # Parse requested tool names from command line
     requested_tool_names = args.tools.split(',') if args.tools else []
@@ -3968,10 +3999,10 @@ def run():
         global plugins
         plugins = discover_plugins(plugins_folder, load_plugins=True)  # Always load for --list-tools
         if verbose_mode:
-            print(f"\nDiscovered {len(plugins)} plugins")
+            on_print(f"\nDiscovered {len(plugins)} plugins")
         
         tools = get_available_tools()
-        print("\nAvailable tools:")
+        on_print("\nAvailable tools:")
         
         # Split tools into built-in and plugin tools
         builtin_tools = [tool for tool in tools if not any(pt['function']['name'] == tool['function']['name'] for p in plugins for pt in ([p.get_tool_definition()] if hasattr(p, 'get_tool_definition') and callable(getattr(p, 'get_tool_definition')) else []))]
@@ -3979,29 +4010,29 @@ def run():
         
         # Print built-in tools
         if builtin_tools:
-            print("\nBuilt-in tools:")
+            on_print("\nBuilt-in tools:")
             for tool in builtin_tools:
-                print(f"\n{tool['function']['name']}:")
-                print(f"  Description: {tool['function']['description']}")
+                on_print(f"\n{tool['function']['name']}:")
+                on_print(f"  Description: {tool['function']['description']}")
                 if 'parameters' in tool['function']:
                     if 'properties' in tool['function']['parameters']:
-                        print("  Parameters:")
+                        on_print("  Parameters:")
                         for param_name, param_info in tool['function']['parameters']['properties'].items():
                             required = param_name in tool['function']['parameters'].get('required', [])
-                            print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
+                            on_print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
         
         # Print plugin tools
         if plugin_tools:
-            print("\nPlugin tools:")
+            on_print("\nPlugin tools:")
             for tool in plugin_tools:
-                print(f"\n{tool['function']['name']}:")
-                print(f"  Description: {tool['function']['description']}")
+                on_print(f"\n{tool['function']['name']}:")
+                on_print(f"  Description: {tool['function']['description']}")
                 if 'parameters' in tool['function']:
                     if 'properties' in tool['function']['parameters']:
-                        print("  Parameters:")
+                        on_print("  Parameters:")
                         for param_name, param_info in tool['function']['parameters']['properties'].items():
                             required = param_name in tool['function']['parameters'].get('required', [])
-                            print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
+                            on_print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
         
         sys.exit(0)
     
@@ -4023,33 +4054,33 @@ def run():
             collections = chroma_client.list_collections()
             
             if not collections:
-                print("\nNo collections found.")
+                on_print("\nNo collections found.")
             else:
-                print(f"\nAvailable ChromaDB collections ({len(collections)}):")
-                print("=" * 80)
+                on_print(f"\nAvailable ChromaDB collections ({len(collections)}):")
+                on_print("=" * 80)
                 
                 for collection in collections:
-                    print(f"\nCollection: {collection.name}")
+                    on_print(f"\nCollection: {collection.name}")
                     
                     # Get collection metadata
                     if hasattr(collection, 'metadata') and collection.metadata:
                         if isinstance(collection.metadata, dict):
                             if 'description' in collection.metadata:
-                                print(f"  Description: {collection.metadata['description']}")
+                                on_print(f"  Description: {collection.metadata['description']}")
                             
                             # Print other metadata
                             for key, value in collection.metadata.items():
                                 if key != 'description':
-                                    print(f"  {key}: {value}")
+                                    on_print(f"  {key}: {value}")
                     
                     # Get collection count
                     try:
                         count = collection.count()
-                        print(f"  Documents: {count}")
+                        on_print(f"  Documents: {count}")
                     except:
                         pass
                 
-                print("\n" + "=" * 80)
+                on_print("\n" + "=" * 80)
         
         except Exception as e:
             on_print(f"Error listing collections: {str(e)}", Fore.RED)
@@ -4191,7 +4222,8 @@ def run():
             current_collection_name, 
             chroma_client, 
             embeddings_model, 
-            verbose=verbose_mode
+            verbose=verbose_mode,
+            summary_model=current_model
         )
         
         document_indexer.index_documents(
@@ -4249,7 +4281,7 @@ def run():
                 on_print("\n" + "="*80, Fore.CYAN)
                 on_print("QUERY RESULTS", Fore.CYAN + Style.BRIGHT)
                 on_print("="*80, Fore.CYAN)
-                print(query_results)
+                on_print(query_results)
                 on_print("="*80, Fore.CYAN)
         else:
             on_print("No results found for the query.", Fore.YELLOW)
@@ -4258,6 +4290,8 @@ def run():
         if not interactive_mode:
             sys.exit(0)
 
+    # Note: Web search handling moved to after model initialization (line ~4650)
+    
     # Handle agent instantiation if requested
     if args.instantiate_agent:
         # Validate required parameters
@@ -4331,7 +4365,8 @@ def run():
                 if verbose_mode:
                     on_print(f"OpenAI initialized with model: {current_model}", Fore.WHITE + Style.DIM)
             else:
-                on_print("OpenAI API key not found, falling back to Ollama", Fore.YELLOW)
+                if verbose_mode:
+                    on_print("OpenAI API key not found, falling back to Ollama", Fore.YELLOW)
                 use_openai = False
         
         # Initialize the model if not using OpenAI/Azure
@@ -4362,13 +4397,11 @@ def run():
         if output_file:
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(str(result))
-            on_print(f"Agent result saved to: {output_file}", Fore.GREEN)
+                
+            if verbose_mode:
+                on_print(f"Agent result saved to: {output_file}", Fore.GREEN)
         else:
-            on_print("\n" + "="*80, Fore.CYAN)
-            on_print("AGENT RESULT", Fore.CYAN + Style.BRIGHT)
-            on_print("="*80, Fore.CYAN)
-            print(result)
-            on_print("="*80, Fore.CYAN)
+            on_print(result)
         
         # Exit after agent execution (non-interactive mode)
         if not interactive_mode:
@@ -4398,7 +4431,8 @@ def run():
             on_print("No Azure OpenAI API key found in the environment variables, make sure to set the AZURE_OPENAI_API_KEY.", Fore.RED)
             use_azure_openai = False
         else:
-            on_print("Azure OpenAI API key found in the environment variables, redirecting to Azure OpenAI API.", Fore.WHITE + Style.DIM)
+            if verbose_mode:
+                on_print("Azure OpenAI API key found in the environment variables, redirecting to Azure OpenAI API.", Fore.WHITE + Style.DIM)
             azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 
             if not azure_endpoint:
@@ -4530,6 +4564,143 @@ def run():
         tool_name = tool_name.strip().strip('\'').strip('\"')
         selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool_name)
 
+    # Handle web search if requested (after model initialization)
+    if args.web_search:
+        show_intermediate = args.web_search_show_intermediate
+        
+        if verbose_mode:
+            on_print(f"Performing web search for: {args.web_search}", Fore.WHITE + Style.DIM)
+            on_print(f"Number of results: {args.web_search_results}", Fore.WHITE + Style.DIM)
+            on_print(f"Region: {args.web_search_region}", Fore.WHITE + Style.DIM)
+            on_print(f"Show intermediate results: {show_intermediate}", Fore.WHITE + Style.DIM)
+        
+        # Ensure ChromaDB is loaded for web search caching
+        load_chroma_client()
+        
+        if not chroma_client:
+            on_print("Web search requires ChromaDB to be running. Please start ChromaDB server or configure a persistent database path.", Fore.RED)
+            sys.exit(1)
+        
+        # Perform the web search
+        if show_intermediate:
+            web_search_response, intermediate_data = web_search(
+                args.web_search, 
+                n_results=args.web_search_results, 
+                region=args.web_search_region,
+                web_embedding_model=embeddings_model,
+                num_ctx=num_ctx,
+                return_intermediate=True
+            )
+            
+            # Display intermediate results
+            if intermediate_data:
+                on_print("\n" + "="*80, Fore.MAGENTA)
+                on_print("INTERMEDIATE RESULTS", Fore.MAGENTA + Style.BRIGHT)
+                on_print("="*80, Fore.MAGENTA)
+                
+                # Show search results
+                if 'search_results' in intermediate_data and intermediate_data['search_results']:
+                    on_print("\n" + "-"*80, Fore.MAGENTA)
+                    on_print("1. SEARCH RESULTS FROM DUCKDUCKGO", Fore.MAGENTA + Style.BRIGHT)
+                    on_print("-"*80, Fore.MAGENTA)
+                    for i, result in enumerate(intermediate_data['search_results'], 1):
+                        on_print(f"\n{i}. {result.get('title', 'N/A')}", Fore.CYAN + Style.BRIGHT)
+                        on_print(f"   URL: {result.get('href', 'N/A')}", Fore.CYAN)
+                        on_print(f"   Snippet: {result.get('body', 'N/A')}", Fore.WHITE)
+                
+                # Show URLs being crawled
+                if 'urls' in intermediate_data and intermediate_data['urls']:
+                    on_print("\n" + "-"*80, Fore.MAGENTA)
+                    on_print("2. URLS BEING CRAWLED", Fore.MAGENTA + Style.BRIGHT)
+                    on_print("-"*80, Fore.MAGENTA)
+                    for i, url in enumerate(intermediate_data['urls'], 1):
+                        on_print(f"   {i}. {url}", Fore.CYAN)
+                
+                # Show crawled articles
+                if 'articles' in intermediate_data and intermediate_data['articles']:
+                    on_print("\n" + "-"*80, Fore.MAGENTA)
+                    on_print("3. CRAWLED CONTENT", Fore.MAGENTA + Style.BRIGHT)
+                    on_print("-"*80, Fore.MAGENTA)
+                    for i, article in enumerate(intermediate_data['articles'], 1):
+                        on_print(f"\n{i}. URL: {article.get('url', 'N/A')}", Fore.CYAN + Style.BRIGHT)
+                        content = article.get('text', '')
+                        # Show first 500 characters of each article
+                        preview = content[:500] + "..." if len(content) > 500 else content
+                        on_print(f"   Content preview: {preview}", Fore.WHITE)
+                        on_print(f"   Total length: {len(content)} characters", Fore.YELLOW)
+                
+                # Show vector DB results
+                if 'vector_db_results' in intermediate_data:
+                    on_print("\n" + "-"*80, Fore.MAGENTA)
+                    on_print("4. VECTOR DATABASE RETRIEVAL RESULTS", Fore.MAGENTA + Style.BRIGHT)
+                    on_print("-"*80, Fore.MAGENTA)
+                    on_print(intermediate_data['vector_db_results'], Fore.WHITE)
+                
+                on_print("\n" + "="*80, Fore.MAGENTA)
+        else:
+            web_search_response = web_search(
+                args.web_search, 
+                n_results=args.web_search_results, 
+                region=args.web_search_region,
+                web_embedding_model=embeddings_model,
+                num_ctx=num_ctx,
+                return_intermediate=False
+            )
+        
+        if web_search_response:
+            # Build the prompt with web search context
+            web_search_prompt = f"Context: {web_search_response}\n\n"
+            web_search_prompt += f"Question: {args.web_search}\n"
+            web_search_prompt += "Answer the question as truthfully as possible using the provided web search results, and if the answer is not contained within the text above, say 'I don't know'.\n"
+            web_search_prompt += "Cite some useful links from the search results to support your answer."
+            
+            if verbose_mode:
+                on_print("\n" + "="*80, Fore.CYAN)
+                on_print("WEB SEARCH CONTEXT", Fore.CYAN + Style.BRIGHT)
+                on_print("="*80, Fore.CYAN)
+                on_print(web_search_response, Fore.WHITE + Style.DIM)
+                on_print("="*80, Fore.CYAN)
+            
+            # Use the current model (already initialized)
+            if verbose_mode:
+                on_print(f"Using model: {current_model}", Fore.WHITE + Style.DIM)
+            
+            # Get answer from the model
+            on_print("\n" + "="*80, Fore.GREEN)
+            on_print("ANSWER", Fore.GREEN + Style.BRIGHT)
+            on_print("="*80, Fore.GREEN)
+            
+            answer = ask_ollama(
+                "",
+                web_search_prompt,
+                current_model,
+                temperature=temperature,
+                no_bot_prompt=True,
+                stream_active=stream_active,
+                num_ctx=num_ctx
+            )
+            
+            if answer:
+                if not stream_active:
+                    on_print(answer)
+                on_print("\n" + "="*80, Fore.GREEN)
+                
+                # Save to output file if specified
+                if output_file:
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        f.write(f"Query: {args.web_search}\n\n")
+                        f.write(f"Context:\n{web_search_response}\n\n")
+                        f.write(f"Answer:\n{answer}\n")
+                    on_print(f"\nResults saved to: {output_file}", Fore.GREEN)
+            else:
+                on_print("No answer generated.", Fore.YELLOW)
+        else:
+            on_print("No web search results found.", Fore.YELLOW)
+        
+        # If not in interactive mode, exit after web search
+        if not interactive_mode:
+            sys.exit(0)
+
     # Main conversation loop
     while True:
         thoughts = None
@@ -4657,7 +4828,7 @@ def run():
                 scraper.scrape()
                 folder_to_index = temp_folder
 
-            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model, verbose=verbose_mode)
+            document_indexer = DocumentIndexer(folder_to_index, current_collection_name, chroma_client, embeddings_model, verbose=verbose_mode, summary_model=current_model)
             document_indexer.index_documents(num_ctx=num_ctx)
 
             if temp_folder:

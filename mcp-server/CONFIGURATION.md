@@ -266,6 +266,28 @@ Yes! Just pass the `model` parameter when calling each tool:
 - For web_search: `{"query": "...", "model": "qwen3:4b"}`
 - For chat: `{"message": "...", "model": "llama3:8b"}`
 
+### How do I see what's happening during a web search?
+
+Use the `show_intermediate` parameter when calling the `web_search` tool:
+```json
+{
+  "query": "What is Python?",
+  "show_intermediate": true
+}
+```
+
+This will display:
+1. Search results from DuckDuckGo (titles, URLs, snippets)
+2. URLs being crawled
+3. Content previews from each crawled page
+4. Vector database retrieval results
+
+This is useful for:
+- Understanding why certain answers were generated
+- Debugging search quality issues
+- Verifying content is being crawled correctly
+- Transparency in AI reasoning
+
 ### My Azure deployment isn't being recognized
 
 Make sure:
