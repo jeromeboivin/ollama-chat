@@ -63,7 +63,6 @@ alternate_model = None
 thinking_model = None
 thinking_model_reasoning_pattern = None
 memory_manager = None
-agent_crew_manager = None
 think_mode_on = False
 
 other_instance_url = None
@@ -2210,149 +2209,7 @@ Based on the context of the completed tasks and the remaining plan, provide a re
         except Exception as e:
             return f"Error during task processing: {str(e)}"
 
-class AgentCrewManager:
-    def __init__(self, database_path="agents.json", verbose=False, num_ctx=None):
-        """
-        Initialize the AgentCrewManager with a path to the JSON database.
-
-        Parameters:
-        - database_path: Path to the JSON file used to store agent data.
-        """
-        self.database_path = database_path
-        self.verbose = verbose
-        self.num_ctx = num_ctx
-
-        # Load the database or initialize it if it doesn't exist
-        if os.path.exists(self.database_path):
-            with open(self.database_path, "r") as file:
-                self.agents_db = json.load(file)
-        else:
-            self.agents_db = {}
-            self._save_database()
-
-    def _save_database(self):
-        """Save the current state of the database to the JSON file."""
-        with open(self.database_path, "w") as file:
-            json.dump(self.agents_db, file, indent=4)
-
-    def add_agent(self, name, description, model, system_prompt=None, temperature=0.7, max_iterations=5, tools=None):
-        """
-        Add a new agent to the database.
-
-        Parameters:
-        - name: A unique identifier for the agent.
-        - model: The language model used by the agent.
-        - system_prompt: The foundational instruction for the agent.
-        - temperature: The creativity of the responses.
-        - max_iterations: The maximum number of iterations for task processing.
-        - tools: A dictionary of tools or a list of tool names.
-        - verbose: Whether the agent operates in verbose mode.
-        - num_ctx: The context length for the language model.
-        """
-        if name in self.agents_db:
-            raise ValueError(f"An agent with the name '{name}' already exists.")
-
-        # Add agent details to the database
-        self.agents_db[name] = {
-            "description": description,
-            "model": model,
-            "system_prompt": system_prompt,
-            "temperature": temperature,
-            "max_iterations": max_iterations,
-            "tools": tools or []
-        }
-        self._save_database()
-
-    def add_agent_from_instance(self, agent):
-        """
-        Add an agent to the database using an existing Agent instance.
-
-        Parameters:
-        - agent: An instance of the Agent class.
-        """
-        self.add_agent(
-            name=agent.name,
-            description=agent.description,
-            model=agent.model,
-            system_prompt=agent.system_prompt,
-            temperature=agent.temperature,
-            max_iterations=agent.max_iterations,
-            tools=agent.tools
-        )
-
-    def remove_agent(self, name):
-        """
-        Remove an agent from the database.
-
-        Parameters:
-        - name: The unique identifier of the agent to remove.
-        """
-        if name not in self.agents_db:
-            raise ValueError(f"No agent found with the name '{name}'.")
-
-        del self.agents_db[name]
-        self._save_database()
-
-    def get_agent(self, name):
-        """
-        Retrieve an agent's details from the database.
-
-        Parameters:
-        - name: The unique identifier of the agent to retrieve.
-
-        Returns:
-        - A dictionary containing the agent's details.
-        """
-        if name not in self.agents_db:
-            raise ValueError(f"No agent found with the name '{name}'.")
-
-        return self.agents_db[name]
-
-    def list_agents(self):
-        """
-        List all agents currently in the database.
-
-        Returns:
-        - A list of agent names.
-        """
-        return list(self.agents_db.keys())
-
-    def instantiate_agents(self, agent_names=None):
-        """
-        Instantiate agents based on the provided list of names.
-        If no names are provided, instantiate all agents.
-
-        Parameters:
-        - agent_names: A list of agent names to instantiate (optional).
-
-        Returns:
-        - A list of instantiated Agent objects.
-        """
-        if agent_names is None:
-            agent_names = self.agents_db.keys()
-
-        instantiated_agents = []
-        for name in agent_names:
-            if name in self.agents_db:
-                details = self.agents_db[name]
-                agent = Agent(
-                    name=name,
-                    description=details["description"],
-                    model=details["model"],
-                    system_prompt=details["system_prompt"],
-                    temperature=details["temperature"],
-                    max_iterations=details["max_iterations"],
-                    tools=details["tools"],
-                    verbose=self.verbose,
-                    num_ctx=self.num_ctx
-                )
-                instantiated_agents.append(agent)
-            else:
-                print(f"Warning: Agent with name '{name}' not found in the database.")
-        return instantiated_agents
-
 def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str):
-    global agent_crew_manager
     global verbose_mode
     
     # Make sure tools are unique
@@ -2417,9 +2274,6 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         tools=agent_tools,
         verbose=verbose_mode
     )
-
-    # Add the agent to the agent crew manager
-    agent_crew_manager.add_agent_from_instance(agent)
 
 def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str = None, process_task=True) -> str|Agent:
     """
@@ -4002,7 +3856,6 @@ def run():
     global thinking_model
     global thinking_model_reasoning_pattern
     global number_of_documents_to_return_from_vector_db
-    global agent_crew_manager
     global think_mode_on
     
     default_model = None
@@ -4385,8 +4238,6 @@ def run():
         # Strip any leading or trailing spaces, single or double quotes
         tool_name = tool_name.strip().strip('\'').strip('\"')
         selected_tools = select_tool_by_name(get_available_tools(), selected_tools, tool_name)
-
-    agent_crew_manager = AgentCrewManager(verbose=verbose_mode, num_ctx=num_ctx)
 
     # Main conversation loop
     while True:
