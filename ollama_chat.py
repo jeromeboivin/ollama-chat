@@ -1106,11 +1106,50 @@ def select_tool_by_name(available_tools, selected_tools, target_tool_name):
     on_print(f"Tool '{target_tool_name}' not found.\n")
     return selected_tools
 
-def discover_plugins(plugin_folder=None):
+def get_builtin_tool_names():
+    """
+    Returns a list of built-in tool names (tools that don't come from plugins).
+    """
+    builtin_tools = [
+        'web_search',
+        'query_vector_database',
+        'retrieve_relevant_memory',
+        'instantiate_agent_with_tools_and_process_task',
+        'create_new_agent_with_tools',
+        'summarize_text_file'
+    ]
+    return builtin_tools
+
+def requires_plugins(requested_tool_names):
+    """
+    Determines if any of the requested tools are plugin tools (not built-in).
+    
+    :param requested_tool_names: List of tool names requested by the user
+    :return: True if any requested tool is a plugin tool, False otherwise
+    """
+    if not requested_tool_names:
+        return False
+    
+    builtin_tools = get_builtin_tool_names()
+    
+    for tool_name in requested_tool_names:
+        # Strip any leading or trailing spaces, single or double quotes
+        tool_name = tool_name.strip().strip('\'').strip('\"')
+        if tool_name and tool_name not in builtin_tools:
+            return True
+    
+    return False
+
+def discover_plugins(plugin_folder=None, load_plugins=True):
     global verbose_mode
     global other_instance_url
     global listening_port
     global user_prompt
+
+    if not load_plugins:
+        if verbose_mode:
+            on_print("Plugin loading is disabled.", Fore.YELLOW)
+        return []
 
     if plugin_folder is None:
         # Get the directory of the current script (main program)
@@ -2496,9 +2535,16 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
     global current_model
     global verbose_mode
     global plugins
+    global chroma_client
 
     if not query:
         return ""
+
+    # Initialize ChromaDB client if not already initialized
+    load_chroma_client()
+    
+    if not chroma_client:
+        return "Web search requires ChromaDB to be running. Please start ChromaDB server or configure a persistent database path."
 
     search = DDGS()
     urls = []
@@ -4006,16 +4052,33 @@ def run():
     parser.add_argument('--tools', type=str, help="List of tools to activate and use in the conversation, separated by commas", default=None)
     parser.add_argument('--memory-collection-name', type=str, help="Name of the memory collection to use for context management", default=memory_collection_name)
     parser.add_argument('--long-term-memory-file', type=str, help="Long-term memory file name", default=long_term_memory_file)
+    parser.add_argument('--disable-plugins', type=bool, help='Disable external plugins to speed up execution (plugins will still be loaded if required by requested tools)', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
     plugins_folder = args.plugins_folder
     verbose_mode = args.verbose
+    disable_plugins = args.disable_plugins
+    
+    # Parse requested tool names from command line
+    requested_tool_names = args.tools.split(',') if args.tools else []
+    
+    # We'll also need to check chatbot tools, but we need to load chatbot config first
+    # For now, determine if plugins need to be loaded based on command line tools
+    # Plugins are loaded if:
+    # 1. --disable-plugins is not set, OR
+    # 2. Any requested tool is a plugin tool (not built-in)
+    load_plugins_initially = not disable_plugins or requires_plugins(requested_tool_names)
+    
+    if verbose_mode and disable_plugins and not load_plugins_initially:
+        on_print("Plugins are disabled and no plugin tools were requested via command line.", Fore.YELLOW)
+    elif verbose_mode and disable_plugins and load_plugins_initially:
+        on_print("Plugins are disabled but plugin tools were requested. Loading plugins anyway.", Fore.YELLOW)
     
     # Discover plugins before listing tools
     if args.list_tools:
         # Load plugins first
         global plugins
-        plugins = discover_plugins(plugins_folder)
+        plugins = discover_plugins(plugins_folder, load_plugins=True)  # Always load for --list-tools
         if verbose_mode:
             print(f"\nDiscovered {len(plugins)} plugins")
         
@@ -4126,12 +4189,7 @@ def run():
     if verbose_mode and user_prompt:
         on_print(f"User prompt: {user_prompt}", Fore.WHITE + Style.DIM)
 
-    plugins = discover_plugins(plugins_folder)
-
-    if verbose_mode:
-        on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
-
-    # Load additional chatbots from a JSON file
+    # Load additional chatbots from a JSON file to check for tools
     load_additional_chatbots(additional_chatbots_file)
 
     chatbot = None
@@ -4151,6 +4209,21 @@ def run():
     if chatbot is None:
         # Load the default chatbot
         chatbot = chatbots[0]
+    
+    # Now check if chatbot has tools that require plugins
+    chatbot_tool_names = chatbot.get("tools", []) if chatbot else []
+    all_requested_tools = requested_tool_names + chatbot_tool_names
+    
+    # Final determination: load plugins if not disabled OR if any requested tool is a plugin tool
+    load_plugins = not disable_plugins or requires_plugins(all_requested_tools)
+    
+    if verbose_mode and disable_plugins and requires_plugins(chatbot_tool_names):
+        on_print("Chatbot requires plugin tools. Loading plugins despite --disable-plugins flag.", Fore.YELLOW)
+    
+    plugins = discover_plugins(plugins_folder, load_plugins=load_plugins)
+
+    if verbose_mode:
+        on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
 
     if args.index_documents:
         load_chroma_client()
