@@ -7,7 +7,11 @@
 ## Key Features
 - **Local and Private LLM Integration:** Interact with local LLMs through `Ollama` and `Llama-Cpp` for high-performance AI without sacrificing privacy—your data stays on your machine.
 - **RAG Support:** Harness Retrieval-Augmented Generation (RAG) with ChromaDB to provide more contextually relevant answers by integrating vectorized data.
-- **Custom Plugins:** Easily add custom plugins that extend the model’s capabilities, making the tool adaptable to your personal or team workflows.
+  - **Command-Line RAG Operations:** Full support for document indexing and querying from the command line. See [RAG CLI Usage Guide](RAG_CLI_USAGE.md) for details.
+  - **Advanced Chunking:** Smart document chunking with configurable strategies
+  - **Selective Indexing:** Extract and index specific document sections
+  - **Auto-Summarization:** Generate and prepend AI summaries to chunks for better retrieval
+- **Custom Plugins:** Easily add custom plugins that extend the model's capabilities, making the tool adaptable to your personal or team workflows.
 - **Web Search:** Use the `/web` command or web_search tool to search the web, chunk articles, and store them in ChromaDB for generating insightful answers.
 - **Conversation Memory:** Remembering topics discussed across all chats saves you from having to repeat information and makes future conversations more helpful.
 
@@ -94,6 +98,54 @@ Ollama-Chat comes with a built-in feature that allows you to search the web usin
 
 4. Start customizing by writing your own plugins!
 
+## Quick Start: RAG Operations
+
+### Index Documents from Command Line
+```bash
+# Basic indexing
+python ollama_chat.py --index-documents /path/to/docs --collection my_docs --embeddings-model mxbai-embed-large --interactive=False
+
+# Advanced indexing with options
+python ollama_chat.py \
+  --index-documents /path/to/docs \
+  --collection my_docs \
+  --embeddings-model mxbai-embed-large \
+  --chunk-documents \
+  --split-paragraphs \
+  --add-summary \
+  --verbose \
+  --interactive=False
+```
+
+### Query Documents from Command Line
+```bash
+# Basic query
+python ollama_chat.py --query "What is the main concept?" --collection my_docs --embeddings-model mxbai-embed-large --interactive=False
+
+# Query with custom options
+python ollama_chat.py \
+  --query "What is the main concept?" \
+  --collection my_docs \
+  --embeddings-model mxbai-embed-large \
+  --query-n-results 10 \
+  --query-distance-threshold 0.5 \
+  --output results.txt \
+  --interactive=False
+```
+
+### Combined Operations
+```bash
+# Index and then query in one command
+python ollama_chat.py \
+  --index-documents /path/to/docs \
+  --query "What is the main concept?" \
+  --collection my_docs \
+  --embeddings-model mxbai-embed-large \
+  --interactive=False
+```
+
+**For complete RAG documentation**, including all parameters, advanced features, and examples, see the [RAG CLI Usage Guide](RAG_CLI_USAGE.md).
+
 ## How to Use the Ollama Chatbot Script
 
 This guide will explain how to use the `ollama_chat.py` script. This script is designed to act as a terminal-based user interface for Ollama and it accepts several command-line arguments to customize its behavior.
@@ -131,16 +183,30 @@ Here's a step-by-step guide on how to use it:
 15. **Save the conversation automatically**: Use the `--auto-save` argument to automatically saves the conversation when exiting the program.
 
 16. **Index a local folder to the current ChromaDB collection**: Use the `--index-documents` to specify the root folder containing text files to index.
+    - **Advanced indexing options** (see [RAG CLI Usage Guide](RAG_CLI_USAGE.md) for details):
+      - `--chunk-documents`: Enable/disable document chunking (default: enabled)
+      - `--skip-existing`: Skip documents already in collection (default: enabled)
+      - `--extract-start <text>`: Start marker for extracting specific document sections
+      - `--extract-end <text>`: End marker for extracting specific document sections
+      - `--split-paragraphs`: Split Markdown content into paragraphs
+      - `--add-summary`: Generate and prepend AI summaries to chunks (default: enabled)
 
-17. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
+17. **Query the vector database**: Use `--query "<your question>"` to query indexed documents from the command line.
+    - **Query options**:
+      - `--query-n-results <number>`: Number of results to return (default: 8)
+      - `--query-distance-threshold <float>`: Distance threshold for filtering results (default: 0.0)
+      - `--expand-query`: Enable/disable query expansion for better retrieval (default: enabled)
+      - `--output <file>`: Save query results to a file
 
-18. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
+18. **Deactivate conversation memory**: Use the `--no-memory` argument to deactivate memory management.
 
-19. **Start the conversation automatically**: Use the `--auto-start` argument to start the conversation immediately without requiring user input.
+19. **Change default Ollama context window length**: Use the `--context-window <window length>` to increase or decrease Ollama context window length. If not specified, the default value is used, which is 2048 tokens.
 
-20. **Specify the memory collection name**: Use the `--memory-collection-name <collection name>` argument to specify the name of the memory collection to use for context management. If not specified, the default value is used.
+20. **Start the conversation automatically**: Use the `--auto-start` argument to start the conversation immediately without requiring user input.
 
-21. **Specify the long-term memory file**: Use the `--long-term-memory-file <file name>` argument to specify the long-term memory file name. If not specified, the default value is used.
+21. **Specify the memory collection name**: Use the `--memory-collection-name <collection name>` argument to specify the name of the memory collection to use for context management. If not specified, the default value is used.
+
+22. **Specify the long-term memory file**: Use the `--long-term-memory-file <file name>` argument to specify the long-term memory file name. If not specified, the default value is used.
 
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
@@ -173,6 +239,7 @@ The Ollama client supports several special switches to enhance your interaction 
 7. `/tools`: This command displays the available tools and allows you to select or deselect them for use in your session.
 
 8. `/index <folder path>`: Index text files in the specified folder to current vector database collection.
+   - **Note:** For non-interactive indexing with advanced options (chunking, extraction, summaries), use the CLI parameters instead. See [RAG CLI Usage Guide](RAG_CLI_USAGE.md).
 
 9. `/cb`: This command replaces /cb with the content of your clipboard.
 

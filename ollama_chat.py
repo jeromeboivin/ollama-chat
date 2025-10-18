@@ -2502,6 +2502,7 @@ def print_possible_prompt_commands():
     /rmcollection <collection name>: Delete the vector database collection.
     /context <model context size>: Change the model's context window size. Default value: 2. Size must be a numeric value between 2 and 125.
     /index <folder path>: Index text files in the folder to the vector database.
+        (Note: For non-interactive indexing, use CLI args: --index-documents, --chunk-documents, --extract-start, --extract-end, etc.)
     /cb: Replace /cb with the clipboard content.
     /load <filename>: Load a conversation from a file.
     /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
@@ -2511,6 +2512,11 @@ def print_possible_prompt_commands():
     reset, clear, restart: Reset the conversation.
     quit, exit, bye: Exit the chatbot.
     For multiline input, you can wrap text with triple double quotes.
+    
+    CLI-only RAG operations (use with --interactive=False):
+    --query "<your question>": Query the vector database from command line
+    --query-n-results <number>: Number of results to return from query
+    --index-documents <folder>: Index documents from folder (with options: --chunk-documents, --skip-existing, etc.)
     """
     return possible_prompt_commands.strip()
 
@@ -3891,6 +3897,16 @@ def run():
     parser.add_argument('--auto-save', type=bool, help='Automatically save conversations to a file at the end of the chat', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--syntax-highlighting', type=bool, help='Use syntax highlighting', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--index-documents', type=str, help='Root folder to index text files', default=None)
+    parser.add_argument('--chunk-documents', type=bool, help='Enable chunking for large documents during indexing', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--skip-existing', type=bool, help='Skip indexing of documents that already exist in the collection', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--extract-start', type=str, help='Start string for extracting specific text sections during indexing', default=None)
+    parser.add_argument('--extract-end', type=str, help='End string for extracting specific text sections during indexing', default=None)
+    parser.add_argument('--split-paragraphs', type=bool, help='Split markdown content into paragraphs during indexing', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--add-summary', type=bool, help='Generate and prepend summaries to document chunks during indexing', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--query', type=str, help='Query the vector database and exit (non-interactive mode)', default=None)
+    parser.add_argument('--query-n-results', type=int, help='Number of results to return from vector database query', default=None)
+    parser.add_argument('--query-distance-threshold', type=float, help='Distance threshold for filtering query results', default=0.0)
+    parser.add_argument('--expand-query', type=bool, help='Expand query for better retrieval', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--interactive', type=bool, help='Use interactive mode', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--plugins-folder', type=str, default=None, help='Path to the plugins folder')
     parser.add_argument('--stream', type=bool, help='Use stream mode for Ollama API', default=True, action=argparse.BooleanOptionalAction)
@@ -3911,6 +3927,14 @@ def run():
     plugins_folder = args.plugins_folder
     verbose_mode = args.verbose
     disable_plugins = args.disable_plugins
+    
+    # Automatically disable plugins when using RAG-specific parameters (indexing or querying)
+    # These operations don't need plugins and disabling them speeds up execution
+    rag_operations_requested = args.index_documents or args.query
+    if rag_operations_requested and not disable_plugins:
+        disable_plugins = True
+        if verbose_mode:
+            on_print("Plugins automatically disabled for RAG operations (indexing/querying).", Fore.YELLOW)
     
     # Parse requested tool names from command line
     requested_tool_names = args.tools.split(',') if args.tools else []
@@ -4078,10 +4102,95 @@ def run():
     if verbose_mode:
         on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
 
+    # Handle document indexing if requested
     if args.index_documents:
         load_chroma_client()
-        document_indexer = DocumentIndexer(args.index_documents, current_collection_name, chroma_client, embeddings_model)
-        document_indexer.index_documents(num_ctx=num_ctx)
+        
+        if not current_collection_name:
+            on_print("No ChromaDB collection specified. Use --collection to specify a collection name.", Fore.RED)
+            sys.exit(1)
+        
+        if verbose_mode:
+            on_print(f"Indexing documents from: {args.index_documents}", Fore.WHITE + Style.DIM)
+            on_print(f"Collection: {current_collection_name}", Fore.WHITE + Style.DIM)
+            on_print(f"Chunking: {args.chunk_documents}", Fore.WHITE + Style.DIM)
+            on_print(f"Skip existing: {args.skip_existing}", Fore.WHITE + Style.DIM)
+            if args.extract_start or args.extract_end:
+                on_print(f"Extraction range: '{args.extract_start}' to '{args.extract_end}'", Fore.WHITE + Style.DIM)
+            on_print(f"Split paragraphs: {args.split_paragraphs}", Fore.WHITE + Style.DIM)
+            on_print(f"Add summary: {args.add_summary}", Fore.WHITE + Style.DIM)
+        
+        document_indexer = DocumentIndexer(
+            args.index_documents, 
+            current_collection_name, 
+            chroma_client, 
+            embeddings_model, 
+            verbose=verbose_mode
+        )
+        
+        document_indexer.index_documents(
+            allow_chunks=args.chunk_documents,
+            no_chunking_confirmation=True,  # Non-interactive mode
+            split_paragraphs=args.split_paragraphs,
+            num_ctx=num_ctx,
+            skip_existing=args.skip_existing,
+            extract_start=args.extract_start,
+            extract_end=args.extract_end,
+            add_summary=args.add_summary
+        )
+        
+        on_print(f"Indexing completed for folder: {args.index_documents}", Fore.GREEN)
+        
+        # If only indexing (no query or interactive mode), exit
+        if not args.query and not interactive_mode:
+            sys.exit(0)
+    
+    # Handle vector database query if requested
+    if args.query:
+        load_chroma_client()
+        
+        if not current_collection_name:
+            on_print("No ChromaDB collection specified. Use --collection to specify a collection name.", Fore.RED)
+            sys.exit(1)
+        
+        # Set query parameters
+        query_n_results = args.query_n_results if args.query_n_results is not None else number_of_documents_to_return_from_vector_db
+        
+        if verbose_mode:
+            on_print(f"Querying collection: {current_collection_name}", Fore.WHITE + Style.DIM)
+            on_print(f"Query: {args.query}", Fore.WHITE + Style.DIM)
+            on_print(f"Number of results: {query_n_results}", Fore.WHITE + Style.DIM)
+            on_print(f"Distance threshold: {args.query_distance_threshold}", Fore.WHITE + Style.DIM)
+            on_print(f"Expand query: {args.expand_query}", Fore.WHITE + Style.DIM)
+        
+        # Query the vector database
+        query_results = query_vector_database(
+            args.query,
+            collection_name=current_collection_name,
+            n_results=query_n_results,
+            answer_distance_threshold=args.query_distance_threshold,
+            query_embeddings_model=embeddings_model,
+            expand_query=args.expand_query
+        )
+        
+        # Output results
+        if query_results:
+            if output_file:
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    f.write(query_results)
+                on_print(f"Query results saved to: {output_file}", Fore.GREEN)
+            else:
+                on_print("\n" + "="*80, Fore.CYAN)
+                on_print("QUERY RESULTS", Fore.CYAN + Style.BRIGHT)
+                on_print("="*80, Fore.CYAN)
+                print(query_results)
+                on_print("="*80, Fore.CYAN)
+        else:
+            on_print("No results found for the query.", Fore.YELLOW)
+        
+        # If not in interactive mode, exit after query
+        if not interactive_mode:
+            sys.exit(0)
 
     auto_start_conversation = ("starts_conversation" in chatbot and chatbot["starts_conversation"]) or auto_start_conversation
     system_prompt = chatbot["system_prompt"]
