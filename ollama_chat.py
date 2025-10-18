@@ -3158,6 +3158,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
     global plugins
     global alternate_model
     global use_openai
+    global use_azure_openai
     global think_mode_on
 
     # Some models do not support the "system" role, merge the system message with the first user message
@@ -3167,7 +3168,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     model_is_an_ollama_model = is_model_an_ollama_model(model)
 
-    if use_openai and not model_is_an_ollama_model:
+    if (use_openai or use_azure_openai) and not model_is_an_ollama_model:
         if verbose_mode:
             on_print("Using OpenAI API for conversation generation.", Fore.WHITE + Style.DIM)
 
@@ -3186,7 +3187,7 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     model_support_tools = True
 
-    if use_openai and not model_is_an_ollama_model:
+    if (use_openai or use_azure_openai) and not model_is_an_ollama_model:
         completion_done = False
 
         while not completion_done:
@@ -3923,6 +3924,15 @@ def run():
     parser.add_argument('--memory-collection-name', type=str, help="Name of the memory collection to use for context management", default=memory_collection_name)
     parser.add_argument('--long-term-memory-file', type=str, help="Long-term memory file name", default=long_term_memory_file)
     parser.add_argument('--disable-plugins', type=bool, help='Disable external plugins to speed up execution (plugins will still be loaded if required by requested tools)', default=False, action=argparse.BooleanOptionalAction)
+    
+    # Agent instantiation arguments
+    parser.add_argument('--instantiate-agent', type=bool, help='Instantiate an agent with tools and process a task', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--agent-task', type=str, help='Task for the agent to solve', default=None)
+    parser.add_argument('--agent-system-prompt', type=str, help='System prompt for the agent', default=None)
+    parser.add_argument('--agent-tools', type=str, help='Comma-separated list of tools for the agent', default=None)
+    parser.add_argument('--agent-name', type=str, help='Name for the agent', default=None)
+    parser.add_argument('--agent-description', type=str, help='Description of the agent', default=None)
+    
     args = parser.parse_args()
 
     plugins_folder = args.plugins_folder
@@ -4245,6 +4255,122 @@ def run():
             on_print("No results found for the query.", Fore.YELLOW)
         
         # If not in interactive mode, exit after query
+        if not interactive_mode:
+            sys.exit(0)
+
+    # Handle agent instantiation if requested
+    if args.instantiate_agent:
+        # Validate required parameters
+        if not args.agent_task:
+            on_print("Error: --agent-task is required when using --instantiate-agent", Fore.RED)
+            sys.exit(1)
+        
+        if not args.agent_system_prompt:
+            on_print("Error: --agent-system-prompt is required when using --instantiate-agent", Fore.RED)
+            sys.exit(1)
+        
+        if args.agent_tools is None:
+            on_print("Error: --agent-tools is required when using --instantiate-agent (use empty string for no tools)", Fore.RED)
+            sys.exit(1)
+        
+        if not args.agent_name:
+            on_print("Error: --agent-name is required when using --instantiate-agent", Fore.RED)
+            sys.exit(1)
+        
+        if not args.agent_description:
+            on_print("Error: --agent-description is required when using --instantiate-agent", Fore.RED)
+            sys.exit(1)
+        
+        # Parse tools list (handle empty string for no tools)
+        agent_tools_list = [tool.strip() for tool in args.agent_tools.split(',') if tool.strip()]
+        
+        if verbose_mode:
+            on_print(f"Instantiating agent: {args.agent_name}", Fore.WHITE + Style.DIM)
+            on_print(f"Task: {args.agent_task}", Fore.WHITE + Style.DIM)
+            on_print(f"System Prompt: {args.agent_system_prompt}", Fore.WHITE + Style.DIM)
+            on_print(f"Tools: {agent_tools_list}", Fore.WHITE + Style.DIM)
+            on_print(f"Description: {args.agent_description}", Fore.WHITE + Style.DIM)
+        
+        # Load ChromaDB if needed (for agents that use vector database tools)
+        load_chroma_client()
+        
+        # Ensure plugins are loaded if any of the agent tools require them
+        if not plugins and requires_plugins(agent_tools_list):
+            plugins = discover_plugins(plugins_folder, load_plugins=True)
+        
+        # Initialize the model and API client (required for agent instantiation)
+        # Set up Azure OpenAI client if using Azure
+        if use_azure_openai and not openai_client:
+            from openai import AzureOpenAI
+            
+            api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+            
+            if api_key and azure_endpoint and deployment:
+                openai_client = AzureOpenAI(
+                    api_version="2024-02-15-preview",
+                    azure_endpoint=azure_endpoint,
+                    api_key=api_key,
+                )
+                current_model = deployment
+                if verbose_mode:
+                    on_print(f"Azure OpenAI initialized with deployment: {deployment}", Fore.WHITE + Style.DIM)
+            else:
+                on_print("Azure OpenAI configuration incomplete, falling back to Ollama", Fore.YELLOW)
+                use_azure_openai = False
+        
+        # Set up OpenAI client if using OpenAI
+        if use_openai and not use_azure_openai and not openai_client:
+            from openai import OpenAI
+            
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
+                openai_client = OpenAI(api_key=api_key)
+                current_model = preferred_model if preferred_model else "gpt-4"
+                if verbose_mode:
+                    on_print(f"OpenAI initialized with model: {current_model}", Fore.WHITE + Style.DIM)
+            else:
+                on_print("OpenAI API key not found, falling back to Ollama", Fore.YELLOW)
+                use_openai = False
+        
+        # Initialize the model if not using OpenAI/Azure
+        if not current_model:
+            if not use_openai and not use_azure_openai:
+                # For Ollama, select available model
+                default_model_temp = preferred_model if preferred_model else "qwen3:4b"
+                if ":" not in default_model_temp:
+                    default_model_temp += ":latest"
+                current_model = select_ollama_model_if_available(default_model_temp)
+        
+        if verbose_mode:
+            on_print(f"Using model: {current_model}", Fore.WHITE + Style.DIM)
+            on_print(f"Use Azure OpenAI: {use_azure_openai}", Fore.WHITE + Style.DIM)
+            on_print(f"Use OpenAI: {use_openai}", Fore.WHITE + Style.DIM)
+        
+        # Call the agent instantiation function directly
+        result = instantiate_agent_with_tools_and_process_task(
+            task=args.agent_task,
+            system_prompt=args.agent_system_prompt,
+            tools=agent_tools_list,
+            agent_name=args.agent_name,
+            agent_description=args.agent_description,
+            process_task=True
+        )
+        
+        # Output result
+        if output_file:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(str(result))
+            on_print(f"Agent result saved to: {output_file}", Fore.GREEN)
+        else:
+            on_print("\n" + "="*80, Fore.CYAN)
+            on_print("AGENT RESULT", Fore.CYAN + Style.BRIGHT)
+            on_print("="*80, Fore.CYAN)
+            print(result)
+            on_print("="*80, Fore.CYAN)
+        
+        # Exit after agent execution (non-interactive mode)
         if not interactive_mode:
             sys.exit(0)
 

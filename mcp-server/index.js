@@ -447,6 +447,48 @@ class OllamaChatMCPServer {
             required: [],
           },
         },
+        {
+          name: "instantiate_agent_with_tools_and_process_task",
+          description: "Creates an agent with a specified name using a provided system prompt, task, and a list of tools. Executes the task-solving process and returns the result. The tools must be chosen from a predefined set of available tools.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              task: {
+                type: "string",
+                description: "The task or problem that the agent needs to solve. Provide a clear and concise description.",
+              },
+              system_prompt: {
+                type: "string",
+                description: "The system prompt that defines the agent's behavior, personality, and approach to solving the task.",
+              },
+              tools: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+                description: "A list of tools to be used by the agent for solving the task. Must be an array of tool names from the available tools list.",
+              },
+              agent_name: {
+                type: "string",
+                description: "A unique name for the agent that will be used for instantiation.",
+              },
+              agent_description: {
+                type: "string",
+                description: "A brief description of the agent's purpose and capabilities.",
+              },
+              model: {
+                type: "string",
+                description: "Model to use for the agent (optional, uses configured model if not specified)",
+              },
+              temperature: {
+                type: "number",
+                description: "Temperature for LLM responses (0.0-1.0, default: 0.7)",
+                default: 0.7,
+              },
+            },
+            required: ["task", "system_prompt", "tools", "agent_name", "agent_description"],
+          },
+        },
       ];
 
       // Filter tools if allowedTools is configured
@@ -479,6 +521,8 @@ class OllamaChatMCPServer {
           return await this.handleQueryDocuments(args);
         } else if (name === "list_collections") {
           return await this.handleListCollections(args);
+        } else if (name === "instantiate_agent_with_tools_and_process_task") {
+          return await this.handleInstantiateAgent(args);
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
@@ -764,6 +808,74 @@ class OllamaChatMCPServer {
     };
   }
 
+  async handleInstantiateAgent(args) {
+    const {
+      task,
+      system_prompt,
+      tools,
+      agent_name,
+      agent_description,
+      model,
+      temperature = 0.7
+    } = args;
+
+    // Validate required parameters
+    if (!task) {
+      throw new Error("task parameter is required");
+    }
+
+    if (!system_prompt) {
+      throw new Error("system_prompt parameter is required");
+    }
+
+    if (!tools || !Array.isArray(tools)) {
+      throw new Error("tools parameter is required and must be an array");
+    }
+
+    if (!agent_name) {
+      throw new Error("agent_name parameter is required");
+    }
+
+    if (!agent_description) {
+      throw new Error("agent_description parameter is required");
+    }
+
+    // Build command arguments for ollama_chat.py using the new direct approach
+    const cmdArgs = [
+      OLLAMA_CHAT_PATH,
+      ...this.buildProviderArgs(),  // Add provider-specific flags
+      ...this.buildModelArgs(model),  // Add model configuration
+      ...this.buildToolsArgs(),  // Add tools configuration
+      ...this.buildPluginArgs(tools),  // Enable/disable plugins based on tools used
+      "--no-interactive",
+      "--no-syntax-highlighting",
+      `--chroma-path=${this.config.chromaDBPath}`,  // Use configured ChromaDB database path
+      // Use direct agent instantiation flags (more efficient than prompting)
+      "--instantiate-agent",
+      `--agent-task=${task}`,
+      `--agent-system-prompt=${system_prompt}`,
+      `--agent-tools=${tools.join(',')}`,
+      `--agent-name=${agent_name}`,
+      `--agent-description=${agent_description}`,
+    ];
+
+    if (temperature !== 0.7) {
+      cmdArgs.push(`--temperature=${temperature}`);
+    }
+
+    // Execute the Python script
+    const result = await this.executePythonScript(cmdArgs);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: result,
+        },
+      ],
+    };
+  }
+
   executePythonScript(args) {
     return new Promise((resolve, reject) => {
       // Determine Python command based on OS
@@ -993,6 +1105,36 @@ class OllamaChatMCPServer {
       console.error("⚠️  RAG tests skipped or failed:", error.message);
     }
 
+    // Test 8: Agent Instantiation
+    console.log("=".repeat(60));
+    console.log("Test 8: Testing instantiate_agent_with_tools_and_process_task");
+    console.log("-".repeat(60));
+    console.log("Task: 'What is 5 + 3? Just give me the answer.'");
+    console.log("Agent: Simple calculator agent");
+    console.log("Tools: No tools needed for simple math");
+    console.log("Model: Using default (Azure OpenAI if configured, otherwise auto-detect)");
+    console.log("Executing agent instantiation...\n");
+    
+    try {
+      const agentResult = await this.handleInstantiateAgent({
+        task: "What is 5 + 3? Just give me the answer.",
+        system_prompt: "You are a helpful math assistant. Answer math questions directly and concisely.",
+        tools: [],  // Simple task, no tools needed
+        agent_name: "math_helper",
+        agent_description: "A simple agent that helps with basic math questions",
+        // model parameter removed to use default Azure OpenAI
+        temperature: 0.3
+      });
+      
+      console.log("Agent Result:");
+      console.log("-".repeat(60));
+      console.log(agentResult.content[0].text);
+      console.log("\n✅ Agent instantiation test passed!\n");
+    } catch (error) {
+      console.error("❌ Agent instantiation test failed:", error.message);
+      console.error(error.stack);
+    }
+
     console.log("=".repeat(60));
     console.log("All tests completed!");
     console.log("=".repeat(60));
@@ -1100,12 +1242,13 @@ PERFORMANCE OPTIMIZATION:
   This provides 20-50% faster startup time for typical MCP operations.
 
 AVAILABLE TOOLS:
-  1. list_available_tools      List all available ollama_chat.py tools
-  2. list_collections          List all ChromaDB collections with metadata
-  3. web_search                Comprehensive web search using DuckDuckGo
-  4. chat                      Conversation with AI assistant
-  5. index_documents           Index documents for RAG (Retrieval-Augmented Generation)
-  6. query_documents           Query indexed documents with semantic search
+  1. list_available_tools                      List all available ollama_chat.py tools
+  2. list_collections                          List all ChromaDB collections with metadata
+  3. web_search                                Comprehensive web search using DuckDuckGo
+  4. chat                                      Conversation with AI assistant
+  5. index_documents                           Index documents for RAG (Retrieval-Augmented Generation)
+  6. query_documents                           Query indexed documents with semantic search
+  7. instantiate_agent_with_tools_and_process_task  Create and run an agent with specific tools to solve a task
 
 EXAMPLES:
   # Start the MCP server (normal mode)
