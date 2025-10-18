@@ -80,6 +80,19 @@ web_cache_collection_name = "web_cache"
 memory_collection_name = "memory"
 long_term_memory_file = "long_term_memory.json"
 
+# RAG optimization parameters
+# Minimum number of quality results required from cache before skipping web search
+min_quality_results_threshold = 3
+# Percentile threshold for adaptive distance filtering (0-100)
+# Results with distance > this percentile will be filtered out
+distance_percentile_threshold = 75
+# Weight for semantic similarity vs BM25 in hybrid scoring (0.0 to 1.0)
+# 0.5 = equal weight, higher = more semantic, lower = more lexical
+semantic_weight = 0.5
+# Maximum distance multiplier for adaptive threshold
+# Results beyond min_distance * this multiplier are filtered
+adaptive_distance_multiplier = 2.5
+
 stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"]
 
 # List of available commands to autocomplete
@@ -2396,6 +2409,7 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
     global verbose_mode
     global plugins
     global chroma_client
+    global min_quality_results_threshold
 
     if not query:
         if return_intermediate:
@@ -2411,6 +2425,58 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
             return error_msg, {}
         return error_msg
 
+    if web_embedding_model is None or web_embedding_model == "":
+        web_embedding_model = embeddings_model
+
+    # OPTIMIZATION: Check cache first before doing web search
+    # This prevents redundant web crawling for similar/same queries
+    cache_check_results = ""
+    cache_metadata = {}
+    skip_web_crawl = False
+    
+    try:
+        # Try to get results from cache with metadata
+        cache_check_results, cache_metadata = query_vector_database(
+            query, 
+            collection_name=web_cache_collection, 
+            n_results=n_results * 2,  # Request more to check quality
+            query_embeddings_model=web_embedding_model,
+            use_adaptive_filtering=True,
+            return_metadata=True
+        )
+        
+        # Determine if cache results are good enough to skip web crawling
+        if cache_metadata and 'num_results' in cache_metadata:
+            num_quality_results = cache_metadata['num_results']
+            
+            if num_quality_results >= min_quality_results_threshold:
+                skip_web_crawl = True
+                if verbose_mode:
+                    on_print(f"Cache hit: Found {num_quality_results} quality results. Skipping web crawl.", Fore.GREEN + Style.DIM)
+            else:
+                if verbose_mode:
+                    on_print(f"Cache miss: Only {num_quality_results} results found (threshold: {min_quality_results_threshold}). Performing web crawl.", Fore.YELLOW + Style.DIM)
+        
+    except Exception as e:
+        if verbose_mode:
+            on_print(f"Cache check failed: {str(e)}. Proceeding with web crawl.", Fore.YELLOW + Style.DIM)
+        skip_web_crawl = False
+
+    # If we have enough quality results from cache, return them
+    if skip_web_crawl and cache_check_results:
+        if return_intermediate:
+            intermediate_data = {
+                'cache_hit': True,
+                'num_results': cache_metadata.get('num_results', 0),
+                'search_results': [],
+                'urls': [],
+                'articles': [],
+                'vector_db_results': cache_check_results
+            }
+            return cache_check_results, intermediate_data
+        return cache_check_results
+
+    # Proceed with web search and crawling
     search = DDGS()
     urls = []
     search_results_list = []
@@ -2430,6 +2496,23 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         on_print(urls, Fore.WHITE + Style.DIM)
 
     if len(urls) == 0:
+        # If no new URLs found, return cache results if available
+        if cache_check_results:
+            if verbose_mode:
+                on_print("No new search results found. Returning cache results.", Fore.YELLOW + Style.DIM)
+            if return_intermediate:
+                intermediate_data = {
+                    'cache_hit': True,
+                    'fallback': True,
+                    'num_results': cache_metadata.get('num_results', 0),
+                    'search_results': [],
+                    'urls': [],
+                    'articles': [],
+                    'vector_db_results': cache_check_results
+                }
+                return cache_check_results, intermediate_data
+            return cache_check_results
+        
         if return_intermediate:
             return "No search results found.", {}
         return "No search results found."
@@ -2465,8 +2548,15 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
         os.remove(file_path)
     os.rmdir(temp_folder)
 
-    # Search the vector database for the query
-    results = query_vector_database(query, collection_name=web_cache_collection, n_results=10, query_embeddings_model=web_embedding_model)
+    # Search the vector database for the query with adaptive filtering
+    results, result_metadata = query_vector_database(
+        query, 
+        collection_name=web_cache_collection, 
+        n_results=n_results * 2,  # Request more results for better selection
+        query_embeddings_model=web_embedding_model,
+        use_adaptive_filtering=True,
+        return_metadata=True
+    )
 
     # If no results are found, refined search
     if not results:
@@ -2479,10 +2569,12 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
     # Return intermediate results if requested
     if return_intermediate:
         intermediate_data = {
+            'cache_hit': False,
             'search_results': search_results_list,
             'urls': urls,
             'articles': articles,
-            'vector_db_results': results
+            'vector_db_results': results,
+            'num_results': result_metadata.get('num_results', 0) if result_metadata else 0
         }
         return results, intermediate_data
     
@@ -2794,16 +2886,21 @@ def preprocess_text(text):
 
     return words
 
-def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None):
+def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None, use_adaptive_filtering=True, return_metadata=False):
     global collection
     global verbose_mode
     global embeddings_model
     global current_model
     global thinking_model
     global thinking_model_reasoning_pattern
+    global distance_percentile_threshold
+    global semantic_weight
+    global adaptive_distance_multiplier
 
     # If question is empty, return empty string
     if not question or len(question) == 0:
+        if return_metadata:
+            return "", {}
         return ""
 
     initial_question = question
@@ -2817,6 +2914,8 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
 
     # If n_results is 0, return empty string
     if n_results == 0:
+        if return_metadata:
+            return "", {}
         return ""
     
     # If n_results is negative, set it to the default value
@@ -2844,6 +2943,8 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         on_print("No ChromaDB collection loaded.", Fore.RED)
         collection_name, _ = prompt_for_vector_database_collection()
         if not collection_name:
+            if return_metadata:
+                return "", {}
             return ""
 
     if collection_name and collection_name != current_collection_name:
@@ -2894,12 +2995,39 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     distances = result["distances"][0]
 
     if len(result["metadatas"]) == 0:
+        if return_metadata:
+            return "", {}
         return ""
     
     if len(result["metadatas"][0]) == 0:
+        if return_metadata:
+            return "", {}
         return ""
 
     metadatas = result["metadatas"][0]
+
+    # Adaptive filtering and hybrid scoring
+    if use_adaptive_filtering and len(distances) > 0:
+        # Calculate adaptive distance threshold based on result distribution
+        min_distance = min(distances) if distances else 0
+        adaptive_threshold = min_distance * adaptive_distance_multiplier
+        
+        # Also use percentile-based filtering
+        if len(distances) >= 4:  # Only use percentile if we have enough results
+            try:
+                import numpy as np
+                percentile_threshold = np.percentile(distances, distance_percentile_threshold)
+                # Use the more restrictive of the two thresholds
+                effective_threshold = min(adaptive_threshold, percentile_threshold)
+            except:
+                effective_threshold = adaptive_threshold
+        else:
+            effective_threshold = adaptive_threshold
+        
+        if verbose_mode:
+            on_print(f"Adaptive distance threshold: {effective_threshold:.4f} (min: {min_distance:.4f})", Fore.WHITE + Style.DIM)
+    else:
+        effective_threshold = float('inf')  # No filtering
 
     # Preprocess and re-rank using BM25
     initial_question_preprocessed = preprocess_text(initial_question)
@@ -2909,25 +3037,54 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     bm25 = BM25Okapi(preprocessed_docs)
     bm25_scores = bm25.get_scores(initial_question_preprocessed)
 
-    # Sort the results by BM25 score
-    reranked_results = sorted(
-        enumerate(zip(metadatas, distances, documents, bm25_scores)),
-        key=lambda x: x[1][3],  # Sort by BM25 score
-        reverse=True
-    )[0:n_results]
+    # Normalize scores for hybrid fusion
+    # Normalize distances (invert so higher is better, and scale to 0-1)
+    max_dist = max(distances) if len(distances) > 0 and max(distances) > 0 else 1
+    normalized_semantic_scores = [1 - (d / max_dist) for d in distances]
+    
+    # Normalize BM25 scores (scale to 0-1)
+    # Convert to list to avoid numpy array boolean ambiguity
+    bm25_scores_list = list(bm25_scores) if hasattr(bm25_scores, '__iter__') else []
+    max_bm25 = max(bm25_scores_list) if len(bm25_scores_list) > 0 and max(bm25_scores_list) > 0 else 1
+    normalized_bm25_scores = [score / max_bm25 for score in bm25_scores_list]
+    
+    # Combine scores with configurable weighting
+    hybrid_scores = [
+        semantic_weight * sem + (1 - semantic_weight) * lex
+        for sem, lex in zip(normalized_semantic_scores, normalized_bm25_scores)
+    ]
+
+    # Sort by hybrid score and apply adaptive filtering
+    reranked_results = []
+    for idx, (metadata, distance, document, bm25_score, hybrid_score) in enumerate(
+        zip(metadatas, distances, documents, bm25_scores_list, hybrid_scores)
+    ):
+        # Apply adaptive distance filtering
+        if use_adaptive_filtering and distance > effective_threshold:
+            if verbose_mode:
+                on_print(f"Filtered out result with distance {distance:.4f} > {effective_threshold:.4f}", Fore.WHITE + Style.DIM)
+            continue
+        
+        # Also apply user-specified threshold if provided
+        if answer_distance_threshold > 0 and distance > answer_distance_threshold:
+            if verbose_mode:
+                on_print(f"Filtered out result with distance {distance:.4f} > {answer_distance_threshold:.4f}", Fore.WHITE + Style.DIM)
+            continue
+            
+        reranked_results.append((idx, metadata, distance, document, bm25_score, hybrid_score))
+    
+    # Sort by hybrid score (descending)
+    reranked_results.sort(key=lambda x: x[5], reverse=True)
+    
+    # Limit to n_results
+    reranked_results = reranked_results[:n_results]
 
     # Join all possible answers into one string
     answers = []
-    answer_index = 0
-    for idx, (metadata, distance, document, bm25_score) in reranked_results:
-        if answer_distance_threshold > 0 and distance > answer_distance_threshold:
-            if verbose_mode:
-                on_print("Skipping answer with distance: " + str(distance), Fore.WHITE + Style.DIM)
-            continue
-
+    metadata_list = []
+    for idx, metadata, distance, document, bm25_score, hybrid_score in reranked_results:
         if verbose_mode:
-            on_print("Answer distance: " + str(distance), Fore.WHITE + Style.DIM)
-        answer_index += 1
+            on_print(f"Result - Distance: {distance:.4f}, BM25: {bm25_score:.4f}, Hybrid: {hybrid_score:.4f}", Fore.WHITE + Style.DIM)
         
         # Format the answer with the title, content, and URL
         title = metadata.get("title", "")
@@ -2944,8 +3101,25 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
             formatted_answer += "\nFile Path: " + filePath
 
         answers.append(formatted_answer.strip())
+        
+        if return_metadata:
+            metadata_list.append({
+                'distance': distance,
+                'bm25_score': bm25_score,
+                'hybrid_score': hybrid_score,
+                'metadata': metadata
+            })
 
-    return '\n\n'.join(answers)
+    result_text = '\n\n'.join(answers)
+    
+    if return_metadata:
+        return result_text, {
+            'num_results': len(answers),
+            'results': metadata_list,
+            'effective_threshold': effective_threshold if use_adaptive_filtering else None
+        }
+    
+    return result_text
 
 def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
     global openai_client
