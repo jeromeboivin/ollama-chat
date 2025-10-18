@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.DS_Store
+../mcp_chroma_db/
+package-lock.json
