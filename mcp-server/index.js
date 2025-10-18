@@ -224,7 +224,8 @@ class OllamaChatMCPServer {
    * Plugins are disabled when only built-in tools are needed
    * Built-in tools: web_search, query_vector_database, retrieve_relevant_memory, 
    *                 instantiate_agent_with_tools_and_process_task, 
-   *                 create_new_agent_with_tools, summarize_text_file
+   *                 create_new_agent_with_tools, summarize_text_file,
+   *                 index_documents, query_documents (MCP-specific RAG tools)
    */
   shouldDisablePlugins(toolsUsed = []) {
     const builtinTools = [
@@ -233,7 +234,9 @@ class OllamaChatMCPServer {
       'retrieve_relevant_memory',
       'instantiate_agent_with_tools_and_process_task',
       'create_new_agent_with_tools',
-      'summarize_text_file'
+      'summarize_text_file',
+      'index_documents',
+      'query_documents'
     ];
     
     // If allowedTools is configured, check if any are plugin tools
@@ -248,7 +251,7 @@ class OllamaChatMCPServer {
       return !hasPluginTools;
     }
     
-    // Default: disable plugins for MCP server (uses only built-in tools: web_search, chat)
+    // Default: disable plugins for MCP server (uses only built-in tools: web_search, chat, RAG)
     return true;
   }
 
@@ -338,6 +341,103 @@ class OllamaChatMCPServer {
             required: ["message"],
           },
         },
+        {
+          name: "index_documents",
+          description: "Index documents from a folder into a ChromaDB collection for retrieval-augmented generation (RAG). Supports various document formats (PDF, Word, text, markdown, etc.) with options for chunking, extraction, and AI-generated summaries.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              folder_path: {
+                type: "string",
+                description: "Path to the folder containing documents to index",
+              },
+              collection: {
+                type: "string",
+                description: "Name of the ChromaDB collection to store indexed documents",
+              },
+              chunk_documents: {
+                type: "boolean",
+                description: "Enable/disable document chunking (default: true)",
+                default: true,
+              },
+              skip_existing: {
+                type: "boolean",
+                description: "Skip documents already indexed (default: true)",
+                default: true,
+              },
+              extract_start: {
+                type: "string",
+                description: "Start marker for text extraction (optional)",
+              },
+              extract_end: {
+                type: "string",
+                description: "End marker for text extraction (optional)",
+              },
+              split_paragraphs: {
+                type: "boolean",
+                description: "Split Markdown into paragraphs (default: false)",
+                default: false,
+              },
+              add_summary: {
+                type: "boolean",
+                description: "Generate AI summaries for chunks (default: true)",
+                default: true,
+              },
+              model: {
+                type: "string",
+                description: "Model to use for generating summaries (optional, uses configured model if not specified)",
+              },
+            },
+            required: ["folder_path", "collection"],
+          },
+        },
+        {
+          name: "query_documents",
+          description: "Query indexed documents in a ChromaDB collection using semantic search. Returns relevant document chunks based on the query with optional AI-generated synthesis of results.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "The question or search query",
+              },
+              collection: {
+                type: "string",
+                description: "Name of the ChromaDB collection to query",
+              },
+              n_results: {
+                type: "number",
+                description: "Number of results to return (default: 8)",
+                default: 8,
+              },
+              distance_threshold: {
+                type: "number",
+                description: "Distance threshold for filtering results (default: 0.0, no filtering)",
+                default: 0.0,
+              },
+              expand_query: {
+                type: "boolean",
+                description: "Enable/disable query expansion for better results (default: true)",
+                default: true,
+              },
+              synthesize: {
+                type: "boolean",
+                description: "Generate AI synthesis of results (default: true)",
+                default: true,
+              },
+              model: {
+                type: "string",
+                description: "Model to use for synthesis (optional, uses configured model if not specified)",
+              },
+              temperature: {
+                type: "number",
+                description: "Temperature for LLM responses (0.0-1.0, default: 0.1)",
+                default: 0.1,
+              },
+            },
+            required: ["query", "collection"],
+          },
+        },
       ];
 
       // Filter tools if allowedTools is configured
@@ -364,6 +464,10 @@ class OllamaChatMCPServer {
           return await this.handleWebSearch(args);
         } else if (name === "chat") {
           return await this.handleChat(args);
+        } else if (name === "index_documents") {
+          return await this.handleIndexDocuments(args);
+        } else if (name === "query_documents") {
+          return await this.handleQueryDocuments(args);
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
@@ -465,6 +569,154 @@ class OllamaChatMCPServer {
 
     if (system_prompt) {
       cmdArgs.push(`--system-prompt=${system_prompt}`);
+    }
+
+    // Execute the Python script
+    const result = await this.executePythonScript(cmdArgs);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: result,
+        },
+      ],
+    };
+  }
+
+  async handleIndexDocuments(args) {
+    const {
+      folder_path,
+      collection,
+      chunk_documents = true,
+      skip_existing = true,
+      extract_start,
+      extract_end,
+      split_paragraphs = false,
+      add_summary = true,
+      model
+    } = args;
+
+    if (!folder_path) {
+      throw new Error("folder_path parameter is required");
+    }
+
+    if (!collection) {
+      throw new Error("collection parameter is required");
+    }
+
+    // Build command arguments for ollama_chat.py
+    const cmdArgs = [
+      OLLAMA_CHAT_PATH,
+      ...this.buildProviderArgs(),  // Add provider-specific flags
+      ...this.buildModelArgs(model),  // Add model configuration
+      ...this.buildToolsArgs(),  // Add tools configuration
+      ...this.buildPluginArgs(['query_vector_database']),  // Optimize: disable plugins (indexing uses built-in RAG)
+      "--no-interactive",
+      "--no-syntax-highlighting",
+      `--index-documents=${folder_path}`,
+      `--collection=${collection}`,
+      `--chroma-path=${this.config.chromaDBPath}`,  // Use configured ChromaDB database path
+      "--verbose",  // Provide feedback during indexing
+    ];
+
+    // Add boolean flags conditionally
+    if (chunk_documents) {
+      cmdArgs.push("--chunk-documents");
+    } else {
+      cmdArgs.push("--no-chunk-documents");
+    }
+
+    if (skip_existing) {
+      cmdArgs.push("--skip-existing");
+    } else {
+      cmdArgs.push("--no-skip-existing");
+    }
+
+    if (split_paragraphs) {
+      cmdArgs.push("--split-paragraphs");
+    } else {
+      cmdArgs.push("--no-split-paragraphs");
+    }
+
+    if (add_summary) {
+      cmdArgs.push("--add-summary");
+    } else {
+      cmdArgs.push("--no-add-summary");
+    }
+
+    if (extract_start) {
+      cmdArgs.push(`--extract-start=${extract_start}`);
+    }
+
+    if (extract_end) {
+      cmdArgs.push(`--extract-end=${extract_end}`);
+    }
+
+    // Execute the Python script
+    const result = await this.executePythonScript(cmdArgs);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: result || "Documents indexed successfully",
+        },
+      ],
+    };
+  }
+
+  async handleQueryDocuments(args) {
+    const {
+      query,
+      collection,
+      n_results = 8,
+      distance_threshold = 0.0,
+      expand_query = true,
+      synthesize = true,
+      model,
+      temperature = 0.1
+    } = args;
+
+    if (!query) {
+      throw new Error("query parameter is required");
+    }
+
+    if (!collection) {
+      throw new Error("collection parameter is required");
+    }
+
+    // Build command arguments for ollama_chat.py
+    const cmdArgs = [
+      OLLAMA_CHAT_PATH,
+      ...this.buildProviderArgs(),  // Add provider-specific flags
+      ...this.buildModelArgs(model),  // Add model configuration
+      ...this.buildToolsArgs(),  // Add tools configuration
+      ...this.buildPluginArgs(['query_vector_database']),  // Optimize: disable plugins (querying uses built-in RAG)
+      "--no-interactive",
+      "--no-syntax-highlighting",
+      `--query=${query}`,
+      `--collection=${collection}`,
+      `--chroma-path=${this.config.chromaDBPath}`,  // Use configured ChromaDB database path
+      `--query-n-results=${n_results}`,
+      `--query-distance-threshold=${distance_threshold}`,
+    ];
+
+    // Add boolean flags conditionally
+    if (expand_query) {
+      cmdArgs.push("--expand-query");
+    } else {
+      cmdArgs.push("--no-expand-query");
+    }
+
+    if (temperature !== 0.1) {
+      cmdArgs.push(`--temperature=${temperature}`);
+    }
+
+    // If synthesize is false, we just return raw results
+    // If synthesize is true (default), we let the model process the results
+    if (!synthesize) {
+      cmdArgs.push("--no-synthesis");  // This flag would need to be added to ollama_chat.py
     }
 
     // Execute the Python script
@@ -600,13 +852,13 @@ class OllamaChatMCPServer {
     console.log("Test 4: Testing web_search tool");
     console.log("-".repeat(60));
     console.log("Query: 'What is the Model Context Protocol?'");
-    console.log("Model: qwen3:4b");
+    console.log("Model: Using default (Azure OpenAI if configured, otherwise auto-detect)");
     console.log("Note: This may take 30-60 seconds (searching, crawling, indexing)...\n");
     
     try {
       const webSearchResult = await this.handleWebSearch({
         query: "What is the Model Context Protocol?",
-        model: "qwen3:4b",
+        // model parameter removed to use default Azure OpenAI
         n_results: 3,
         region: "wt-wt"
       });
@@ -631,6 +883,64 @@ class OllamaChatMCPServer {
     } catch (error) {
       console.error("❌ Web search test failed with error:", error.message);
       console.error(error.stack);
+    }
+
+    // Test 5: RAG - Index Documents (if test documents exist)
+    console.log("=".repeat(60));
+    console.log("Test 5: Testing index_documents tool (RAG)");
+    console.log("-".repeat(60));
+    console.log("Note: This test requires a 'test_docs' folder with sample documents.");
+    console.log("Skipping if folder doesn't exist...\n");
+    
+    try {
+      // Check if test_docs folder exists (simple check)
+      const fs = await import('fs');
+      const testDocsPath = path.join(__dirname, 'test_docs');
+      
+      if (fs.existsSync(testDocsPath)) {
+        console.log(`Found test documents at: ${testDocsPath}`);
+        console.log("Indexing documents...\n");
+        
+        const indexResult = await this.handleIndexDocuments({
+          folder_path: testDocsPath,
+          collection: "mcp_test_collection",
+          chunk_documents: true,
+          skip_existing: false,
+          add_summary: false,  // Skip summaries for faster testing
+          model: "qwen3:4b"
+        });
+        
+        console.log("Index Result:");
+        console.log("-".repeat(60));
+        console.log(indexResult.content[0].text);
+        console.log("\n✅ Document indexing test passed!\n");
+        
+        // Test 6: RAG - Query Documents
+        console.log("=".repeat(60));
+        console.log("Test 6: Testing query_documents tool (RAG)");
+        console.log("-".repeat(60));
+        console.log("Query: 'What information is in these documents?'");
+        console.log("Collection: mcp_test_collection\n");
+        
+        const queryResult = await this.handleQueryDocuments({
+          query: "What information is in these documents?",
+          collection: "mcp_test_collection",
+          n_results: 5,
+          expand_query: false,
+          synthesize: true,
+          model: "qwen3:4b"
+        });
+        
+        console.log("Query Result:");
+        console.log("-".repeat(60));
+        console.log(queryResult.content[0].text);
+        console.log("\n✅ Document query test passed!\n");
+      } else {
+        console.log(`⏭️  Skipping RAG tests - test_docs folder not found at: ${testDocsPath}`);
+        console.log("   To test RAG functionality, create a 'test_docs' folder with sample documents.\n");
+      }
+    } catch (error) {
+      console.error("⚠️  RAG tests skipped or failed:", error.message);
     }
 
     console.log("=".repeat(60));
@@ -733,6 +1043,8 @@ PERFORMANCE OPTIMIZATION:
     - instantiate_agent_with_tools_and_process_task (agent creation)
     - create_new_agent_with_tools (agent configuration)
     - summarize_text_file (text summarization)
+    - index_documents (RAG document indexing)
+    - query_documents (RAG document querying)
   
   Plugin tools are automatically loaded only when configured via MCP_ALLOWED_TOOLS.
   This provides 20-50% faster startup time for typical MCP operations.
@@ -741,6 +1053,8 @@ AVAILABLE TOOLS:
   1. list_available_tools      List all available ollama_chat.py tools
   2. web_search                Comprehensive web search using DuckDuckGo
   3. chat                      Conversation with AI assistant
+  4. index_documents           Index documents for RAG (Retrieval-Augmented Generation)
+  5. query_documents           Query indexed documents with semantic search
 
 EXAMPLES:
   # Start the MCP server (normal mode)

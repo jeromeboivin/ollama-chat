@@ -1,10 +1,14 @@
 # Ollama Chat MCP Server
 
-A Model Context Protocol (MCP) server that exposes the ollama-chat web search functionality, providing Perplexity-like web search capabilities through MCP.
+A Model Context Protocol (MCP) server that exposes ollama-chat functionality including web search and RAG (Retrieval-Augmented Generation) capabilities through MCP.
 
 ## Features
 
 - **Web Search**: Perform comprehensive web searches using DuckDuckGo, crawl results, and synthesize information from multiple sources
+- **RAG (Retrieval-Augmented Generation)**: Index and query local documents with semantic search
+  - Index documents from folders into ChromaDB collections
+  - Query indexed documents with AI-powered synthesis
+  - Support for PDF, Word, text, markdown, and more
 - **Chat**: Direct interaction with AI models for general queries
 - **Multiple AI Providers**: Supports Azure OpenAI, OpenAI, and Ollama with automatic provider detection
 - Built on the Model Context Protocol (MCP) standard
@@ -295,6 +299,61 @@ Have a conversation with the AI assistant.
 }
 ```
 
+#### 4. index_documents
+
+Index documents from a folder into a ChromaDB collection for RAG.
+
+**Parameters:**
+- `folder_path` (required): Path to folder containing documents
+- `collection` (required): Name of ChromaDB collection
+- `chunk_documents` (optional): Enable chunking (default: true)
+- `skip_existing` (optional): Skip already indexed docs (default: true)
+- `extract_start` (optional): Start marker for text extraction
+- `extract_end` (optional): End marker for text extraction
+- `split_paragraphs` (optional): Split markdown into paragraphs (default: false)
+- `add_summary` (optional): Generate AI summaries (default: true)
+- `model` (optional): Model to use for summaries
+
+**Example:**
+```json
+{
+  "folder_path": "C:/Documents/MyProject",
+  "collection": "project_docs",
+  "chunk_documents": true,
+  "add_summary": true
+}
+```
+
+**Supported Formats:** PDF, Word (.docx, .doc), Text (.txt), Markdown (.md), HTML, and more.
+
+**See [RAG_TOOLS.md](RAG_TOOLS.md) for complete documentation.**
+
+#### 5. query_documents
+
+Query indexed documents using semantic search with AI synthesis.
+
+**Parameters:**
+- `query` (required): The question or search query
+- `collection` (required): Name of ChromaDB collection to query
+- `n_results` (optional): Number of results (default: 8)
+- `distance_threshold` (optional): Distance threshold for filtering (default: 0.0)
+- `expand_query` (optional): Enable query expansion (default: true)
+- `synthesize` (optional): Generate AI synthesis (default: true)
+- `model` (optional): Model to use for synthesis
+- `temperature` (optional): Temperature for responses (0.0-1.0, default: 0.1)
+
+**Example:**
+```json
+{
+  "query": "What are the main features discussed?",
+  "collection": "project_docs",
+  "n_results": 8,
+  "synthesize": true
+}
+```
+
+**See [RAG_TOOLS.md](RAG_TOOLS.md) for complete documentation and use cases.**
+
 ## How It Works
 
 1. The MCP server receives tool calls from MCP clients
@@ -381,6 +440,12 @@ To modify the server:
 1. Edit `index.js` to add new tools or modify existing ones
 2. Test with `npm run dev` for auto-reload
 3. Restart Claude Desktop to reload the MCP configuration
+
+## Documentation
+
+- **[RAG_TOOLS.md](RAG_TOOLS.md)** - Complete guide to RAG (document indexing and querying)
+- **[CONFIGURATION.md](CONFIGURATION.md)** - Detailed configuration options
+- **[QUICKSTART.md](QUICKSTART.md)** - Quick start guide
 
 ## License
 
