@@ -208,6 +208,26 @@ Here's a step-by-step guide on how to use it:
 
 22. **Specify the long-term memory file**: Use the `--long-term-memory-file <file name>` argument to specify the long-term memory file name. If not specified, the default value is used.
 
+23. **List available tools**: Use `--list-tools` to display all available tools (both built-in and plugin tools) with their descriptions and parameters, then exit. Useful for discovering what tools are available.
+    ```bash
+    python ollama_chat.py --list-tools
+    ```
+
+24. **List ChromaDB collections**: Use `--list-collections` to display all existing ChromaDB collections with their metadata and document counts, then exit. Useful for discovering what vector database collections are available.
+    ```bash
+    # List collections using default settings (localhost:8000)
+    python ollama_chat.py --list-collections
+    
+    # List collections with custom ChromaDB connection
+    python ollama_chat.py --list-collections --chroma-host myhost --chroma-port 9000
+    
+    # List collections from a local database path
+    python ollama_chat.py --list-collections --chroma-path /path/to/db
+    
+    # With verbose mode for debugging
+    python ollama_chat.py --list-collections --verbose
+    ```
+
 Remember, all these arguments are optional. If you don't specify them, the script will use the default values.
 
 ### Multiline input

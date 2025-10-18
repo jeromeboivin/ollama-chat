@@ -3873,6 +3873,7 @@ def run():
     # If specified as script named arguments, use the provided ChromaDB client host (--chroma-host) and port (--chroma-port)
     parser = argparse.ArgumentParser(description='Run the Ollama chatbot.')
     parser.add_argument('--list-tools', action='store_true', help='List available tools and exit')
+    parser.add_argument('--list-collections', action='store_true', help='List available ChromaDB collections and exit')
     parser.add_argument('--chroma-path', type=str, help='ChromaDB database path', default=None)
     parser.add_argument('--chroma-host', type=str, help='ChromaDB client host', default="localhost")
     parser.add_argument('--chroma-port', type=int, help='ChromaDB client port', default=8000)
@@ -3991,6 +3992,61 @@ def run():
                         for param_name, param_info in tool['function']['parameters']['properties'].items():
                             required = param_name in tool['function']['parameters'].get('required', [])
                             print(f"    {param_name}{'*' if required else ''}: {param_info['description']}")
+        
+        sys.exit(0)
+    
+    # Handle listing collections if requested
+    if args.list_collections:
+        # Initialize ChromaDB client
+        chroma_client_host = args.chroma_host
+        chroma_client_port = args.chroma_port
+        chroma_db_path = args.chroma_path
+        verbose_mode = args.verbose
+        
+        load_chroma_client()
+        
+        if not chroma_client:
+            on_print("Failed to initialize ChromaDB client.", Fore.RED)
+            sys.exit(1)
+        
+        try:
+            collections = chroma_client.list_collections()
+            
+            if not collections:
+                print("\nNo collections found.")
+            else:
+                print(f"\nAvailable ChromaDB collections ({len(collections)}):")
+                print("=" * 80)
+                
+                for collection in collections:
+                    print(f"\nCollection: {collection.name}")
+                    
+                    # Get collection metadata
+                    if hasattr(collection, 'metadata') and collection.metadata:
+                        if isinstance(collection.metadata, dict):
+                            if 'description' in collection.metadata:
+                                print(f"  Description: {collection.metadata['description']}")
+                            
+                            # Print other metadata
+                            for key, value in collection.metadata.items():
+                                if key != 'description':
+                                    print(f"  {key}: {value}")
+                    
+                    # Get collection count
+                    try:
+                        count = collection.count()
+                        print(f"  Documents: {count}")
+                    except:
+                        pass
+                
+                print("\n" + "=" * 80)
+        
+        except Exception as e:
+            on_print(f"Error listing collections: {str(e)}", Fore.RED)
+            if verbose_mode:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
         
         sys.exit(0)
 

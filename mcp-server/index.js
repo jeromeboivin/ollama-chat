@@ -438,6 +438,15 @@ class OllamaChatMCPServer {
             required: ["query", "collection"],
           },
         },
+        {
+          name: "list_collections",
+          description: "List all available ChromaDB collections with their metadata and document counts. Useful for discovering what vector database collections exist before querying or indexing.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+          },
+        },
       ];
 
       // Filter tools if allowedTools is configured
@@ -468,6 +477,8 @@ class OllamaChatMCPServer {
           return await this.handleIndexDocuments(args);
         } else if (name === "query_documents") {
           return await this.handleQueryDocuments(args);
+        } else if (name === "list_collections") {
+          return await this.handleListCollections(args);
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
@@ -732,6 +743,27 @@ class OllamaChatMCPServer {
     };
   }
 
+  async handleListCollections(args) {
+    // Build command arguments for ollama_chat.py
+    const cmdArgs = [
+      OLLAMA_CHAT_PATH,
+      "--list-collections",
+      `--chroma-path=${this.config.chromaDBPath}`,  // Use configured ChromaDB database path
+    ];
+
+    // Execute the Python script
+    const result = await this.executePythonScript(cmdArgs);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: result,
+        },
+      ],
+    };
+  }
+
   executePythonScript(args) {
     return new Promise((resolve, reject) => {
       // Determine Python command based on OS
@@ -823,9 +855,27 @@ class OllamaChatMCPServer {
       console.error(error.stack);
     }
 
-    // Test 3: Chat (simpler, faster test first)
+    // Test 3: List ChromaDB collections
     console.log("=".repeat(60));
-    console.log("Test 3: Testing chat tool");
+    console.log("Test 3: Listing ChromaDB collections");
+    console.log("-".repeat(60));
+    console.log("Executing list_collections...\n");
+    
+    try {
+      const listCollectionsResult = await this.handleListCollections({});
+      
+      console.log("Available ChromaDB collections:");
+      console.log("-".repeat(60));
+      console.log(listCollectionsResult.content[0].text);
+      console.log("\n✅ List collections test passed\n");
+    } catch (error) {
+      console.error("❌ List collections test failed:", error.message);
+      console.error(error.stack);
+    }
+
+    // Test 4: Chat (simpler, faster test first)
+    console.log("=".repeat(60));
+    console.log("Test 4: Testing chat tool");
     console.log("-".repeat(60));
     console.log("Message: 'What is 2+2? Answer in one sentence.'");
     console.log("Model: qwen3:4b");
@@ -847,9 +897,9 @@ class OllamaChatMCPServer {
       console.error(error.stack);
     }
 
-    // Test 4: Web Search
+    // Test 5: Web Search
     console.log("=".repeat(60));
-    console.log("Test 4: Testing web_search tool");
+    console.log("Test 5: Testing web_search tool");
     console.log("-".repeat(60));
     console.log("Query: 'What is the Model Context Protocol?'");
     console.log("Model: Using default (Azure OpenAI if configured, otherwise auto-detect)");
@@ -885,9 +935,9 @@ class OllamaChatMCPServer {
       console.error(error.stack);
     }
 
-    // Test 5: RAG - Index Documents (if test documents exist)
+    // Test 6: RAG - Index Documents (if test documents exist)
     console.log("=".repeat(60));
-    console.log("Test 5: Testing index_documents tool (RAG)");
+    console.log("Test 6: Testing index_documents tool (RAG)");
     console.log("-".repeat(60));
     console.log("Note: This test requires a 'test_docs' folder with sample documents.");
     console.log("Skipping if folder doesn't exist...\n");
@@ -915,9 +965,9 @@ class OllamaChatMCPServer {
         console.log(indexResult.content[0].text);
         console.log("\n✅ Document indexing test passed!\n");
         
-        // Test 6: RAG - Query Documents
+        // Test 7: RAG - Query Documents
         console.log("=".repeat(60));
-        console.log("Test 6: Testing query_documents tool (RAG)");
+        console.log("Test 7: Testing query_documents tool (RAG)");
         console.log("-".repeat(60));
         console.log("Query: 'What information is in these documents?'");
         console.log("Collection: mcp_test_collection\n");
@@ -1051,10 +1101,11 @@ PERFORMANCE OPTIMIZATION:
 
 AVAILABLE TOOLS:
   1. list_available_tools      List all available ollama_chat.py tools
-  2. web_search                Comprehensive web search using DuckDuckGo
-  3. chat                      Conversation with AI assistant
-  4. index_documents           Index documents for RAG (Retrieval-Augmented Generation)
-  5. query_documents           Query indexed documents with semantic search
+  2. list_collections          List all ChromaDB collections with metadata
+  3. web_search                Comprehensive web search using DuckDuckGo
+  4. chat                      Conversation with AI assistant
+  5. index_documents           Index documents for RAG (Retrieval-Augmented Generation)
+  6. query_documents           Query indexed documents with semantic search
 
 EXAMPLES:
   # Start the MCP server (normal mode)

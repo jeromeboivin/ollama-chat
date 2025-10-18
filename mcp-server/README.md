@@ -257,9 +257,25 @@ This tool shows you the complete catalog of tools available in ollama_chat.py, i
 
 Use this to discover what tools you can restrict using `MCP_ALLOWED_TOOLS`.
 
-#### 2. web_search
+#### 2. list_collections
 
-#### 2. web_search
+List all available ChromaDB collections with their metadata and document counts.
+
+**Parameters:** None
+
+**Example:**
+```json
+{}
+```
+
+This tool displays all existing ChromaDB collections in your configured database path, showing:
+- Collection names
+- Collection metadata (descriptions, etc.)
+- Number of documents in each collection
+
+Use this to discover what vector database collections exist before querying or indexing documents.
+
+#### 3. web_search
 
 Perform a comprehensive web search similar to Perplexity.
 
@@ -279,9 +295,7 @@ Perform a comprehensive web search similar to Perplexity.
 }
 ```
 
-#### 3. chat
-
-#### 3. chat
+#### 4. chat
 
 Have a conversation with the AI assistant.
 
@@ -299,7 +313,7 @@ Have a conversation with the AI assistant.
 }
 ```
 
-#### 4. index_documents
+#### 5. index_documents
 
 Index documents from a folder into a ChromaDB collection for RAG.
 
@@ -328,7 +342,7 @@ Index documents from a folder into a ChromaDB collection for RAG.
 
 **See [RAG_TOOLS.md](RAG_TOOLS.md) for complete documentation.**
 
-#### 5. query_documents
+#### 6. query_documents
 
 Query indexed documents using semantic search with AI synthesis.
 
