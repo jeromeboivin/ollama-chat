@@ -82,7 +82,12 @@ long_term_memory_file = "long_term_memory.json"
 
 # RAG optimization parameters
 # Minimum number of quality results required from cache before skipping web search
-min_quality_results_threshold = 3
+min_quality_results_threshold = 5
+# Minimum average BM25 score required for cache results to skip web search
+# This ensures cached results have lexical/keyword relevance to the query
+min_average_bm25_threshold = 0.5
+# Minimum hybrid score required for individual results to be considered "quality"
+min_hybrid_score_threshold = 0.1
 # Percentile threshold for adaptive distance filtering (0-100)
 # Results with distance > this percentile will be filtered out
 distance_percentile_threshold = 75
@@ -2404,12 +2409,17 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
 
     return agent
 
-def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web_cache_collection_name, web_embedding_model=embeddings_model, num_ctx=None, return_intermediate=False):
+def web_search(query=None, n_results=5, region="wt-wt", web_embedding_model=embeddings_model, num_ctx=None, return_intermediate=False):
     global current_model
     global verbose_mode
     global plugins
     global chroma_client
     global min_quality_results_threshold
+    global min_average_bm25_threshold
+    global min_hybrid_score_threshold
+    global web_cache_collection_name
+    
+    web_cache_collection = web_cache_collection_name or "web_cache"
 
     if not query:
         if return_intermediate:
@@ -2442,20 +2452,35 @@ def web_search(query=None, n_results=5, region="wt-wt", web_cache_collection=web
             n_results=n_results * 2,  # Request more to check quality
             query_embeddings_model=web_embedding_model,
             use_adaptive_filtering=True,
-            return_metadata=True
+            return_metadata=True,
+            expand_query=False  # Disable query expansion for web cache to avoid misinterpretation
         )
         
         # Determine if cache results are good enough to skip web crawling
+        # Check both quantity AND quality (BM25/hybrid scores)
         if cache_metadata and 'num_results' in cache_metadata:
             num_quality_results = cache_metadata['num_results']
+            avg_bm25 = cache_metadata.get('avg_bm25_score', 0.0)
+            avg_hybrid = cache_metadata.get('avg_hybrid_score', 0.0)
             
-            if num_quality_results >= min_quality_results_threshold:
+            # Cache hit requires: enough results AND good lexical relevance
+            quality_check = (
+                num_quality_results >= min_quality_results_threshold and
+                avg_bm25 >= min_average_bm25_threshold
+            )
+            
+            if quality_check:
                 skip_web_crawl = True
                 if verbose_mode:
-                    on_print(f"Cache hit: Found {num_quality_results} quality results. Skipping web crawl.", Fore.GREEN + Style.DIM)
+                    on_print(f"Cache hit: Found {num_quality_results} quality results (avg BM25: {avg_bm25:.4f}, avg hybrid: {avg_hybrid:.4f}). Skipping web crawl.", Fore.GREEN + Style.DIM)
             else:
                 if verbose_mode:
-                    on_print(f"Cache miss: Only {num_quality_results} results found (threshold: {min_quality_results_threshold}). Performing web crawl.", Fore.YELLOW + Style.DIM)
+                    reason = []
+                    if num_quality_results < min_quality_results_threshold:
+                        reason.append(f"only {num_quality_results}/{min_quality_results_threshold} results")
+                    if avg_bm25 < min_average_bm25_threshold:
+                        reason.append(f"low BM25 {avg_bm25:.4f} < {min_average_bm25_threshold}")
+                    on_print(f"Cache insufficient: {', '.join(reason)}. Performing web crawl.", Fore.YELLOW + Style.DIM)
         
     except Exception as e:
         if verbose_mode:
@@ -3017,15 +3042,16 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
             try:
                 import numpy as np
                 percentile_threshold = np.percentile(distances, distance_percentile_threshold)
-                # Use the more restrictive of the two thresholds
-                effective_threshold = min(adaptive_threshold, percentile_threshold)
+                # Use the less restrictive of the two thresholds to keep more results
+                # This prevents over-filtering when results are clustered
+                effective_threshold = max(adaptive_threshold, percentile_threshold)
             except:
                 effective_threshold = adaptive_threshold
         else:
             effective_threshold = adaptive_threshold
         
         if verbose_mode:
-            on_print(f"Adaptive distance threshold: {effective_threshold:.4f} (min: {min_distance:.4f})", Fore.WHITE + Style.DIM)
+            on_print(f"Adaptive distance threshold: {effective_threshold:.4f} (min: {min_distance:.4f}, adaptive: {adaptive_threshold:.4f}, percentile: {percentile_threshold if len(distances) >= 4 else 'N/A'})", Fore.WHITE + Style.DIM)
     else:
         effective_threshold = float('inf')  # No filtering
 
@@ -3113,10 +3139,18 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     result_text = '\n\n'.join(answers)
     
     if return_metadata:
+        # Calculate average scores for quality assessment
+        avg_bm25 = sum(x[4] for x in reranked_results) / len(reranked_results) if reranked_results else 0.0
+        avg_hybrid = sum(x[5] for x in reranked_results) / len(reranked_results) if reranked_results else 0.0
+        avg_distance = sum(x[2] for x in reranked_results) / len(reranked_results) if reranked_results else 0.0
+        
         return result_text, {
             'num_results': len(answers),
             'results': metadata_list,
-            'effective_threshold': effective_threshold if use_adaptive_filtering else None
+            'effective_threshold': effective_threshold if use_adaptive_filtering else None,
+            'avg_bm25_score': avg_bm25,
+            'avg_hybrid_score': avg_hybrid,
+            'avg_distance': avg_distance
         }
     
     return result_text
@@ -4757,6 +4791,10 @@ def run():
         
         # Perform the web search
         if show_intermediate:
+            on_print("\n" + "="*80, Fore.MAGENTA)
+            on_print("SEARCHING THE WEB, QUERY: " + args.web_search, Fore.MAGENTA + Style.BRIGHT)
+            on_print("="*80, Fore.MAGENTA)
+            
             web_search_response, intermediate_data = web_search(
                 args.web_search, 
                 n_results=args.web_search_results, 
