@@ -1692,6 +1692,38 @@ class DocumentIndexer:
             on_print(f"Verbose mode is {'on' if self.verbose else 'off'}", Fore.WHITE + Style.DIM)
             on_print(f"Using embeddings model: {self.model}", Fore.WHITE + Style.DIM)
 
+    def _prepare_text_for_embedding(self, text, num_ctx=None):
+        """
+        Prepare text to send to the embedding model by truncating it to the model/context limit.
+
+        If num_ctx is provided we assume it is the model token/context window. If not provided,
+        we fall back to a default of 2048 tokens. When the model max tokens is unknown we use
+        a conservative heuristic of 1 token = 4 characters.
+
+        Returns the possibly-truncated text to send to the embedding API. The original text
+        must remain untouched for storage in ChromaDB.
+        """
+        try:
+            if num_ctx and isinstance(num_ctx, int) and num_ctx > 0:
+                max_tokens = num_ctx
+            else:
+                # Default context window if not specified
+                max_tokens = 2048
+
+            # Heuristic: 1 token ~= 4 characters
+            max_chars = max_tokens * 4
+
+            if len(text) > max_chars:
+                if self.verbose:
+                    on_print(f"Truncating text for embedding: original {len(text)} chars > {max_chars} chars (tokens={max_tokens})", Fore.YELLOW)
+                return text[:max_chars]
+            return text
+        except Exception as e:
+            # In case of unexpected errors, fall back to original text (do not modify stored docs)
+            if self.verbose:
+                on_print(f"Error while preparing text for embedding: {e}. Using original text.", Fore.YELLOW)
+            return text
+
     def get_text_files(self):
         """
         Recursively find all .txt, .md, .tex files in the root folder.
@@ -1946,9 +1978,12 @@ class DocumentIndexer:
                                 embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
                                 summary_info = " with summary" if document_summary else ""
                                 on_print(f"Generating embedding for chunk {chunk_id} using {self.model} ({embedding_info}{summary_info})", Fore.WHITE + Style.DIM)
-
+                            # Prepare a potentially truncated string for the embedding call so we don't exceed
+                            # the model/context window and risk freezing the Ollama server. The full chunk_with_summary
+                            # remains unchanged for storage in ChromaDB.
+                            embedding_prompt = self._prepare_text_for_embedding(chunk_with_summary, num_ctx=num_ctx)
                             response = ollama.embeddings(
-                                prompt=chunk_with_summary,
+                                prompt=embedding_prompt,
                                 model=self.model,
                                 options=ollama_options
                             )
@@ -1986,9 +2021,11 @@ class DocumentIndexer:
                             embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
                             on_print(f"Generating embedding for document {document_id} using {self.model} ({embedding_info})", Fore.WHITE + Style.DIM)
 
-                        # Use extracted content for embedding computation
+                        # Use extracted content for embedding computation. Truncate input to embedding API if needed
+                        # while keeping the full document content unchanged for storage.
+                        embedding_prompt = self._prepare_text_for_embedding(embedding_content, num_ctx=num_ctx)
                         response = ollama.embeddings(
-                            prompt=embedding_content,
+                            prompt=embedding_prompt,
                             model=self.model,
                             options=ollama_options
                         )
