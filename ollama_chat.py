@@ -89,6 +89,7 @@ web_cache_collection_name = "web_cache"
 memory_collection_name = "memory"
 long_term_memory_file = "long_term_memory.json"
 full_doc_store = None  # Global FullDocumentStore instance for full document retrieval
+session_created_files = []  # Track files created during the session for safe deletion
 
 # RAG optimization parameters
 # Minimum number of quality results required from cache before skipping web search
@@ -419,6 +420,71 @@ def get_available_tools():
                         "type": "string",
                         "description": "Language in which intermediate and final summaries should be produced (e.g. 'English', 'French'). Use language specified by the user, or the language of the conversation if known.",
                         "default": "English"
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'read_file',
+            'description': 'Read the contents of a file and return the text',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The full path to the file to read"
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "description": "The encoding to use when reading the file (e.g., 'utf-8', 'ascii', 'latin-1')",
+                        "default": "utf-8"
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'create_file',
+            'description': 'Create a new file with the given content. The file will be tracked in the session for safe deletion.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The full path where the file should be created. Parent directories will be created if they do not exist."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to write to the file"
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "description": "The encoding to use when writing the file (e.g., 'utf-8', 'ascii', 'latin-1')",
+                        "default": "utf-8"
+                    }
+                },
+                "required": ["file_path", "content"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'delete_file',
+            'description': 'Delete a file that was created during this session. Only files created with the create_file tool can be deleted.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The full path to the file to delete. Must be a file that was created during this session."
                     }
                 },
                 "required": ["file_path"]
@@ -2417,14 +2483,31 @@ class Agent:
         """
         tools_description = render_tools(self.tools)
         prompt = f"""Instructions: Break down the following task into smaller, manageable subtasks:
-{task}
+    {task}
 
-## Available tools to assist with subtasks:
-{tools_description or 'No tools available.'}
+    ## Available tools to assist with subtasks:
+    {tools_description or 'No tools available.'}
 
-## Output format:
-Output each subtask on a new line. Output only the subtasks without any explanations, introductions, or conclusions, no formatting needed, just the subtasks themselves.
-"""
+    ## Constraints:
+    - Maximum number of subtasks: {self.max_iterations}
+    - Generate between 2 and {self.max_iterations} subtasks (do not exceed {self.max_iterations}).
+
+    ## Output requirements:
+    - Output each subtask on a single line.
+    - Each subtask MUST begin with either a dash and a space ("- ") or a numbered prefix like "1. " (either format is acceptable). Do NOT use other bullet characters.
+    - Do not include any additional text, explanations, headings, or conclusions. Output only the subtasks.
+    - Do not include blank lines between subtasks. If a subtask naturally contains multiple sentences or lines, join them into one line by replacing internal newlines with a single space.
+    - If an empty line would separate ideas, treat that empty line as the end of the current subtask and start the next subtask on a new line with the required prefix.
+    - Avoid trailing colons or ambiguous punctuation that would break simple parsing.
+
+    ## Output format example:
+    - Define the goal
+    - Research background information
+    - Draft an outline
+    - Write the first draft
+    - Review and revise
+
+    Produce the subtasks now:"""
         thinking_model_is_different = self.thinking_model != self.model
         response = self.query_llm(prompt, system_prompt=self.system_prompt, model=self.thinking_model)
 
@@ -2437,6 +2520,10 @@ Output each subtask on a new line. Output only the subtasks without any explanat
 
 ## Available tools to assist with subtasks:
 {tools_description or 'No tools available.'}
+
+## Constraints:
+- Maximum number of subtasks: {self.max_iterations}
+- Generate between 2 and {self.max_iterations} subtasks (do not exceed {self.max_iterations}).
 
 If I were to break down the task '{task}' into subtasks, I would do it as follows:
 {reasoning}
@@ -2608,7 +2695,7 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
                     agent_tools.append(query_vector_database_tool)
 
     # Always include today's date to the system prompt, for context
-    system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%Y-%m-%d')}."
+    system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%A, %B %d, %Y %I:%M %p')}."
     
     # Instantiate the Agent with the provided parameters
     agent = Agent(
@@ -2705,7 +2792,7 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
                     agent_tools.append(query_vector_database_tool)
 
     # Always include today's date to the system prompt, for context
-    system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%Y-%m-%d')}."
+    system_prompt = f"{system_prompt}\nToday's date is {datetime.now().strftime('%A, %B %d, %Y %I:%M %p')}."
 
     # Instantiate the Agent with the provided parameters
     agent = Agent(
@@ -2730,6 +2817,97 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         return result
 
     return agent
+
+def read_file(file_path, encoding="utf-8"):
+    """
+    Read the contents of a file and return the text.
+    
+    :param file_path: The full path to the file to read
+    :param encoding: The encoding to use when reading the file (default: 'utf-8')
+    :return: The file contents as a string, or an error message if the operation fails
+    """
+    global verbose_mode
+    try:
+        if not os.path.exists(file_path):
+            return f"Error: File '{file_path}' does not exist."
+        
+        if not os.path.isfile(file_path):
+            return f"Error: '{file_path}' is not a file."
+        
+        with open(file_path, 'r', encoding=encoding) as f:
+            content = f.read()
+        
+        if verbose_mode:
+            on_print(f"Successfully read file: {file_path}", Fore.GREEN + Style.DIM)
+        
+        return content
+    except Exception as e:
+        return f"Error reading file '{file_path}': {str(e)}"
+
+def create_file(file_path, content, encoding="utf-8"):
+    """
+    Create a new file with the given content. The file will be tracked in the session for safe deletion.
+    
+    :param file_path: The full path where the file should be created. Parent directories will be created if needed.
+    :param content: The content to write to the file
+    :param encoding: The encoding to use when writing the file (default: 'utf-8')
+    :return: A success message or error message
+    """
+    global verbose_mode
+    global session_created_files
+    try:
+        # Create parent directories if they don't exist
+        parent_dir = os.path.dirname(file_path)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+        
+        # Write the file
+        with open(file_path, 'w', encoding=encoding) as f:
+            f.write(content)
+        
+        # Track the file for session-based deletion
+        if file_path not in session_created_files:
+            session_created_files.append(file_path)
+        
+        if verbose_mode:
+            on_print(f"Successfully created file: {file_path}", Fore.GREEN + Style.DIM)
+        
+        return f"File created successfully: {file_path}"
+    except Exception as e:
+        return f"Error creating file '{file_path}': {str(e)}"
+
+def delete_file(file_path):
+    """
+    Delete a file that was created during this session. Only files created with the create_file tool can be deleted.
+    
+    :param file_path: The full path to the file to delete
+    :return: A success message or error message
+    """
+    global verbose_mode
+    global session_created_files
+    try:
+        # Check if the file was created during this session
+        if file_path not in session_created_files:
+            return f"Error: Cannot delete file '{file_path}'. It was not created during this session."
+        
+        # Check if the file exists
+        if not os.path.exists(file_path):
+            # Remove from tracking list even if file doesn't exist
+            session_created_files.remove(file_path)
+            return f"File '{file_path}' was already deleted or does not exist."
+        
+        # Delete the file
+        os.remove(file_path)
+        
+        # Remove from tracking list
+        session_created_files.remove(file_path)
+        
+        if verbose_mode:
+            on_print(f"Successfully deleted file: {file_path}", Fore.GREEN + Style.DIM)
+        
+        return f"File deleted successfully: {file_path}"
+    except Exception as e:
+        return f"Error deleting file '{file_path}': {str(e)}"
 
 def web_search(query=None, n_results=5, region="wt-wt", web_embedding_model=embeddings_model, num_ctx=None, return_intermediate=False):
     global current_model
@@ -4706,7 +4884,7 @@ def run():
         on_print(f"Ollama context window size: {num_ctx}", Fore.WHITE + Style.DIM)
 
     # Get today's date
-    today = f"Today's date is {date.today().strftime('%A, %B %d, %Y')}"
+    today = f"Today's date is {datetime.now().strftime('%A, %B %d, %Y %I:%M %p')}."
 
     system_prompt_placeholders = {}
     if system_prompt_placeholders_json and os.path.exists(system_prompt_placeholders_json):

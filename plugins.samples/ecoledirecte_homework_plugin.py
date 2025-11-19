@@ -3,7 +3,13 @@ from datetime import datetime
 import os
 import requests
 import base64
+import re
+import uuid
+import tempfile
+from pathlib import Path
 from bs4 import BeautifulSoup
+from markdownify import markdownify as md
+import mimetypes
 
 '''
 For the EcoleDirecteHomeworkPlugin to work correctly, create a JSON file located in the same directory.
@@ -114,8 +120,216 @@ class Homework:
             return decoded_bytes.decode('utf-8')
         return None
 
+    @staticmethod
+    def convert_html_to_markdown(html_content, temp_path=None, strip_images=True):
+        """
+        Converts HTML content to Markdown format, optionally extracting images.
+        
+        :param html_content: The HTML content to convert
+        :param temp_path: Path to save extracted images (default: system temp directory)
+        :param strip_images: If True, remove images; if False, extract and reference them
+        :return: Markdown content with base64 images removed or replaced with references
+        """
+        if not html_content:
+            return None
+        try:
+            # Parse HTML to extract and replace base64 images
+            soup = BeautifulSoup(html_content, 'html.parser')
+            image_counter = 0
+            
+            # Find all img tags with base64 data
+            for img_tag in soup.find_all('img'):
+                src = img_tag.get('src', '')
+                
+                # Check if it's a base64 data URL
+                if src.startswith('data:'):
+                    if strip_images:
+                        # Remove the image entirely
+                        img_tag.decompose()
+                    else:
+                        # Extract and save the image
+                        image_data = Homework._extract_and_save_image(
+                            src, temp_path, image_counter
+                        )
+                        if image_data:
+                            image_path, image_name = image_data
+                            # Replace src with local path reference
+                            img_tag['src'] = image_path
+                            image_counter += 1
+            
+            # Convert the modified HTML to Markdown
+            markdown_content = md(str(soup))
+            # Clean up excessive whitespace
+            markdown_content = '\n'.join(line.rstrip() for line in markdown_content.split('\n'))
+            return markdown_content.strip()
+        except Exception as e:
+            print(f"Error converting HTML to Markdown: {e}")
+            return html_content
+
+    @staticmethod
+    def _extract_and_save_image(data_url, temp_path=None, counter=0):
+        """
+        Extracts a base64 encoded image from a data URL and saves it to disk.
+        
+        :param data_url: The data URL containing base64 image data
+        :param temp_path: Path to save the image (default: system temp directory)
+        :param counter: Counter for unique naming
+        :return: Tuple of (relative_path, image_name) or None if extraction fails
+        """
+        try:
+            # Parse the data URL
+            match = re.match(r'data:([^;]+);base64,(.+)', data_url)
+            if not match:
+                return None
+            
+            mime_type = match.group(1)
+            base64_data = match.group(2)
+            
+            # Determine file extension from MIME type
+            extension_map = {
+                'image/jpeg': 'jpg',
+                'image/png': 'png',
+                'image/gif': 'gif',
+                'image/webp': 'webp',
+                'image/svg+xml': 'svg',
+            }
+            extension = extension_map.get(mime_type, 'png')
+            
+            # Create temp directory if not provided
+            if temp_path is None:
+                temp_path = tempfile.gettempdir()
+            
+            # Ensure the temp path exists
+            Path(temp_path).mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique filename
+            image_name = f"image_{uuid.uuid4().hex[:8]}.{extension}"
+            image_full_path = os.path.join(temp_path, image_name)
+            
+            # Decode and save the image
+            image_data = base64.b64decode(base64_data)
+            with open(image_full_path, 'wb') as f:
+                f.write(image_data)
+            
+            # Return relative path for Markdown
+            return (image_name, image_name)
+        except Exception as e:
+            print(f"Error extracting and saving image: {e}")
+            return None
+
+    @staticmethod
+    def _extract_and_save_document(data_url, temp_path=None, doc_counter=0):
+        """
+        Extracts a base64 encoded document from a data URL and saves it to disk.
+        
+        Supports: PDF, DOCX, XLSX, PPTX, DOC, XLS, PPT
+        
+        :param data_url: The data URL containing base64 document data
+        :param temp_path: Path to save the document (default: system temp directory)
+        :param doc_counter: Counter for unique naming
+        :return: Tuple of (relative_path, document_name) or None if extraction fails
+        """
+        try:
+            # Parse the data URL
+            match = re.match(r'data:([^;]+);base64,(.+)', data_url)
+            if not match:
+                return None
+            
+            mime_type = match.group(1)
+            base64_data = match.group(2)
+            
+            # Determine file extension from MIME type
+            extension_map = {
+                'application/pdf': 'pdf',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+                'application/msword': 'doc',
+                'application/vnd.ms-excel': 'xls',
+                'application/vnd.ms-powerpoint': 'ppt',
+                'application/x-msexcel': 'xls',
+                'application/x-mspowerpoint': 'ppt',
+            }
+            extension = extension_map.get(mime_type, 'bin')
+            
+            # Create temp directory if not provided
+            if temp_path is None:
+                temp_path = tempfile.gettempdir()
+            
+            # Ensure the temp path exists
+            Path(temp_path).mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique filename
+            doc_name = f"document_{uuid.uuid4().hex[:8]}.{extension}"
+            doc_full_path = os.path.join(temp_path, doc_name)
+            
+            # Decode and save the document
+            doc_data = base64.b64decode(base64_data)
+            with open(doc_full_path, 'wb') as f:
+                f.write(doc_data)
+            
+            # Return relative path for Markdown
+            return (doc_name, doc_name)
+        except Exception as e:
+            print(f"Error extracting and saving document: {e}")
+            return None
+
+    @staticmethod
+    def _extract_documents_from_html(html_content, temp_path=None, strip_documents=True):
+        """
+        Extracts and handles base64 documents embedded in HTML.
+        
+        :param html_content: HTML content to process
+        :param temp_path: Path to save documents
+        :param strip_documents: If True, remove documents; if False, extract them
+        :return: Modified HTML with base64 documents handled
+        """
+        if not html_content:
+            return html_content
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            doc_counter = 0
+            
+            # Find all links and embedded objects with base64 data
+            for link_tag in soup.find_all('a'):
+                href = link_tag.get('href', '')
+                
+                if href.startswith('data:'):
+                    # Check if it looks like a document MIME type
+                    mime_type = href.split(';')[0].replace('data:', '')
+                    if any(doc_mime in mime_type for doc_mime in [
+                        'pdf', 'word', 'document', 'spreadsheet', 'excel', 
+                        'presentation', 'powerpoint', 'msexcel', 'mspowerpoint'
+                    ]):
+                        if strip_documents:
+                            # Remove the link
+                            link_tag.decompose()
+                        else:
+                            # Extract and save the document
+                            doc_data = Homework._extract_and_save_document(
+                                href, temp_path, doc_counter
+                            )
+                            if doc_data:
+                                doc_path, doc_name = doc_data
+                                # Replace with a markdown reference
+                                link_tag['href'] = doc_path
+                                if not link_tag.get_text():
+                                    link_tag.string = f"[Document: {doc_name}]"
+                                doc_counter += 1
+            
+            # Also handle script tags that might contain embedded documents
+            for script_tag in soup.find_all('script', {'type': 'application/json'}):
+                # Skip for now - would need more complex parsing
+                pass
+            
+            return str(soup)
+        except Exception as e:
+            print(f"Error processing documents in HTML: {e}")
+            return html_content
+
     @classmethod
-    def from_api_response(cls, assignment_data, due_date, detailed_data=None):
+    def from_api_response(cls, assignment_data, due_date, detailed_data=None, temp_path=None, strip_images=True, strip_documents=True):
         content = None
         documents = None
 
@@ -128,7 +342,23 @@ class Homework:
 
             if detailed_matiere and detailed_matiere.get('aFaire'):
                 contenu = detailed_matiere['aFaire'].get('contenu')
-                content = cls.decode_base64_content(contenu) if contenu else None
+                if contenu:
+                    # Decode base64 content
+                    decoded_content = cls.decode_base64_content(contenu)
+                    # Extract documents first (before converting to Markdown)
+                    if decoded_content:
+                        decoded_content = cls._extract_documents_from_html(
+                            decoded_content,
+                            temp_path=temp_path,
+                            strip_documents=strip_documents
+                        )
+                    # Convert HTML to Markdown
+                    if decoded_content:
+                        content = cls.convert_html_to_markdown(
+                            decoded_content, 
+                            temp_path=temp_path, 
+                            strip_images=strip_images
+                        )
                 documents = detailed_matiere.get('aFaire', {}).get('documents', [])
 
         try:
@@ -177,6 +407,209 @@ class EcoleDirecteAPI:
         self.headers = None
         self.payload = 'data={}'
         self.verbose = False
+
+    @staticmethod
+    def convert_html_to_markdown(html_content, temp_path=None, strip_images=True):
+        """
+        Converts HTML content to Markdown format, optionally extracting images.
+        
+        :param html_content: The HTML content to convert
+        :param temp_path: Path to save extracted images (default: system temp directory)
+        :param strip_images: If True, remove images; if False, extract and reference them
+        :return: Markdown content with base64 images removed or replaced with references
+        """
+        if not html_content:
+            return None
+        try:
+            # Parse HTML to extract and replace base64 images
+            soup = BeautifulSoup(html_content, 'html.parser')
+            image_counter = 0
+            
+            # Find all img tags with base64 data
+            for img_tag in soup.find_all('img'):
+                src = img_tag.get('src', '')
+                
+                # Check if it's a base64 data URL
+                if src.startswith('data:'):
+                    if strip_images:
+                        # Remove the image entirely
+                        img_tag.decompose()
+                    else:
+                        # Extract and save the image
+                        image_data = EcoleDirecteAPI._extract_and_save_image(
+                            src, temp_path, image_counter
+                        )
+                        if image_data:
+                            image_path, image_name = image_data
+                            # Replace src with local path reference
+                            img_tag['src'] = image_path
+                            image_counter += 1
+            
+            # Convert the modified HTML to Markdown
+            markdown_content = md(str(soup))
+            # Clean up excessive whitespace
+            markdown_content = '\n'.join(line.rstrip() for line in markdown_content.split('\n'))
+            return markdown_content.strip()
+        except Exception as e:
+            print(f"Error converting HTML to Markdown: {e}")
+            return html_content
+
+    @staticmethod
+    def _extract_and_save_image(data_url, temp_path=None, counter=0):
+        """
+        Extracts a base64 encoded image from a data URL and saves it to disk.
+        
+        :param data_url: The data URL containing base64 image data
+        :param temp_path: Path to save the image (default: system temp directory)
+        :param counter: Counter for unique naming
+        :return: Tuple of (relative_path, image_name) or None if extraction fails
+        """
+        try:
+            # Parse the data URL
+            match = re.match(r'data:([^;]+);base64,(.+)', data_url)
+            if not match:
+                return None
+            
+            mime_type = match.group(1)
+            base64_data = match.group(2)
+            
+            # Determine file extension from MIME type
+            extension_map = {
+                'image/jpeg': 'jpg',
+                'image/png': 'png',
+                'image/gif': 'gif',
+                'image/webp': 'webp',
+                'image/svg+xml': 'svg',
+            }
+            extension = extension_map.get(mime_type, 'png')
+            
+            # Create temp directory if not provided
+            if temp_path is None:
+                temp_path = tempfile.gettempdir()
+            
+            # Ensure the temp path exists
+            Path(temp_path).mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique filename
+            image_name = f"image_{uuid.uuid4().hex[:8]}.{extension}"
+            image_full_path = os.path.join(temp_path, image_name)
+            
+            # Decode and save the image
+            image_data = base64.b64decode(base64_data)
+            with open(image_full_path, 'wb') as f:
+                f.write(image_data)
+            
+            # Return relative path for Markdown
+            return (image_name, image_name)
+        except Exception as e:
+            print(f"Error extracting and saving image: {e}")
+            return None
+
+    @staticmethod
+    def _extract_and_save_document(data_url, temp_path=None, doc_counter=0):
+        """
+        Extracts a base64 encoded document from a data URL and saves it to disk.
+        
+        Supports: PDF, DOCX, XLSX, PPTX, DOC, XLS, PPT
+        
+        :param data_url: The data URL containing base64 document data
+        :param temp_path: Path to save the document (default: system temp directory)
+        :param doc_counter: Counter for unique naming
+        :return: Tuple of (relative_path, document_name) or None if extraction fails
+        """
+        try:
+            # Parse the data URL
+            match = re.match(r'data:([^;]+);base64,(.+)', data_url)
+            if not match:
+                return None
+            
+            mime_type = match.group(1)
+            base64_data = match.group(2)
+            
+            # Determine file extension from MIME type
+            extension_map = {
+                'application/pdf': 'pdf',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+                'application/msword': 'doc',
+                'application/vnd.ms-excel': 'xls',
+                'application/vnd.ms-powerpoint': 'ppt',
+                'application/x-msexcel': 'xls',
+                'application/x-mspowerpoint': 'ppt',
+            }
+            extension = extension_map.get(mime_type, 'bin')
+            
+            # Create temp directory if not provided
+            if temp_path is None:
+                temp_path = tempfile.gettempdir()
+            
+            # Ensure the temp path exists
+            Path(temp_path).mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique filename
+            doc_name = f"document_{uuid.uuid4().hex[:8]}.{extension}"
+            doc_full_path = os.path.join(temp_path, doc_name)
+            
+            # Decode and save the document
+            doc_data = base64.b64decode(base64_data)
+            with open(doc_full_path, 'wb') as f:
+                f.write(doc_data)
+            
+            # Return relative path for Markdown
+            return (doc_name, doc_name)
+        except Exception as e:
+            print(f"Error extracting and saving document: {e}")
+            return None
+
+    @staticmethod
+    def _extract_documents_from_html(html_content, temp_path=None, strip_documents=True):
+        """
+        Extracts and handles base64 documents embedded in HTML.
+        
+        :param html_content: HTML content to process
+        :param temp_path: Path to save documents
+        :param strip_documents: If True, remove documents; if False, extract them
+        :return: Modified HTML with base64 documents handled
+        """
+        if not html_content:
+            return html_content
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            doc_counter = 0
+            
+            # Find all links and embedded objects with base64 data
+            for link_tag in soup.find_all('a'):
+                href = link_tag.get('href', '')
+                
+                if href.startswith('data:'):
+                    # Check if it looks like a document MIME type
+                    mime_type = href.split(';')[0].replace('data:', '')
+                    if any(doc_mime in mime_type for doc_mime in [
+                        'pdf', 'word', 'document', 'spreadsheet', 'excel', 
+                        'presentation', 'powerpoint', 'msexcel', 'mspowerpoint'
+                    ]):
+                        if strip_documents:
+                            # Remove the link
+                            link_tag.decompose()
+                        else:
+                            # Extract and save the document
+                            doc_data = EcoleDirecteAPI._extract_and_save_document(
+                                href, temp_path, doc_counter
+                            )
+                            if doc_data:
+                                doc_path, doc_name = doc_data
+                                # Replace with a markdown reference
+                                link_tag['href'] = doc_path
+                                if not link_tag.get_text():
+                                    link_tag.string = f"[Document: {doc_name}]"
+                                doc_counter += 1
+            
+            return str(soup)
+        except Exception as e:
+            print(f"Error processing documents in HTML: {e}")
+            return html_content
 
     def get_base_url(self):
         if not self.base_url:
@@ -361,10 +794,14 @@ class EcoleDirecteAPI:
         else:  # From January to August
             return f"{current_year - 1}-{current_year}"
 
-    def get_received_messages(self, latest_n=5):
+    def get_received_messages(self, latest_n=5, temp_path=None, strip_images=True, strip_documents=True):
         """
         Fetches the latest received messages and their details.
+        
         :param latest_n: Number of latest messages to retrieve.
+        :param temp_path: Path to save extracted files (default: system temp directory)
+        :param strip_images: If True, remove images; if False, extract and reference them
+        :param strip_documents: If True, remove documents; if False, extract and reference them
         :return: List of detailed message objects with decoded content.
         """
         base_url = self.get_base_url()
@@ -406,15 +843,24 @@ class EcoleDirecteAPI:
             message_ids = [msg['id'] for msg in messages[:latest_n]]
             
             # Fetch detailed information for each message
-            return self.get_message_details(message_ids)
+            return self.get_message_details(
+                message_ids, 
+                temp_path=temp_path, 
+                strip_images=strip_images,
+                strip_documents=strip_documents
+            )
         else:
             raise Exception("Failed to retrieve messages.")
 
-    def get_message_details(self, message_ids):
+    def get_message_details(self, message_ids, temp_path=None, strip_images=True, strip_documents=True):
         """
         Retrieves details for each message based on the provided message_ids.
         Decodes the content field from base64.
+        
         :param message_ids: List of message IDs to retrieve.
+        :param temp_path: Path to save extracted files (default: system temp directory)
+        :param strip_images: If True, remove images; if False, extract and reference them
+        :param strip_documents: If True, remove documents; if False, extract and reference them
         :return: List of detailed message objects with decoded content.
         """
         base_url = self.get_base_url()
@@ -450,11 +896,19 @@ class EcoleDirecteAPI:
                     content_encoded = detailed_message.get('content', '')
                     if content_encoded:
                         content_decoded = base64.b64decode(content_encoded).decode('utf-8')
-                        # Convert the decoded content from HTML to raw text using BeautifulSoup
-                        soup = BeautifulSoup(content_decoded, 'html.parser')
-                        content_text = soup.get_text(strip=True)  # Get raw text, removing excessive whitespace
-
-                        detailed_message['content'] = content_text
+                        # Extract documents first (before converting to Markdown)
+                        content_decoded = self._extract_documents_from_html(
+                            content_decoded,
+                            temp_path=temp_path,
+                            strip_documents=strip_documents
+                        )
+                        # Convert the decoded content from HTML to Markdown
+                        content_markdown = self.convert_html_to_markdown(
+                            content_decoded,
+                            temp_path=temp_path,
+                            strip_images=strip_images
+                        )
+                        detailed_message['content'] = content_markdown
                     
                     message_details.append(detailed_message)
                 else:
@@ -496,8 +950,15 @@ class EcoleDirecteAPI:
             print(f"An error occurred while fetching details for {due_date}: {e}")
             return None
 
-    def parse_homework(self, response):
-        """Parses the main homework list and creates Homework objects."""
+    def parse_homework(self, response, temp_path=None, strip_images=True, strip_documents=True):
+        """
+        Parses the main homework list and creates Homework objects.
+        
+        :param response: API response data
+        :param temp_path: Path to save extracted files (default: system temp directory)
+        :param strip_images: If True, remove images; if False, extract and reference them
+        :param strip_documents: If True, remove documents; if False, extract and reference them
+        """
         if response and response.get('code') == 200:
             homework_data = response.get('data', {})
             parsed_homework = []
@@ -514,7 +975,14 @@ class EcoleDirecteAPI:
                     detailed_info = self.get_homework_details_for_date(date)
 
                     # Create Homework object from API response
-                    homework = Homework.from_api_response(assignment, date, detailed_info)
+                    homework = Homework.from_api_response(
+                        assignment, 
+                        date, 
+                        detailed_info,
+                        temp_path=temp_path,
+                        strip_images=strip_images,
+                        strip_documents=strip_documents
+                    )
                     if homework:
                         parsed_homework.append(homework)
 
@@ -530,6 +998,11 @@ class EcoleDirecteHomeworkPlugin:
 
         # Create instances of EcoleDirecteAPI for each student
         self.api_instances = {student_id: EcoleDirecteAPI(int(student_id)) for student_id in self.students}
+        
+        # Configuration options for resource handling
+        self.temp_path = None
+        self.strip_images = True
+        self.strip_documents = True
 
     def load_student_data(self):
         """
@@ -597,7 +1070,12 @@ class EcoleDirecteHomeworkPlugin:
         """
         Parses the response data and returns a list of formatted homework.
         """
-        parsed_homework = api.parse_homework(response)
+        parsed_homework = api.parse_homework(
+            response, 
+            temp_path=self.temp_path, 
+            strip_images=self.strip_images,
+            strip_documents=self.strip_documents
+        )
         homework_list = []
 
         for homework in parsed_homework:
@@ -633,6 +1111,11 @@ class EcoleDirecteMessagesPlugin:
 
         # Create instances of EcoleDirecteAPI for each student
         self.api_instances = {student_id: EcoleDirecteAPI(int(student_id)) for student_id in self.students}
+        
+        # Configuration options for resource handling
+        self.temp_path = None
+        self.strip_images = True
+        self.strip_documents = True
 
     def load_student_data(self):
         """
@@ -695,7 +1178,12 @@ class EcoleDirecteMessagesPlugin:
             if name.lower() == kid_name.lower():
                 # Fetch messages for the matched student
                 api_instance = self.api_instances[student_id]
-                response = api_instance.get_received_messages(latest_n)
+                response = api_instance.get_received_messages(
+                    latest_n, 
+                    temp_path=self.temp_path, 
+                    strip_images=self.strip_images,
+                    strip_documents=self.strip_documents
+                )
                 if response:
                     return self.parse_and_return_messages(response)
                 else:
