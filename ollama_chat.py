@@ -1,3 +1,12 @@
+# -*- coding: utf-8 -*-
+import sys
+import io
+
+# Force UTF-8 output on Windows
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 import ollama
 import platform
 import tempfile
@@ -5829,10 +5838,13 @@ def run():
             auto_start_conversation = False
 
         if output_file:
-            with open(output_file, 'a', encoding='utf-8') as f:
-                f.write(bot_response)
-                if verbose_mode:
-                    on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
+            if bot_response:
+                with open(output_file, 'a', encoding='utf-8') as f:
+                    f.write(bot_response)
+                    if verbose_mode:
+                        on_print(f"Response saved to {output_file}", Fore.WHITE + Style.DIM)
+            else:
+                on_print("No bot response to save.", Fore.YELLOW)
 
         # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
         if bot_response and re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
