@@ -328,8 +328,11 @@ def get_available_tools():
         'function': {
             "name": "instantiate_agent_with_tools_and_process_task",
             "description": (
-                "Creates an agent with a specified name using a provided system prompt, task, and a list of tools. "
-                "Executes the task-solving process and returns the result. The tools must be chosen from a predefined set."
+                "✅ PRIMARY AGENT FUNCTION: Creates a specialized agent and IMMEDIATELY executes a task, returning actual results. "
+                "Use this when the user wants an agent to DO something (search, analyze, investigate, research, etc.). "
+                "The agent will break down the task, use the provided tools, and return findings. "
+                "Example: 'Create an agent to search for X' → Use this function with task='search for X'. "
+                "Tools must be chosen from a predefined set."
             ),
             "parameters": {
                 "type": "object",
@@ -2642,8 +2645,11 @@ Based on the context of the completed tasks and the remaining plan, provide a re
         except Exception as e:
             return f"Error during task processing: {str(e)}"
 
-def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str):
+def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name: str, agent_description: str, task: str = None):
     global verbose_mode
+    global current_model
+    global thinking_model
+    global thinking_model_reasoning_pattern
     
     # Make sure tools are unique
     tools = list(set(tools))
@@ -2654,6 +2660,8 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         on_print(f"Tools: {tools}", Fore.WHITE + Style.DIM)
         on_print(f"Agent Name: {agent_name}", Fore.WHITE + Style.DIM)
         on_print(f"Agent Description: {agent_description}", Fore.WHITE + Style.DIM)
+        if task:
+            on_print(f"Task: {task}", Fore.WHITE + Style.DIM)
 
     # Validate inputs
     if not isinstance(system_prompt, str) or not system_prompt.strip():
@@ -2702,11 +2710,25 @@ def create_new_agent_with_tools(system_prompt: str, tools: list[str], agent_name
         name=agent_name,
         description=agent_description,
         model=current_model,
+        thinking_model=thinking_model,
         system_prompt=system_prompt,
         temperature=0.7,
         tools=agent_tools,
-        verbose=verbose_mode
+        verbose=verbose_mode,
+        thinking_model_reasoning_pattern=thinking_model_reasoning_pattern
     )
+    
+    # If a task is provided, execute it synchronously and return the result
+    if task and isinstance(task, str) and task.strip():
+        try:
+            result = agent.process_task(task, return_intermediate_results=True)
+            # Return the actual result from the agent's task processing
+            return result if result else f"Agent '{agent_name}' completed the task but produced no output."
+        except Exception as e:
+            return f"Error during task processing by agent '{agent_name}': {e}"
+    
+    # If no task provided, just return a success message about agent creation
+    return f"Agent '{agent_name}' has been successfully created with {len(agent_tools)} tool(s): {', '.join([tool['function']['name'] for tool in agent_tools]) if agent_tools else 'none'}. The agent is registered and ready to be used."
 
 def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str, tools: list[str], agent_name: str, agent_description: str = None, process_task=True) -> str|Agent:
     """
@@ -3910,7 +3932,8 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
                                 tool_response_str += "\n" + latest_user_message
                         conversation.append({"role": tool_role, "content": tool_response_str, "tool_call_id": tool_call_id})
     if tool_found:
-        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=[], no_bot_prompt=True, stream_active=stream_active, num_ctx=num_ctx)
+        # Pass the tools back so the model can make follow-up tool calls if needed
+        bot_response = ask_ollama_with_conversation(conversation, model, temperature, prompt_template, tools=tools, no_bot_prompt=True, stream_active=stream_active, num_ctx=num_ctx)
     else:
         on_print(f"Tools not found", Fore.RED)
         return None
