@@ -3711,6 +3711,185 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     
     return result_text
 
+def encode_file_to_base64_with_mime(file_path):
+    """
+    Reads a file and returns it as a base64-encoded string with the proper MIME type prefix.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        String in format: "data:<mime-type>;base64,<base64-data>"
+    """
+    import mimetypes
+    
+    # Determine MIME type based on file extension
+    mime_type, _ = mimetypes.guess_type(file_path)
+    
+    # Default to application/octet-stream if MIME type cannot be determined
+    if not mime_type:
+        _, ext = os.path.splitext(file_path)
+        ext_lower = ext.lower()
+        if ext_lower == '.pdf':
+            mime_type = 'application/pdf'
+        elif ext_lower in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+            mime_type = f'image/{ext_lower[1:]}'  # Remove the dot
+            if ext_lower == '.jpg':
+                mime_type = 'image/jpeg'
+        else:
+            mime_type = 'application/octet-stream'
+    
+    # Read file and encode to base64
+    with open(file_path, 'rb') as f:
+        file_data = base64.b64encode(f.read()).decode('utf-8')
+    
+    return f"data:{mime_type};base64,{file_data}"
+
+def ask_openai_responses_api(conversation, selected_model=None, temperature=0.1, tools=None):
+    """
+    Call the Azure OpenAI Responses API endpoint (/openai/v1/responses) to support file uploads.
+    This is used when files need to be sent as base64-encoded data.
+    
+    Args:
+        conversation: List of conversation messages with potential file attachments
+        selected_model: Model name/deployment
+        temperature: Temperature parameter
+        tools: Optional tools (not used in responses API currently)
+        
+    Returns:
+        Tuple of (bot_response, is_tool_calls, completion_done)
+    """
+    global openai_client
+    global use_azure_openai
+    global verbose_mode
+    
+    # Build the input array for the Responses API
+    input_messages = []
+    
+    for msg in conversation:
+        if msg["role"] == "system":
+            # System messages might need special handling
+            continue  # Responses API may not support system role directly
+        
+        content_array = []
+        
+        # Handle file attachments (images or files with base64)
+        if "images" in msg and msg["images"]:
+            for file_path in msg["images"]:
+                try:
+                    base64_data = encode_file_to_base64_with_mime(file_path)
+                    filename = os.path.basename(file_path)
+                    
+                    content_array.append({
+                        "type": "input_file",
+                        "filename": filename,
+                        "file_data": base64_data
+                    })
+                except Exception as e:
+                    if verbose_mode:
+                        on_print(f"Error encoding file {file_path}: {e}", Fore.RED)
+        
+        # Add text content
+        if "content" in msg and msg["content"]:
+            content_array.append({
+                "type": "input_text",
+                "text": msg["content"]
+            })
+        
+        if content_array:
+            input_messages.append({
+                "role": msg["role"],
+                "content": content_array
+            })
+    
+    # Prepare the request
+    request_data = {
+        "model": selected_model,
+        "input": input_messages
+    }
+    
+    if temperature is not None:
+        request_data["temperature"] = temperature
+    
+    # Get endpoint and auth from the openai_client
+    if use_azure_openai:
+        # For Azure, construct the endpoint URL at the resource level (not deployment)
+        # base_url typically includes: https://{resource}.openai.azure.com/openai/deployments/{deployment}/
+        # We need: https://{resource}.openai.azure.com/openai/v1/responses
+        base_url = str(openai_client.base_url)
+        
+        # Extract the Azure resource base URL (remove deployment path if present)
+        if '/openai/deployments/' in base_url:
+            # Split at /openai/deployments/ and take the first part
+            azure_resource = base_url.split('/openai/deployments/')[0]
+            endpoint = f"{azure_resource}/openai/v1/responses"
+        else:
+            # If no deployment path, just append the responses endpoint
+            base_url = base_url.rstrip('/')
+            endpoint = f"{base_url}/openai/v1/responses"
+        
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": openai_client.api_key
+        }
+    else:
+        # For OpenAI
+        base_url = str(openai_client.base_url)
+        base_url = base_url.rstrip('/')
+        endpoint = f"{base_url}/v1/responses"
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {openai_client.api_key}"
+        }
+    
+    if verbose_mode:
+        on_print(f"Calling Responses API at: {endpoint}", Fore.WHITE + Style.DIM)
+        on_print(f"Request data: {json.dumps(request_data, indent=2)[:500]}...", Fore.WHITE + Style.DIM)
+    
+    try:
+        response = requests.post(endpoint, headers=headers, json=request_data, timeout=300)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        if verbose_mode:
+            on_print(f"Response API result: {json.dumps(result, indent=2)[:500]}...", Fore.WHITE + Style.DIM)
+        
+        # Parse the response
+        # The Responses API returns a structure like: {"output": [...], "model": "...", ...}
+        if "output" in result and len(result["output"]) > 0:
+            # Get the last message from output
+            last_message = result["output"][-1]
+            
+            if "content" in last_message:
+                # If content is an array, extract text parts
+                if isinstance(last_message["content"], list):
+                    bot_response = ""
+                    for content_item in last_message["content"]:
+                        if isinstance(content_item, dict) and content_item.get("type") == "output_text":
+                            bot_response += content_item.get("text", "")
+                        elif isinstance(content_item, str):
+                            bot_response += content_item
+                else:
+                    bot_response = last_message["content"]
+                
+                return bot_response, False, True
+        
+        # Fallback if response structure is different
+        on_print(f"Unexpected Responses API structure: {result}", Fore.YELLOW)
+        return "", False, True
+        
+    except requests.exceptions.RequestException as e:
+        on_print(f"Error calling Responses API: {e}", Fore.RED)
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                on_print(f"Error details: {json.dumps(error_detail, indent=2)}", Fore.RED)
+            except:
+                on_print(f"Error response: {e.response.text}", Fore.RED)
+        return "", False, True
+
 def ask_openai_with_conversation(conversation, selected_model=None, temperature=0.1, prompt_template=None, stream_active=True, tools=[]):
     global openai_client
     global verbose_mode
@@ -3762,6 +3941,23 @@ def ask_openai_with_conversation(conversation, selected_model=None, temperature=
 
     if len(tools) == 0:
         tools = None
+
+    # Check if any message contains file attachments (images key)
+    has_file_attachments = any("images" in msg and msg["images"] for msg in conversation)
+    
+    # If files are attached, use the Responses API instead of chat completions
+    if has_file_attachments:
+        if verbose_mode:
+            on_print("File attachments detected, using Responses API...", Fore.WHITE + Style.DIM)
+        
+        try:
+            bot_response, bot_response_is_tool_calls, completion_done = ask_openai_responses_api(
+                conversation, selected_model, temperature, tools
+            )
+            return bot_response, bot_response_is_tool_calls, completion_done
+        except Exception as e:
+            on_print(f"Error during Responses API call: {e}", Fore.RED)
+            return "", False, True
 
     completion_done = False
     completion = None
@@ -5948,22 +6144,68 @@ def run():
         image_path = None
         # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
         if "/file" in user_input:
-            file_path = user_input.split("/file")[1].strip()
-            file_path = file_path.strip("'\"")
+            # Extract the file path, handling quoted paths with spaces
+            file_part = user_input.split("/file", 1)[1].strip()
             
-            # Check if the file is an image
+            # Check if the path is quoted
+            if file_part.startswith('"'):
+                # Find the closing quote
+                end_quote = file_part.find('"', 1)
+                if end_quote != -1:
+                    file_path = file_part[1:end_quote]
+                    remaining_text = file_part[end_quote+1:].strip()
+                else:
+                    file_path = file_part[1:].strip('"')
+                    remaining_text = ""
+            elif file_part.startswith("'"):
+                # Find the closing quote
+                end_quote = file_part.find("'", 1)
+                if end_quote != -1:
+                    file_path = file_part[1:end_quote]
+                    remaining_text = file_part[end_quote+1:].strip()
+                else:
+                    file_path = file_part[1:].strip("'")
+                    remaining_text = ""
+            else:
+                # No quotes, split on first space
+                parts = file_part.split(None, 1)
+                file_path = parts[0]
+                remaining_text = parts[1] if len(parts) > 1 else ""
+            
+            # Check if the file exists
+            if not os.path.exists(file_path):
+                on_print(f"File not found: {file_path}", Fore.RED)
+                continue
+            
+            # Get the text before /file
+            text_before_file = user_input.split("/file", 1)[0].strip()
+            
+            # Check if the file is an image or PDF (or other binary file that should be sent as base64)
             _, ext = os.path.splitext(file_path)
-            if ext.lower() not in [".png", ".jpg", ".jpeg", ".bmp"]:
+            
+            # For OpenAI/Azure OpenAI: treat images, PDFs, and other binary files as attachments
+            # For Ollama: only treat images as attachments, read text from other files
+            is_binary_file = ext.lower() in [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".pdf"]
+            
+            if (use_openai or use_azure_openai) and is_binary_file:
+                # Send as attachment using base64 encoding via Responses API
+                user_input = f"{text_before_file} {remaining_text}".strip()
+                image_path = file_path
+                if verbose_mode:
+                    on_print(f"File {file_path} will be sent as base64 attachment.", Fore.WHITE + Style.DIM)
+            elif not (use_openai or use_azure_openai) and ext.lower() in [".png", ".jpg", ".jpeg", ".bmp"]:
+                # For Ollama, only images are attachments
+                user_input = f"{text_before_file} {remaining_text}".strip()
+                image_path = file_path
+            else:
+                # Read text content from the file
                 try:
                     with open(file_path, 'r', encoding='utf-8') as file:
-                        user_input = user_input.replace("/file", "")
-                        user_input += "\n" + file.read()
-                except FileNotFoundError:
-                    on_print("File not found. Please try again.", Fore.RED)
+                        file_content = file.read()
+                        user_input = f"{text_before_file} {remaining_text}\n{file_content}".strip()
+                except Exception as e:
+                    on_print(f"Error reading file: {e}", Fore.RED)
                     continue
-            else:
-                user_input = user_input.split("/file")[0].strip()
-                image_path = file_path
 
         if user_input == "/think":
             if not think_mode_on:
