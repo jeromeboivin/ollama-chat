@@ -3872,12 +3872,72 @@ def handle_tool_response(bot_response, model_support_tools, conversation, model,
 
                 tool_response = None
 
+                # Debug logging for parameters
+                if verbose_mode:
+                    on_print(f"[DEBUG] Initial parameters: {parameters}", Fore.CYAN + Style.DIM)
+                    on_print(f"[DEBUG] Parameters type: {type(parameters)}", Fore.CYAN + Style.DIM)
+
                 # if parameters is a string, convert it to a dictionary
                 if isinstance(parameters, str):
+                    if verbose_mode:
+                        on_print(f"[DEBUG] Converting string parameters to dict", Fore.CYAN + Style.DIM)
                     try:
                         parameters = extract_json(parameters)
-                    except:
+                        if verbose_mode:
+                            on_print(f"[DEBUG] After extract_json: {parameters} (type: {type(parameters)})", Fore.CYAN + Style.DIM)
+                    except Exception as e:
+                        if verbose_mode:
+                            on_print(f"[DEBUG] extract_json failed: {e}, using empty dict", Fore.CYAN + Style.DIM)
                         parameters = {}
+                
+                # Ensure parameters is always a dict
+                # If it's a list, try to convert it based on the tool's parameter definition
+                if isinstance(parameters, list):
+                    if verbose_mode:
+                        on_print(f"[DEBUG] Parameters is a list, attempting to convert to dict", Fore.CYAN + Style.DIM)
+                    # Try to map list items to parameter names from the tool definition
+                    if 'parameters' in tool.get('function', {}) and 'properties' in tool['function']['parameters']:
+                        param_names = list(tool['function']['parameters']['properties'].keys())
+                        if verbose_mode:
+                            on_print(f"[DEBUG] Parameter names from tool definition: {param_names}", Fore.CYAN + Style.DIM)
+                            on_print(f"[DEBUG] List values: {parameters}", Fore.CYAN + Style.DIM)
+                        if len(param_names) > 0 and len(parameters) > 0:
+                            # Create dict mapping parameter names to list values
+                            parameters = {name: value for name, value in zip(param_names, parameters)}
+                            if verbose_mode:
+                                on_print(f"[DEBUG] Converted list to dict: {parameters}", Fore.CYAN + Style.DIM)
+                        else:
+                            parameters = {}
+                    else:
+                        if verbose_mode:
+                            on_print(f"[DEBUG] No parameter definition found in tool, using empty dict", Fore.CYAN + Style.DIM)
+                        parameters = {}
+                elif not isinstance(parameters, dict):
+                    # If it's neither string, list, nor dict, convert to empty dict
+                    if verbose_mode:
+                        on_print(f"[DEBUG] Parameters is {type(parameters)}, converting to empty dict", Fore.CYAN + Style.DIM)
+                    parameters = {}
+                
+                if verbose_mode:
+                    on_print(f"[DEBUG] Final parameters before tool call: {parameters} (type: {type(parameters)})", Fore.CYAN + Style.DIM)
+
+                # Filter parameters to only include those accepted by the function
+                # First, try to get accepted parameters from tool definition
+                accepted_params = set()
+                if 'parameters' in tool.get('function', {}) and 'properties' in tool['function']['parameters']:
+                    accepted_params = set(tool['function']['parameters']['properties'].keys())
+                
+                if verbose_mode and accepted_params:
+                    on_print(f"[DEBUG] Accepted parameters from tool definition: {accepted_params}", Fore.CYAN + Style.DIM)
+                
+                # Filter the parameters to only include accepted ones
+                if accepted_params and isinstance(parameters, dict):
+                    original_params = parameters.copy()
+                    parameters = {k: v for k, v in parameters.items() if k in accepted_params}
+                    
+                    if verbose_mode and original_params != parameters:
+                        on_print(f"[DEBUG] Filtered parameters: removed {set(original_params.keys()) - set(parameters.keys())}", Fore.CYAN + Style.DIM)
+                        on_print(f"[DEBUG] Parameters after filtering: {parameters}", Fore.CYAN + Style.DIM)
 
                 # Check if the tool is a globally defined function
                 if tool_name in globals():
@@ -4167,6 +4227,73 @@ def try_parse_json(json_str, verbose=False):
 
     return result
 
+def try_merge_concatenated_json(json_str, verbose=False):
+    """
+    Handle concatenated JSON objects (e.g., {"key": "value"}{"key2": "value2"})
+    by attempting to extract and merge them intelligently.
+    """
+    if verbose:
+        on_print(f"[DEBUG] Attempting to parse concatenated JSON: {json_str[:100]}...", Fore.CYAN + Style.DIM)
+    
+    # Try to find and extract individual JSON objects
+    json_objects = []
+    i = 0
+    brace_count = 0
+    current_obj = ""
+    
+    while i < len(json_str):
+        char = json_str[i]
+        current_obj += char
+        
+        if char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            
+            # When we close a brace and count reaches 0, we have a complete object
+            if brace_count == 0 and current_obj.count('{') > 0:
+                try:
+                    obj = json.loads(current_obj.strip())
+                    json_objects.append(obj)
+                    if verbose:
+                        on_print(f"[DEBUG] Found JSON object: {obj}", Fore.CYAN + Style.DIM)
+                    current_obj = ""
+                except json.JSONDecodeError:
+                    pass
+        
+        i += 1
+    
+    if not json_objects:
+        if verbose:
+            on_print(f"[DEBUG] No individual JSON objects found in concatenated string", Fore.CYAN + Style.DIM)
+        return None
+    
+    # If we have multiple objects, merge them by taking the last (most recent) one
+    # or merge them into a single dict if they're all dicts
+    if len(json_objects) > 1:
+        if verbose:
+            on_print(f"[DEBUG] Found {len(json_objects)} JSON objects, merging...", Fore.CYAN + Style.DIM)
+        
+        # If all are dicts, merge them
+        if all(isinstance(obj, dict) for obj in json_objects):
+            merged = {}
+            for obj in json_objects:
+                merged.update(obj)
+            if verbose:
+                on_print(f"[DEBUG] Merged objects: {merged}", Fore.CYAN + Style.DIM)
+            return merged
+        else:
+            # If not all dicts, return the last one (most recent)
+            if verbose:
+                on_print(f"[DEBUG] Not all objects are dicts, returning last one: {json_objects[-1]}", Fore.CYAN + Style.DIM)
+            return json_objects[-1]
+    elif len(json_objects) == 1:
+        if verbose:
+            on_print(f"[DEBUG] Single JSON object found: {json_objects[0]}", Fore.CYAN + Style.DIM)
+        return json_objects[0]
+    
+    return None
+
 def extract_json(garbage_str):
     global verbose_mode
 
@@ -4234,16 +4361,24 @@ def extract_json(garbage_str):
         json_str = re.sub(r'"\s*{', '",{', json_str)  # Add comma between "{
         json_str = re.sub(r'}\s*"', '},"', json_str)  # Add comma between }"
 
-
         # Attempt to load the JSON to verify it's correct
         if verbose_mode:
             on_print(f"Extracted JSON: '{json_str}'", Fore.WHITE + Style.DIM)
         result = try_parse_json(json_str, verbose=verbose_mode)
         if result is not None:
             return result
-        else:
-            if verbose_mode:
-                on_print("Extracted string is not a valid JSON.", Fore.RED)
+        
+        # If parsing fails, try to handle concatenated JSON objects
+        if verbose_mode:
+            on_print(f"[DEBUG] Initial JSON parsing failed, attempting to handle concatenated JSON objects", Fore.CYAN + Style.DIM)
+        
+        # Try to split and merge multiple JSON objects
+        merged_result = try_merge_concatenated_json(json_str, verbose=verbose_mode)
+        if merged_result is not None:
+            return merged_result
+        
+        if verbose_mode:
+            on_print("Extracted string is not a valid JSON.", Fore.RED)
     else:
         if verbose_mode:
             on_print("Extracted string is not a valid JSON.", Fore.RED)
