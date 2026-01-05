@@ -950,7 +950,7 @@ class EcoleDirecteAPI:
             print(f"An error occurred while fetching details for {due_date}: {e}")
             return None
 
-    def parse_homework(self, response, temp_path=None, strip_images=True, strip_documents=True):
+    def parse_homework(self, response, temp_path=None, strip_images=True, strip_documents=True, include_past=False):
         """
         Parses the main homework list and creates Homework objects.
         
@@ -958,6 +958,7 @@ class EcoleDirecteAPI:
         :param temp_path: Path to save extracted files (default: system temp directory)
         :param strip_images: If True, remove images; if False, extract and reference them
         :param strip_documents: If True, remove documents; if False, extract and reference them
+        :param include_past: If True, include past homework; if False, only upcoming homework
         """
         if response and response.get('code') == 200:
             homework_data = response.get('data', {})
@@ -965,10 +966,10 @@ class EcoleDirecteAPI:
             today = datetime.now().date()
 
             for date, assignments in homework_data.items():
-                # Skip overdue homework
+                # Filter by date based on include_past flag
                 due_date = datetime.strptime(date, "%Y-%m-%d").date()
-                if due_date <= today:
-                    continue
+                if not include_past and due_date <= today:
+                    continue  # Skip overdue homework if include_past is False
 
                 for assignment in assignments:
                     # Fetch detailed information for the due_date
@@ -1030,6 +1031,12 @@ class EcoleDirecteHomeworkPlugin:
                             'description': 'The name of the kid',
                             'enum': list(self.students.values()),  # restrict to the names loaded from JSON
                             'optional': True  # This allows it to be omitted
+                        },
+                        'include_past': {
+                            'type': 'boolean',
+                            'description': 'If True, include homework from the past. If False, only retrieve upcoming homework (default).',
+                            'default': False,
+                            'optional': True
                         }
                     },
                 },
@@ -1039,21 +1046,27 @@ class EcoleDirecteHomeworkPlugin:
     def on_user_input_done(self, user_input, verbose_mode=False):
         return None
 
-    def get_homework_from_ecoledirecte(self, kid_name=None):
+    def get_homework_from_ecoledirecte(self, kid_name=None, include_past=False):
         """
         Retrieves homework for the specified child or for all students if no name is provided.
+        
+        :param kid_name: Name of the specific child (optional)
+        :param include_past: If True, include past homework; if False, only upcoming homework
         """
         if kid_name is None:
             # Fetch homework for all students
-            homework_results = {name: self.get_homework_by_kid(name) for name in self.students.values()}
+            homework_results = {name: self.get_homework_by_kid(name, include_past) for name in self.students.values()}
             return homework_results
         else:
             # Fetch homework for the specified student
-            return self.get_homework_by_kid(kid_name)
+            return self.get_homework_by_kid(kid_name, include_past)
 
-    def get_homework_by_kid(self, kid_name=None):
+    def get_homework_by_kid(self, kid_name=None, include_past=False):
         """
         Retrieves homework for a specified student by name.
+        
+        :param kid_name: Name of the student
+        :param include_past: If True, include past homework
         """
         for student_id, name in self.students.items():
             if name.lower() == kid_name.lower():
@@ -1061,38 +1074,40 @@ class EcoleDirecteHomeworkPlugin:
                 api_instance = self.api_instances[student_id]
                 response = api_instance.get_homework()
                 if response:
-                    return self.parse_and_return_homework(api_instance, response)
+                    return self.parse_and_return_homework(api_instance, response, include_past)
                 else:
                     return json.dumps(f"No homework data found for {name}.")
         return json.dumps("Invalid kid name provided.")
 
-    def parse_and_return_homework(self, api, response):
+    def parse_and_return_homework(self, api, response, include_past=False):
         """
         Parses the response data and returns a list of formatted homework.
+        
+        :param api: EcoleDirecteAPI instance
+        :param response: API response data
+        :param include_past: If True, include past homework
         """
         parsed_homework = api.parse_homework(
             response, 
             temp_path=self.temp_path, 
             strip_images=self.strip_images,
-            strip_documents=self.strip_documents
+            strip_documents=self.strip_documents,
+            include_past=include_past
         )
         homework_list = []
 
         for homework in parsed_homework:
             if homework:
                 homework_dict = homework.to_dict()
-
-                # Check if the homework is not overdue
-                if self.is_homework_overdue(homework_dict):
-                    continue  # Skip overdue homework
-
                 homework_list.append(homework_dict)
 
         if homework_list:
             # Return homework as JSON string
-            return json.dumps(homework_list, indent=4)
+            message = "All homework" if include_past else "Upcoming homework"
+            return json.dumps({"type": message, "data": homework_list}, indent=4)
         else:
-            return json.dumps("No upcoming homework found.")
+            message = "No homework found." if include_past else "No upcoming homework found."
+            return json.dumps(message)
 
     def is_homework_overdue(self, homework):
         """
