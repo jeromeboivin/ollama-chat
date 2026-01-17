@@ -29,6 +29,9 @@ import sys
 import json
 import importlib.util
 import inspect
+import subprocess
+import shlex
+from typing import Tuple, List, Dict, Any
 from appdirs import AppDirs
 from datetime import date, datetime
 from pygments import highlight
@@ -491,6 +494,23 @@ def get_available_tools():
                     }
                 },
                 "required": ["file_path"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'run_command',
+            'description': 'Run a shell command and return its output (stdout and stderr).',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run"
+                    }
+                },
+                "required": ["command"]
             }
         }
     }]
@@ -2930,6 +2950,18 @@ def delete_file(file_path):
         return f"File deleted successfully: {file_path}"
     except Exception as e:
         return f"Error deleting file '{file_path}': {str(e)}"
+
+def expand_env_vars(command: str) -> str:
+    return os.path.expandvars(command)
+
+def run_command(command: str) -> Tuple[str, str]:
+    command = expand_env_vars(command)
+    result = subprocess.run(
+        shlex.split(command),
+        capture_output=True,
+        text=True
+    )
+    return result.stdout, result.stderr
 
 def web_search(query=None, n_results=5, region="wt-wt", web_embedding_model=embeddings_model, num_ctx=None, return_intermediate=False):
     global current_model
