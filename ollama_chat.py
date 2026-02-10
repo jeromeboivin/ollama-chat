@@ -48,6 +48,7 @@ from rank_bm25 import BM25Okapi
 from pptx import Presentation
 from docx import Document
 from lxml import etree
+from openpyxl import load_workbook
 from tqdm import tqdm
 
 APP_NAME = "ollama-chat"
@@ -815,6 +816,43 @@ def extract_text_from_docx(docx_path):
     # Join all lines into a single Markdown string
     return "\n\n".join(markdown_lines)
 
+def extract_text_from_xlsx(xlsx_path):
+    """Extract text from an XLSX file, converting each sheet to a Markdown table."""
+    workbook = load_workbook(xlsx_path, read_only=True, data_only=True)
+    
+    file_name = os.path.splitext(os.path.basename(xlsx_path))[0].replace('_', ' ')
+    markdown_lines = [f"# {file_name}"]
+    
+    for sheet_name in workbook.sheetnames:
+        sheet = workbook[sheet_name]
+        rows = list(sheet.iter_rows(values_only=True))
+        
+        if not rows:
+            continue
+        
+        # Add sheet name as heading
+        markdown_lines.append(f"\n## {sheet_name}")
+        
+        # First row as table header
+        headers = [str(cell) if cell is not None else '' for cell in rows[0]]
+        markdown_lines.append('| ' + ' | '.join(headers) + ' |')
+        markdown_lines.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+        
+        # Remaining rows as table data
+        for row in rows[1:]:
+            # Skip entirely empty rows
+            if all(cell is None for cell in row):
+                continue
+            cells = [str(cell) if cell is not None else '' for cell in row]
+            # Pad or trim to match header count
+            while len(cells) < len(headers):
+                cells.append('')
+            cells = cells[:len(headers)]
+            markdown_lines.append('| ' + ' | '.join(cells) + ' |')
+    
+    workbook.close()
+    return '\n'.join(markdown_lines)
+
 def extract_text_from_pptx(pptx_path):
     # Load the PowerPoint presentation
     presentation = Presentation(pptx_path)
@@ -1365,7 +1403,7 @@ def is_markdown(file_path):
     
     # If the file is not .md, but is .txt, proceed with content checking
     if not file_path.endswith('.txt'):
-        raise ValueError(f"The file {file_path} is neither .md nor .txt.")
+        return False
 
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -1833,15 +1871,16 @@ class DocumentIndexer:
 
     def get_text_files(self):
         """
-        Recursively find all .txt, .md, .tex files in the root folder.
+        Recursively find all .txt, .md, .tex, .pdf, .docx, .pptx, .xlsx files in the root folder.
         Also include HTML files without extensions if they start with <!DOCTYPE html> or <html.
         Ignore empty lines at the beginning of the file and check only the first non-empty line.
         """
         text_files = []
+        supported_extensions = (".txt", ".md", ".tex", ".pdf", ".docx", ".pptx", ".xlsx")
         for root, dirs, files in os.walk(self.root_folder):
             for file in files:
                 # Check for files with extension
-                if file.endswith(".txt") or file.endswith(".md") or file.endswith(".tex"):
+                if file.lower().endswith(supported_extensions):
                     text_files.append(os.path.join(root, file))
                 else:
                     # Check for HTML files without extensions
@@ -1853,12 +1892,40 @@ class DocumentIndexer:
     def read_file(self, file_path):
         """
         Read the content of a file.
+        Supports plain text, PDF, DOCX, PPTX, and XLSX files.
         """
-        with open(file_path, 'r', encoding='utf-8') as file:
-            try:
+        try:
+            lower_path = file_path.lower()
+
+            # Handle PDF files
+            if lower_path.endswith('.pdf'):
+                reader = PdfReader(file_path)
+                text = ''
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text
+                return re.sub(r'\n+', '\n', text)
+
+            # Handle DOCX files
+            if lower_path.endswith('.docx'):
+                return extract_text_from_docx(file_path)
+
+            # Handle PPTX files
+            if lower_path.endswith('.pptx'):
+                return extract_text_from_pptx(file_path)
+
+            # Handle XLSX files
+            if lower_path.endswith('.xlsx'):
+                return extract_text_from_xlsx(file_path)
+
+            # Default: read as text
+            with open(file_path, 'r', encoding='utf-8') as file:
                 return file.read()
-            except:
-                return None
+        except Exception as e:
+            if self.verbose:
+                on_print(f"Error reading file {file_path}: {e}", Fore.RED)
+            return None
 
     def extract_text_between_strings(self, content, start_string, end_string):
         """
@@ -2012,11 +2079,19 @@ class DocumentIndexer:
                     content_to_chunk = embedding_content
                     
                     # Split Markdown files into sections if needed
+                    # DOCX, PPTX, and XLSX are extracted as Markdown, so use MarkdownSplitter for them too
+                    lower_file_path = file_path.lower()
+                    is_markdown_content = (
+                        is_markdown(file_path) or 
+                        lower_file_path.endswith('.docx') or 
+                        lower_file_path.endswith('.pptx') or 
+                        lower_file_path.endswith('.xlsx')
+                    )
                     if is_html(file_path):
                         # Convert to Markdown before splitting
                         markdown_splitter = MarkdownSplitter(extract_text_from_html(content_to_chunk), split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
-                    elif is_markdown(file_path):
+                    elif is_markdown_content:
                         markdown_splitter = MarkdownSplitter(content_to_chunk, split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
                     else:
@@ -3876,17 +3951,46 @@ def ask_openai_responses_api(conversation, selected_model=None, temperature=0.1,
         }
     
     if verbose_mode:
-        on_print(f"Calling Responses API at: {endpoint}", Fore.WHITE + Style.DIM)
-        on_print(f"Request data: {json.dumps(request_data, indent=2)[:500]}...", Fore.WHITE + Style.DIM)
+        on_print(f"\n{'='*80}", Fore.CYAN)
+        on_print(f"Responses API Request Details", Fore.CYAN + Style.BRIGHT)
+        on_print(f"{'='*80}", Fore.CYAN)
+        on_print(f"Endpoint: {endpoint}", Fore.WHITE + Style.DIM)
+        on_print(f"\nHeaders:", Fore.YELLOW)
+        for key, value in headers.items():
+            # Mask sensitive data
+            display_value = value[:20] + "..." if key.lower() in ['api-key', 'authorization'] and len(value) > 20 else value
+            on_print(f"  {key}: {display_value}", Fore.WHITE + Style.DIM)
+        on_print(f"\nRequest Body:", Fore.YELLOW)
+        on_print(json.dumps(request_data, indent=2), Fore.WHITE + Style.DIM)
+        
+        # Generate curl command for debugging
+        curl_headers = " ".join([f'-H "{k}: {v[:20] + "..." if k.lower() in ["api-key", "authorization"] and len(v) > 20 else v}"' for k, v in headers.items()])
+        on_print(f"\nEquivalent curl command:", Fore.YELLOW)
+        on_print(f"curl -X POST {endpoint} \\", Fore.GREEN)
+        on_print(f"  {curl_headers} \\", Fore.GREEN)
+        on_print(f"  -d '{json.dumps(request_data)}'", Fore.GREEN)
+        on_print(f"{'='*80}\n", Fore.CYAN)
     
     try:
         response = requests.post(endpoint, headers=headers, json=request_data, timeout=300)
+        
+        if verbose_mode:
+            on_print(f"\n{'='*80}", Fore.CYAN)
+            on_print(f"Responses API Response Details", Fore.CYAN + Style.BRIGHT)
+            on_print(f"{'='*80}", Fore.CYAN)
+            on_print(f"Status Code: {response.status_code}", Fore.YELLOW)
+            on_print(f"\nResponse Headers:", Fore.YELLOW)
+            for key, value in response.headers.items():
+                on_print(f"  {key}: {value}", Fore.WHITE + Style.DIM)
+        
         response.raise_for_status()
         
         result = response.json()
         
         if verbose_mode:
-            on_print(f"Response API result: {json.dumps(result, indent=2)[:500]}...", Fore.WHITE + Style.DIM)
+            on_print(f"\nResponse Body:", Fore.YELLOW)
+            on_print(json.dumps(result, indent=2), Fore.WHITE + Style.DIM)
+            on_print(f"{'='*80}\n", Fore.CYAN)
         
         # Parse the response
         # The Responses API returns a structure like: {"output": [...], "model": "...", ...}
