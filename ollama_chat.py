@@ -45,6 +45,7 @@ import requests
 from PyPDF2 import PdfReader
 import chardet
 from rank_bm25 import BM25Okapi
+import hashlib
 from pptx import Presentation
 from docx import Document
 from lxml import etree
@@ -1869,6 +1870,44 @@ class DocumentIndexer:
                 on_print(f"Error while preparing text for embedding: {e}. Using original text.", Fore.YELLOW)
             return text
 
+    def _generate_document_id(self, file_path, max_length=63):
+        """
+        Generate a unique document ID from a file path.
+        
+        For HTML/web pages: uses the relative path to the root folder to avoid
+        collisions when multiple pages share the same filename (e.g. index.html).
+        For all other files: uses the filename without extension (original behavior).
+        
+        Falls back to an MD5 hash when the ID exceeds max_length.
+        
+        :param file_path: The absolute path to the file.
+        :param max_length: Maximum allowed ID length (ChromaDB limit is 63).
+        :return: A unique document ID string.
+        """
+        # For non-HTML files, use the simple basename (original behavior)
+        if not is_html(file_path):
+            return os.path.splitext(os.path.basename(file_path))[0]
+        
+        # For HTML/web pages, use relative path to avoid duplicate filenames
+        rel_path = os.path.relpath(file_path, self.root_folder)
+        
+        # Remove file extension
+        rel_path_no_ext = os.path.splitext(rel_path)[0]
+        
+        # Normalize separators and special characters to underscores
+        doc_id = re.sub(r'[^\w\-]', '_', rel_path_no_ext)
+        
+        # Remove leading/trailing underscores and collapse multiple underscores
+        doc_id = re.sub(r'_+', '_', doc_id).strip('_')
+        
+        if len(doc_id) <= max_length:
+            return doc_id
+        
+        # Fallback: use a hash with a readable prefix
+        path_hash = hashlib.md5(rel_path.encode('utf-8')).hexdigest()[:16]
+        prefix = doc_id[:max_length - 17]  # 16 for hash + 1 for separator
+        return f"{prefix}_{path_hash}"
+
     def get_text_files(self):
         """
         Recursively find all .txt, .md, .tex, .pdf, .docx, .pptx, .xlsx files in the root folder.
@@ -2016,7 +2055,7 @@ class DocumentIndexer:
                 progress_bar.update(1)
 
             try:
-                document_id = os.path.splitext(os.path.basename(file_path))[0]
+                document_id = self._generate_document_id(file_path)
 
                 # Check if skipping existing documents and if the document ID exists (for non-chunked case)
                 if not allow_chunks and skip_existing:
