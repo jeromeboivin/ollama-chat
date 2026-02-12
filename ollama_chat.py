@@ -46,6 +46,7 @@ from PyPDF2 import PdfReader
 import chardet
 from rank_bm25 import BM25Okapi
 import hashlib
+import csv
 from pptx import Presentation
 from docx import Document
 from lxml import etree
@@ -720,6 +721,29 @@ def extract_text_from_html(html_content):
         for iframe in soup.find_all('iframe'):
             iframe.decompose()
 
+        # Remove navigation elements that pollute RAG indexing
+        for element in soup.find_all(['nav', 'header', 'footer', 'aside']):
+            element.decompose()
+
+        # Remove elements by common navigation-related class names
+        nav_classes = ['navigation', 'nav', 'navbar', 'menu', 'sidebar',
+                       'breadcrumb', 'breadcrumbs', 'toc', 'table-of-contents',
+                       'site-header', 'site-footer', 'site-nav']
+        for element in soup.find_all(class_=lambda c: c and any(
+                nav_cls in cls.lower() for cls in (c if isinstance(c, list) else [c]) for nav_cls in nav_classes)):
+            element.decompose()
+
+        # Remove elements by common navigation-related id patterns
+        nav_ids = ['nav', 'navigation', 'menu', 'sidebar', 'header', 'footer',
+                   'breadcrumb', 'toc', 'table-of-contents']
+        for element in soup.find_all(id=lambda i: i and any(
+                nav_id in i.lower() for nav_id in nav_ids)):
+            element.decompose()
+
+        # Remove elements with common navigation ARIA roles
+        for element in soup.find_all(attrs={'role': ['navigation', 'banner', 'contentinfo', 'menu', 'menubar']}):
+            element.decompose()
+
         text = md(soup, strip=['a', 'img'], heading_style='ATX', 
                         escape_asterisks=False, escape_underscores=False, 
                         autolinks=False)
@@ -816,6 +840,51 @@ def extract_text_from_docx(docx_path):
     
     # Join all lines into a single Markdown string
     return "\n\n".join(markdown_lines)
+
+def extract_text_from_csv(csv_path):
+    """Extract text from a CSV file, converting it to a Markdown table."""
+    file_name = os.path.splitext(os.path.basename(csv_path))[0].replace('_', ' ')
+    markdown_lines = [f"# {file_name}"]
+
+    # Detect encoding
+    with open(csv_path, 'rb') as f:
+        raw = f.read()
+        detected = chardet.detect(raw)
+        encoding = detected.get('encoding', 'utf-8') or 'utf-8'
+
+    with open(csv_path, 'r', encoding=encoding, errors='replace') as f:
+        # Sniff the dialect (delimiter, quoting, etc.)
+        sample = f.read(8192)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample)
+        except csv.Error:
+            dialect = csv.excel  # fallback to default comma-separated
+
+        reader = csv.reader(f, dialect)
+        rows = list(reader)
+
+    if not rows:
+        return f"# {file_name}\n\n(empty file)"
+
+    # First row as table header
+    headers = [cell.strip() for cell in rows[0]]
+    markdown_lines.append('| ' + ' | '.join(headers) + ' |')
+    markdown_lines.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+
+    # Remaining rows as table data
+    for row in rows[1:]:
+        # Skip entirely empty rows
+        if all(not cell.strip() for cell in row):
+            continue
+        cells = [cell.strip() for cell in row]
+        # Pad or trim to match header count
+        while len(cells) < len(headers):
+            cells.append('')
+        cells = cells[:len(headers)]
+        markdown_lines.append('| ' + ' | '.join(cells) + ' |')
+
+    return '\n'.join(markdown_lines)
 
 def extract_text_from_xlsx(xlsx_path):
     """Extract text from an XLSX file, converting each sheet to a Markdown table."""
@@ -925,6 +994,68 @@ def extract_text_from_pptx(pptx_path):
     
     # Join all lines into a single Markdown string
     return "\n".join(markdown_lines)
+
+class TabularDataSplitter:
+    """
+    Splits Markdown-formatted tabular data (from CSV or XLSX) into chunks of rows,
+    repeating the header line and separator at the top of each chunk.
+    This preserves column semantics so that each chunk is self-contained.
+    """
+    def __init__(self, markdown_content, rows_per_chunk=50):
+        self.markdown_content = markdown_content
+        self.rows_per_chunk = rows_per_chunk
+
+    def split(self):
+        lines = self.markdown_content.splitlines()
+        chunks = []
+        # We may have multiple tables (e.g. multi-sheet XLSX with headings).
+        # Walk through the lines, detect table header + separator pairs, and
+        # chunk the data rows that follow each table.
+        i = 0
+        preamble = []  # Non-table lines before a table (headings, blank lines)
+
+        while i < len(lines):
+            line = lines[i]
+
+            # Detect a Markdown table header: a line starting with '|' followed
+            # by a separator line like '| --- | --- |'
+            if line.startswith('|') and i + 1 < len(lines) and re.match(r'^\|\s*-{3,}', lines[i + 1]):
+                header_line = lines[i]
+                separator_line = lines[i + 1]
+                i += 2  # move past header + separator
+
+                # Collect all data rows for this table
+                data_rows = []
+                while i < len(lines) and lines[i].startswith('|'):
+                    data_rows.append(lines[i])
+                    i += 1
+
+                # Split data rows into chunks
+                if not data_rows:
+                    # Table with header only
+                    chunk_text = '\n'.join(preamble + [header_line, separator_line])
+                    chunks.append(chunk_text.strip())
+                else:
+                    for start in range(0, len(data_rows), self.rows_per_chunk):
+                        batch = data_rows[start:start + self.rows_per_chunk]
+                        chunk_lines = preamble + [header_line, separator_line] + batch
+                        chunks.append('\n'.join(chunk_lines).strip())
+
+                # Reset preamble after consuming a table
+                preamble = []
+            else:
+                # Non-table line (heading, blank, etc.) — accumulate as preamble
+                preamble.append(line)
+                i += 1
+
+        # If there are trailing non-table lines, add them as a chunk
+        if preamble:
+            text = '\n'.join(preamble).strip()
+            if text:
+                chunks.append(text)
+
+        return chunks
+
 
 class MarkdownSplitter:
     def __init__(self, markdown_content, split_paragraphs=False):
@@ -1915,7 +2046,7 @@ class DocumentIndexer:
         Ignore empty lines at the beginning of the file and check only the first non-empty line.
         """
         text_files = []
-        supported_extensions = (".txt", ".md", ".tex", ".pdf", ".docx", ".pptx", ".xlsx")
+        supported_extensions = (".txt", ".md", ".tex", ".pdf", ".docx", ".pptx", ".xlsx", ".csv")
         for root, dirs, files in os.walk(self.root_folder):
             for file in files:
                 # Check for files with extension
@@ -1957,6 +2088,10 @@ class DocumentIndexer:
             # Handle XLSX files
             if lower_path.endswith('.xlsx'):
                 return extract_text_from_xlsx(file_path)
+
+            # Handle CSV files
+            if lower_path.endswith('.csv'):
+                return extract_text_from_csv(file_path)
 
             # Default: read as text
             with open(file_path, 'r', encoding='utf-8') as file:
@@ -2120,13 +2255,21 @@ class DocumentIndexer:
                     # Split Markdown files into sections if needed
                     # DOCX, PPTX, and XLSX are extracted as Markdown, so use MarkdownSplitter for them too
                     lower_file_path = file_path.lower()
+                    is_tabular_content = (
+                        lower_file_path.endswith('.csv') or
+                        lower_file_path.endswith('.xlsx')
+                    )
                     is_markdown_content = (
                         is_markdown(file_path) or 
                         lower_file_path.endswith('.docx') or 
-                        lower_file_path.endswith('.pptx') or 
-                        lower_file_path.endswith('.xlsx')
+                        lower_file_path.endswith('.pptx')
                     )
-                    if is_html(file_path):
+                    if is_tabular_content:
+                        # Use TabularDataSplitter to chunk by rows while
+                        # repeating the header on each chunk for context
+                        tabular_splitter = TabularDataSplitter(content_to_chunk, rows_per_chunk=50)
+                        chunks = tabular_splitter.split()
+                    elif is_html(file_path):
                         # Convert to Markdown before splitting
                         markdown_splitter = MarkdownSplitter(extract_text_from_html(content_to_chunk), split_paragraphs=split_paragraphs)
                         chunks = markdown_splitter.split()
