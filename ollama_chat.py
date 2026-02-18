@@ -94,7 +94,6 @@ custom_tools = []
 web_cache_collection_name = "web_cache"
 memory_collection_name = "memory"
 long_term_memory_file = "long_term_memory.json"
-full_doc_store = None  # Global FullDocumentStore instance for full document retrieval
 session_created_files = []  # Track files created during the session for safe deletion
 
 # RAG optimization parameters
@@ -291,12 +290,8 @@ def get_available_tools():
                         "type": "string",
                         "description": "Current discussion context or topic, based on previous exchanges with the user"
                     },
-                    "include_full_docs": {
-                        "type": "boolean",
-                        "description": "If true, includes the full original documents along with the relevant chunks in the response. This provides complete context but may return more text.",
-                        "default": False
-                    }
                 },
+
                 "required": [
                     "question",
                     "collection_name",
@@ -1949,13 +1944,12 @@ def retrieve_relevant_memory(query_text, top_k=3):
     return memory_manager.retrieve_relevant_memory(query_text, top_k)
 
 class DocumentIndexer:
-    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False, summary_model=None, full_doc_store=None):
+    def __init__(self, root_folder, collection_name, chroma_client, embeddings_model, verbose=False, summary_model=None):
         self.root_folder = root_folder
         self.collection_name = collection_name
         self.client = chroma_client
         self.model = embeddings_model  # For embeddings only
         self.summary_model = summary_model
-        self.full_doc_store = full_doc_store  # Optional SQLite store for full documents
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self.verbose = verbose
 
@@ -1966,8 +1960,6 @@ class DocumentIndexer:
             on_print(f"Using collection: {self.collection.name}", Fore.WHITE + Style.DIM)
             on_print(f"Verbose mode is {'on' if self.verbose else 'off'}", Fore.WHITE + Style.DIM)
             on_print(f"Using embeddings model: {self.model}", Fore.WHITE + Style.DIM)
-            if self.full_doc_store:
-                on_print(f"Full document store enabled at: {self.full_doc_store.db_path}", Fore.WHITE + Style.DIM)
 
     def _prepare_text_for_embedding(self, text, num_ctx=None):
         """
@@ -2135,7 +2127,7 @@ class DocumentIndexer:
             
         return extracted_text
 
-    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True, extract_start=None, extract_end=None, add_summary=True):
+    def index_documents(self, allow_chunks=True, no_chunking_confirmation=False, split_paragraphs=False, additional_metadata=None, num_ctx=None, skip_existing=True, extract_start=None, extract_end=None, add_summary=True, store_full_docs=None):
         """
         Index all text files in the root folder.
         
@@ -2147,6 +2139,8 @@ class DocumentIndexer:
         :param extract_start: Optional string marking the start of the text to extract for embedding computation.
         :param extract_end: Optional string marking the end of the text to extract for embedding computation.
         :param add_summary: Whether to generate and prepend a summary to each chunk (default: True).
+        :param store_full_docs: Whether to store the full document content for each chunk in chunking mode.
+                                Embeddings are still computed from chunks. If None and not in automated mode, the user is prompted.
         """
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
@@ -2170,6 +2164,18 @@ class DocumentIndexer:
                     extract_end = None
                 else:
                     on_print(f"Text extraction enabled: extracting content between '{extract_start}' and '{extract_end}'", Fore.GREEN)
+
+        # Ask the user whether to store full documents per chunk in chunking mode
+        if allow_chunks and store_full_docs is None and not no_chunking_confirmation:
+            on_print("\nOptional: You can store the full original document for each chunk instead of just the chunk text.")
+            on_print("Embeddings will still be computed from chunks only, but retrieved results will contain the complete document.")
+            store_full_docs = on_user_input("Do you want to store the full document for each chunk? [y/n]: ").lower() in ['y', 'yes']
+            if store_full_docs:
+                on_print("Full document storage enabled: each chunk will store the complete original document.", Fore.GREEN)
+        
+        # Default to False if not set (automated mode without explicit flag)
+        if store_full_docs is None:
+            store_full_docs = False
 
         if allow_chunks:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -2279,6 +2285,18 @@ class DocumentIndexer:
                     else:
                         chunks = text_splitter.split_text(content_to_chunk)
                     
+                    # When skip_existing is enabled, check upfront if ALL chunks already
+                    # exist in the collection. This avoids the expensive LLM summary
+                    # generation for documents that are already fully indexed.
+                    if skip_existing and chunks:
+                        all_chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
+                        existing_chunks = self.collection.get(ids=all_chunk_ids)
+                        existing_ids_set = set(existing_chunks.get('ids', []))
+                        if existing_ids_set == set(all_chunk_ids):
+                            if self.verbose:
+                                on_print(f"Skipping fully indexed document: {document_id} ({len(chunks)} chunks)", Fore.WHITE + Style.DIM)
+                            continue
+                    
                     # Generate document summary once if add_summary is enabled
                     document_summary = None
                     # Use summary_model for summary generation, fallback to current_model if available
@@ -2358,28 +2376,31 @@ class DocumentIndexer:
                         chunk_metadata['chunk_index'] = i
                         if document_summary:
                             chunk_metadata['has_summary'] = True
+                        if store_full_docs:
+                            chunk_metadata['store_full_docs'] = True
+                        
+                        # Determine what to store as the document text:
+                        # - If store_full_docs is enabled, store the full original document content
+                        #   so that retrieved results contain the complete document.
+                        # - Otherwise, store the chunk (with summary prepended if available).
+                        # In both cases, the embedding is computed from the chunk with summary.
+                        stored_document = content if store_full_docs else chunk_with_summary
                         
                         # Upsert the chunk with summary and embedding
                         if embedding:
                             self.collection.upsert(
-                                documents=[chunk_with_summary],  # Store chunk with summary
+                                documents=[stored_document],
                                 metadatas=[chunk_metadata],
                                 ids=[chunk_id],
                                 embeddings=[embedding]  # Embedding computed from chunk with summary
                             )
                         else:
                             self.collection.upsert(
-                                documents=[chunk_with_summary],
+                                documents=[stored_document],
                                 metadatas=[chunk_metadata],
                                 ids=[chunk_id]
                             )
                     
-                    # Store the full original document in the SQLite database if available
-                    # This allows retrieval of complete documents when chunks are found
-                    if self.full_doc_store and not self.full_doc_store.document_exists(document_id):
-                        if self.verbose:
-                            on_print(f"Storing full document {document_id} in SQLite", Fore.WHITE + Style.DIM)
-                        self.full_doc_store.store_document(document_id, content, file_path)
                 else:
                     # Embed the extracted content but store the whole document
                     embedding = None
@@ -2421,266 +2442,6 @@ class DocumentIndexer:
             except Exception as e: # Catch other potential errors during processing
                 on_print(f"Error processing file {file_path}: {e}", Fore.RED)
                 continue # Continue to the next file
-
-
-class FullDocumentStore:
-    """
-    SQLite-based storage for full document content.
-    This enables retrieval of complete original documents when chunks are found via semantic search.
-    """
-    def __init__(self, db_path='full_documents.db', verbose=False):
-        """
-        Initialize the full document store.
-        
-        :param db_path: Path to the SQLite database file
-        :param verbose: Enable verbose logging
-        """
-        self.db_path = db_path
-        self.verbose = verbose
-        self.conn = None
-        self._init_db()
-    
-    def _init_db(self):
-        """Create the database and table if they don't exist."""
-        import sqlite3
-        self.conn = sqlite3.connect(self.db_path)
-        cursor = self.conn.cursor()
-        
-        # Create table with document_id as primary key and full_content as text
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS full_documents (
-                document_id TEXT PRIMARY KEY,
-                full_content TEXT NOT NULL,
-                file_path TEXT,
-                indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Create index on file_path for faster lookups
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_file_path ON full_documents(file_path)
-        ''')
-        
-        self.conn.commit()
-        
-        if self.verbose:
-            on_print(f"FullDocumentStore initialized at: {self.db_path}", Fore.WHITE + Style.DIM)
-    
-    def store_document(self, document_id, full_content, file_path=None):
-        """
-        Store a full document in the database.
-        
-        :param document_id: Unique identifier for the document
-        :param full_content: Full text content of the document
-        :param file_path: Optional file path for reference
-        """
-        import sqlite3
-        cursor = self.conn.cursor()
-        
-        try:
-            cursor.execute('''
-                INSERT OR REPLACE INTO full_documents (document_id, full_content, file_path)
-                VALUES (?, ?, ?)
-            ''', (document_id, full_content, file_path))
-            
-            self.conn.commit()
-            
-            if self.verbose:
-                on_print(f"Stored full document: {document_id}", Fore.WHITE + Style.DIM)
-            
-            return True
-        except sqlite3.Error as e:
-            on_print(f"Error storing document {document_id}: {e}", Fore.RED)
-            return False
-    
-    def get_document(self, document_id):
-        """
-        Retrieve a full document by its ID.
-        
-        :param document_id: Document identifier
-        :return: Full document content or None if not found
-        """
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT full_content FROM full_documents WHERE document_id = ?', (document_id,))
-        result = cursor.fetchone()
-        
-        if result:
-            return result[0]
-        return None
-    
-    def document_exists(self, document_id):
-        """
-        Check if a document exists in the store.
-        
-        :param document_id: Document identifier
-        :return: True if exists, False otherwise
-        """
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT 1 FROM full_documents WHERE document_id = ? LIMIT 1', (document_id,))
-        return cursor.fetchone() is not None
-    
-    def get_all_document_ids(self):
-        """
-        Get all document IDs in the store.
-        
-        :return: List of document IDs
-        """
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT document_id FROM full_documents')
-        return [row[0] for row in cursor.fetchall()]
-    
-    def count_documents(self):
-        """
-        Get the total number of documents in the store.
-        
-        :return: Count of documents
-        """
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM full_documents')
-        result = cursor.fetchone()
-        return result[0] if result else 0
-    
-    def close(self):
-        """Close the database connection."""
-        if self.conn:
-            self.conn.close()
-            if self.verbose:
-                on_print("FullDocumentStore connection closed", Fore.WHITE + Style.DIM)
-
-
-def catchup_full_documents_from_chromadb(chroma_client, collection_name, full_doc_store, verbose=False):
-    """
-    Extract filePath metadata from ChromaDB chunks and index full documents in SQLite.
-    This is a catchup operation for documents that were chunked but not fully indexed.
-    
-    :param chroma_client: ChromaDB client instance
-    :param collection_name: Name of the collection to process
-    :param full_doc_store: FullDocumentStore instance
-    :param verbose: Enable verbose logging
-    """
-    if verbose:
-        on_print(f"Starting catchup for collection: {collection_name}", Fore.CYAN)
-    
-    try:
-        # Get the collection
-        collection = chroma_client.get_collection(name=collection_name)
-        
-        # Get all embeddings from the collection
-        # We need to fetch in batches to avoid memory issues
-        all_results = collection.get(include=['metadatas'])
-        
-        if not all_results or not all_results.get('ids'):
-            on_print(f"No documents found in collection {collection_name}", Fore.YELLOW)
-            return 0
-        
-        ids = all_results['ids']
-        metadatas = all_results['metadatas']
-        
-        if verbose:
-            on_print(f"Found {len(ids)} embeddings in collection", Fore.WHITE + Style.DIM)
-        
-        # Extract unique document IDs and file paths from chunk metadata
-        # Chunk IDs follow pattern: {document_id}_{chunk_index}
-        document_files = {}  # document_id -> file_path
-        
-        for embedding_id, metadata in zip(ids, metadatas):
-            if not metadata:
-                continue
-            
-            # Get the base document ID (remove chunk suffix if present)
-            if 'id' in metadata:
-                doc_id = metadata['id']
-            else:
-                # Try to extract from embedding_id
-                # Pattern: document_id_chunk_index
-                parts = embedding_id.rsplit('_', 1)
-                if len(parts) == 2 and parts[1].isdigit():
-                    doc_id = parts[0]
-                else:
-                    doc_id = embedding_id
-            
-            # Get file path from metadata
-            file_path = metadata.get('filePath')
-            
-            if doc_id and file_path:
-                # Only process if we haven't seen this document yet
-                if doc_id not in document_files:
-                    document_files[doc_id] = file_path
-        
-        if verbose:
-            on_print(f"Found {len(document_files)} unique documents to process", Fore.WHITE + Style.DIM)
-        
-        # Process each document
-        indexed_count = 0
-        skipped_count = 0
-        error_count = 0
-        
-        progress_bar = None
-        if verbose:
-            progress_bar = tqdm(total=len(document_files), desc="Indexing full documents", unit="doc", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}")
-        
-        for doc_id, file_path in document_files.items():
-            if progress_bar:
-                progress_bar.update(1)
-            
-            try:
-                # Skip if already indexed
-                if full_doc_store.document_exists(doc_id):
-                    skipped_count += 1
-                    if verbose:
-                        on_print(f"Skipping already indexed document: {doc_id}", Fore.WHITE + Style.DIM)
-                    continue
-                
-                # Check if file still exists
-                if not os.path.exists(file_path):
-                    if verbose:
-                        on_print(f"File not found: {file_path}", Fore.YELLOW)
-                    error_count += 1
-                    continue
-                
-                # Read the full document content
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        full_content = f.read()
-                except UnicodeDecodeError:
-                    # Try with different encoding
-                    try:
-                        with open(file_path, 'r', encoding='latin-1') as f:
-                            full_content = f.read()
-                    except Exception as e:
-                        if verbose:
-                            on_print(f"Error reading file {file_path}: {e}", Fore.RED)
-                        error_count += 1
-                        continue
-                
-                # Store in full document store
-                if full_doc_store.store_document(doc_id, full_content, file_path):
-                    indexed_count += 1
-                else:
-                    error_count += 1
-            
-            except Exception as e:
-                on_print(f"Error processing document {doc_id}: {e}", Fore.RED)
-                error_count += 1
-                continue
-        
-        if progress_bar:
-            progress_bar.close()
-        
-        # Print summary
-        on_print(f"\nCatchup completed:", Fore.GREEN)
-        on_print(f"  Indexed: {indexed_count} documents", Fore.GREEN)
-        on_print(f"  Skipped (already indexed): {skipped_count} documents", Fore.YELLOW)
-        on_print(f"  Errors: {error_count} documents", Fore.RED if error_count > 0 else Fore.WHITE)
-        
-        return indexed_count
-    
-    except Exception as e:
-        on_print(f"Error during catchup: {e}", Fore.RED)
-        if verbose:
-            import traceback
-            traceback.print_exc()
-        return 0
 
     
 def split_reasoning_and_final_response(response, thinking_model_reasoning_pattern):
@@ -3722,7 +3483,7 @@ def preprocess_text(text):
 
     return words
 
-def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None, use_adaptive_filtering=True, return_metadata=False, full_doc_store=None, include_full_docs=False):
+def query_vector_database(question, collection_name=current_collection_name, n_results=number_of_documents_to_return_from_vector_db, answer_distance_threshold=0, query_embeddings_model=None, expand_query=True, question_context=None, use_adaptive_filtering=True, return_metadata=False):
     global collection
     global verbose_mode
     global embeddings_model
@@ -3734,18 +3495,6 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     global adaptive_distance_multiplier
     global use_openai
     global use_azure_openai
-
-    # If full_doc_store not provided, use global instance
-    if full_doc_store is None:
-        full_doc_store = globals().get('full_doc_store', None)
-    
-    # Auto-enable full documents for OpenAI models (better context handling)
-    # Keep disabled for Ollama models (performance reasons)
-    if not include_full_docs and full_doc_store:
-        if use_openai or use_azure_openai:
-            include_full_docs = True
-            if verbose_mode:
-                on_print("Auto-enabled full document retrieval for OpenAI model", Fore.WHITE + Style.DIM)
 
     # If question is empty, return empty string
     if not question or len(question) == 0:
@@ -3933,7 +3682,6 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
     # Join all possible answers into one string
     answers = []
     metadata_list = []
-    full_documents_map = {}  # Track full documents by document_id
     
     for idx, metadata, distance, document, bm25_score, hybrid_score in reranked_results:
         if verbose_mode:
@@ -3947,20 +3695,6 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
         chunk_index = metadata.get("chunk_index")
 
         formatted_answer = document
-
-        # If we have a full document store and this is a chunk, try to retrieve full document
-        if include_full_docs and full_doc_store and doc_id:
-            # Check if we haven't already fetched this full document
-            if doc_id not in full_documents_map:
-                full_content = full_doc_store.get_document(doc_id)
-                if full_content:
-                    full_documents_map[doc_id] = full_content
-                    if verbose_mode:
-                        on_print(f"Retrieved full document for: {doc_id}", Fore.WHITE + Style.DIM)
-            
-            # If we have the full document, include it
-            if doc_id in full_documents_map:
-                formatted_answer = f"[Chunk {chunk_index if chunk_index is not None else 'N/A'}]\n{document}\n\n[Full Document]\n{full_documents_map[doc_id]}"
 
         if title:
             formatted_answer = title + "\n" + formatted_answer
@@ -3977,7 +3711,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
                 'bm25_score': bm25_score,
                 'hybrid_score': hybrid_score,
                 'metadata': metadata,
-                'has_full_document': doc_id in full_documents_map if include_full_docs else False
+                'has_full_document': False
             })
 
     result_text = '\n\n'.join(answers)
@@ -3995,7 +3729,7 @@ def query_vector_database(question, collection_name=current_collection_name, n_r
             'avg_bm25_score': avg_bm25,
             'avg_hybrid_score': avg_hybrid,
             'avg_distance': avg_distance,
-            'full_documents_retrieved': len(full_documents_map) if include_full_docs else 0
+            'full_documents_retrieved': 0
         }
     
     return result_text
@@ -5344,13 +5078,11 @@ def run():
     parser.add_argument('--extract-end', type=str, help='End string for extracting specific text sections during indexing', default=None)
     parser.add_argument('--split-paragraphs', type=bool, help='Split markdown content into paragraphs during indexing', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--add-summary', type=bool, help='Generate and prepend summaries to document chunks during indexing', default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--full-docs-db', type=str, help='Path to SQLite database for storing full document content (default: full_documents.db)', default='full_documents.db')
-    parser.add_argument('--catchup-full-docs', type=bool, help='Index full documents from ChromaDB metadata (catchup for existing chunks)', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--store-full-docs', type=bool, help='Store full original documents for each chunk during indexing (embeddings still computed from chunks)', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--query', type=str, help='Query the vector database and exit (non-interactive mode)', default=None)
     parser.add_argument('--query-n-results', type=int, help='Number of results to return from vector database query', default=None)
     parser.add_argument('--query-distance-threshold', type=float, help='Distance threshold for filtering query results', default=0.0)
     parser.add_argument('--expand-query', type=bool, help='Expand query for better retrieval', default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--include-full-docs', type=bool, help='Include full original documents in query results (requires --full-docs-db)', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--interactive', type=bool, help='Use interactive mode', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--plugins-folder', type=str, default=None, help='Path to the plugins folder')
     parser.add_argument('--stream', type=bool, help='Use stream mode for Ollama API', default=True, action=argparse.BooleanOptionalAction)
@@ -5616,18 +5348,6 @@ def run():
     if verbose_mode:
         on_print(f"Verbose mode: {verbose_mode}", Fore.WHITE + Style.DIM)
 
-    # Initialize global full document store for LLM tool use
-    # This allows query_vector_database to retrieve full documents when called as a tool
-    global full_doc_store
-    if args.full_docs_db and os.path.exists(args.full_docs_db):
-        try:
-            full_doc_store = FullDocumentStore(db_path=args.full_docs_db, verbose=verbose_mode)
-            if verbose_mode:
-                on_print(f"Initialized global full document store: {args.full_docs_db}", Fore.WHITE + Style.DIM)
-        except Exception as e:
-            on_print(f"Warning: Failed to initialize full document store: {e}", Fore.YELLOW)
-            full_doc_store = None
-
     # Handle document indexing if requested
     if args.index_documents:
         load_chroma_client()
@@ -5649,12 +5369,7 @@ def run():
                 on_print(f"Extraction range: '{args.extract_start}' to '{args.extract_end}'", Fore.WHITE + Style.DIM)
             on_print(f"Split paragraphs: {args.split_paragraphs}", Fore.WHITE + Style.DIM)
             on_print(f"Add summary: {args.add_summary}", Fore.WHITE + Style.DIM)
-            on_print(f"Full docs database: {args.full_docs_db}", Fore.WHITE + Style.DIM)
-        
-        # Initialize full document store if chunking is enabled
-        full_doc_store = None
-        if args.chunk_documents:
-            full_doc_store = FullDocumentStore(db_path=args.full_docs_db, verbose=verbose_mode)
+            on_print(f"Store full docs: {args.store_full_docs}", Fore.WHITE + Style.DIM)
         
         document_indexer = DocumentIndexer(
             args.index_documents, 
@@ -5662,8 +5377,7 @@ def run():
             chroma_client, 
             embeddings_model, 
             verbose=verbose_mode,
-            summary_model=current_model,
-            full_doc_store=full_doc_store
+            summary_model=current_model
         )
         
         document_indexer.index_documents(
@@ -5674,52 +5388,13 @@ def run():
             skip_existing=args.skip_existing,
             extract_start=args.extract_start,
             extract_end=args.extract_end,
-            add_summary=args.add_summary
+            add_summary=args.add_summary,
+            store_full_docs=args.store_full_docs
         )
-        
-        # Close full document store if it was initialized
-        if full_doc_store:
-            full_doc_store.close()
         
         on_print(f"Indexing completed for folder: {args.index_documents}", Fore.GREEN)
         
         # If only indexing (no query or interactive mode), exit
-        if not args.query and not interactive_mode:
-            sys.exit(0)
-    
-    # Handle catchup of full documents from ChromaDB metadata
-    if args.catchup_full_docs:
-        load_chroma_client()
-        
-        if not chroma_client:
-            on_print("Failed to initialize ChromaDB client. Please specify --chroma-path or --chroma-host/--chroma-port.", Fore.RED)
-            sys.exit(1)
-        
-        if not current_collection_name:
-            on_print("No ChromaDB collection specified. Use --collection to specify a collection name.", Fore.RED)
-            sys.exit(1)
-        
-        if verbose_mode:
-            on_print(f"Running catchup for collection: {current_collection_name}", Fore.WHITE + Style.DIM)
-            on_print(f"Full docs database: {args.full_docs_db}", Fore.WHITE + Style.DIM)
-        
-        # Initialize full document store
-        full_doc_store = FullDocumentStore(db_path=args.full_docs_db, verbose=verbose_mode)
-        
-        try:
-            # Run catchup
-            indexed_count = catchup_full_documents_from_chromadb(
-                chroma_client,
-                current_collection_name,
-                full_doc_store,
-                verbose=verbose_mode
-            )
-            
-            on_print(f"\nCatchup completed. Indexed {indexed_count} full documents.", Fore.GREEN)
-        finally:
-            full_doc_store.close()
-        
-        # If only doing catchup (no query or interactive mode), exit
         if not args.query and not interactive_mode:
             sys.exit(0)
     
@@ -5740,31 +5415,16 @@ def run():
             on_print(f"Number of results: {query_n_results}", Fore.WHITE + Style.DIM)
             on_print(f"Distance threshold: {args.query_distance_threshold}", Fore.WHITE + Style.DIM)
             on_print(f"Expand query: {args.expand_query}", Fore.WHITE + Style.DIM)
-            on_print(f"Include full documents: {args.include_full_docs}", Fore.WHITE + Style.DIM)
-            if args.include_full_docs:
-                on_print(f"Full docs database: {args.full_docs_db}", Fore.WHITE + Style.DIM)
         
-        # Initialize full document store if requested
-        full_doc_store = None
-        if args.include_full_docs:
-            full_doc_store = FullDocumentStore(db_path=args.full_docs_db, verbose=verbose_mode)
-        
-        try:
-            # Query the vector database
-            query_results = query_vector_database(
-                args.query,
-                collection_name=current_collection_name,
-                n_results=query_n_results,
-                answer_distance_threshold=args.query_distance_threshold,
-                query_embeddings_model=embeddings_model,
-                expand_query=args.expand_query,
-                full_doc_store=full_doc_store,
-                include_full_docs=args.include_full_docs
-            )
-        finally:
-            # Close full document store if it was initialized
-            if full_doc_store:
-                full_doc_store.close()
+        # Query the vector database
+        query_results = query_vector_database(
+            args.query,
+            collection_name=current_collection_name,
+            n_results=query_n_results,
+            answer_distance_threshold=args.query_distance_threshold,
+            query_embeddings_model=embeddings_model,
+            expand_query=args.expand_query
+        )
         
         # Output results
         if query_results:
@@ -6754,15 +6414,6 @@ def run():
     for plugin in plugins:
         if hasattr(plugin, "on_exit") and callable(getattr(plugin, "on_exit")):
             getattr(plugin, "on_exit")()
-    
-    # Close global full document store if initialized
-    if full_doc_store:
-        try:
-            full_doc_store.close()
-            if verbose_mode:
-                on_print("Closed global full document store.", Fore.WHITE + Style.DIM)
-        except Exception as e:
-            on_print(f"Warning: Error closing full document store: {e}", Fore.YELLOW)
     
     if auto_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

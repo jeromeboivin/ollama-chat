@@ -11,8 +11,7 @@
   - **Advanced Chunking:** Smart document chunking with configurable strategies
   - **Selective Indexing:** Extract and index specific document sections
   - **Auto-Summarization:** Generate and prepend AI summaries to chunks for better retrieval
-  - **Full Document Storage:** Store complete original documents alongside chunks for enhanced context retrieval. See [Full Document Indexing Guide](FULL_DOCUMENT_INDEXING.md) for details.
-  - **Catchup Capability:** Retroactively index full documents from existing chunked collections
+  - **Full Document Storage:** Optionally store complete original documents for each chunk directly in ChromaDB for enhanced context retrieval
 - **Custom Plugins:** Easily add custom plugins that extend the model's capabilities, making the tool adaptable to your personal or team workflows.
 - **Web Search:** Use the `/web` command or web_search tool to search the web, chunk articles, and store them in ChromaDB for generating insightful answers.
 - **Conversation Memory:** Remembering topics discussed across all chats saves you from having to repeat information and makes future conversations more helpful.
@@ -192,44 +191,14 @@ Here's a step-by-step guide on how to use it:
       - `--extract-end <text>`: End marker for extracting specific document sections
       - `--split-paragraphs`: Split Markdown content into paragraphs
       - `--add-summary`: Generate and prepend AI summaries to chunks (default: enabled)
-    - **Full Document Indexing** (see [Full Document Indexing Guide](FULL_DOCUMENT_INDEXING.md) for details):
-      - `--full-docs-db <path>`: Path to SQLite database for storing full documents (default: `full_documents.db`)
-      - When chunking is enabled, full original documents are automatically stored in SQLite for complete context retrieval
-      - **Example**: Index documents with full document storage:
-        ```bash
-        python ollama_chat.py --chroma-path /path/to/chromadb \
-          --collection MyCollection \
-          --index-documents /path/to/docs \
-          --chunk-documents \
-          --full-docs-db my_docs.db
-        ```
-    - **Catchup Full Documents**: Use `--catchup-full-docs` to index full documents from existing ChromaDB chunks
-      - Reads chunk metadata from ChromaDB
-      - Retrieves original files from disk
-      - Stores full documents in SQLite database
-      - **Example**: Catchup existing collection:
-        ```bash
-        python ollama_chat.py --chroma-path /path/to/chromadb \
-          --collection MyCollection \
-          --catchup-full-docs \
-          --full-docs-db my_docs.db
-        ```
+      - `--store-full-docs`: Store full original documents for each chunk (embeddings still computed from chunks)
 
 17. **Query the vector database**: Use `--query "<your question>"` to query indexed documents from the command line.
     - **Query options**:
       - `--query-n-results <number>`: Number of results to return (default: 8)
       - `--query-distance-threshold <float>`: Distance threshold for filtering results (default: 0.0)
       - `--expand-query`: Enable/disable query expansion for better retrieval (default: enabled)
-      - `--include-full-docs`: Include full original documents in results (requires `--full-docs-db`)
       - `--output <file>`: Save query results to a file
-    - **Example with full documents**:
-      ```bash
-      python ollama_chat.py --chroma-path /path/to/chromadb \
-        --collection MyCollection \
-        --query "How to configure email settings?" \
-        --include-full-docs \
-        --full-docs-db my_docs.db
-      ```
 
 18. **Perform a web search**: Use `--web-search "<your question>"` to perform a web search and get an answer based on search results from the command line.
     - **Web search options**:
