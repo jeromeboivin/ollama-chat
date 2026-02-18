@@ -2307,31 +2307,97 @@ class DocumentIndexer:
                         except NameError:
                             summary_model = None
                     if add_summary and summary_model:
-                        if self.verbose:
-                            on_print(f"Generating summary for document {document_id} using model: {summary_model}", Fore.WHITE + Style.DIM)
-                        summary_prompt = f"""Provide a brief summary (2-5 sentences) of the following document. Focus on the main topic and key points:
+                        if is_tabular_content:
+                            # For CSV/Excel files, auto-summary is rarely meaningful.
+                            # Extract column headers and first data row from the markdown table,
+                            # then optionally ask the user for context to produce a useful summary.
+                            table_header_line = ""
+                            table_first_row = ""
+                            _all_lines = content_to_chunk.splitlines()
+                            for _j, _line in enumerate(_all_lines):
+                                if _line.startswith('|') and _j + 1 < len(_all_lines):
+                                    _next = _all_lines[_j + 1]
+                                    if re.match(r'^\|\s*-{3,}', _next):
+                                        table_header_line = _line
+                                        if _j + 2 < len(_all_lines) and _all_lines[_j + 2].startswith('|'):
+                                            table_first_row = _all_lines[_j + 2]
+                                        break
+
+                            user_context = ""
+                            if not no_chunking_confirmation:
+                                on_print(f"\nTabular file detected: {file_name}", Fore.CYAN)
+                                if table_header_line:
+                                    on_print(f"Columns : {table_header_line}", Fore.WHITE + Style.DIM)
+                                if table_first_row:
+                                    on_print(f"First row: {table_first_row}", Fore.WHITE + Style.DIM)
+                                on_print("Auto-generated summaries for tabular data are usually not meaningful.")
+                                user_context = on_user_input(
+                                    "Provide context about what this data represents (press Enter to skip summary): "
+                                ).strip()
+
+                            if user_context:
+                                # Build an enriched prompt combining user context with column/row info
+                                tabular_info = ""
+                                if table_header_line:
+                                    tabular_info += f"\nColumn headers: {table_header_line}"
+                                if table_first_row:
+                                    tabular_info += f"\nFirst data row: {table_first_row}"
+                                if self.verbose:
+                                    on_print(f"Generating context-enhanced summary for {document_id}", Fore.WHITE + Style.DIM)
+                                summary_prompt = (
+                                    f"A user provided the following context about a tabular data file:\n"
+                                    f"{user_context}\n"
+                                    f"{tabular_info}\n\n"
+                                    f"Based on this information, write a concise summary (2-5 sentences) describing "
+                                    f"what this dataset contains, what each column likely represents, and what kind "
+                                    f"of queries it would be useful to answer."
+                                )
+                                try:
+                                    summary_response = ask_ollama(
+                                        "You are a helpful assistant that creates concise, informative dataset summaries.",
+                                        summary_prompt,
+                                        summary_model,
+                                        temperature=0.3,
+                                        no_bot_prompt=True,
+                                        stream_active=False,
+                                        num_ctx=num_ctx
+                                    )
+                                    document_summary = f"[Document Summary: {summary_response.strip()}]\n\n"
+                                    if self.verbose:
+                                        on_print(f"Summary generated: {summary_response.strip()}", Fore.GREEN)
+                                except Exception as e:
+                                    if self.verbose:
+                                        on_print(f"Failed to generate summary: {e}", Fore.YELLOW)
+                                    document_summary = None
+                            else:
+                                if self.verbose:
+                                    on_print(f"Skipping summary for tabular document {document_id} (no context provided)", Fore.WHITE + Style.DIM)
+                        else:
+                            if self.verbose:
+                                on_print(f"Generating summary for document {document_id} using model: {summary_model}", Fore.WHITE + Style.DIM)
+                            summary_prompt = f"""Provide a brief summary (2-5 sentences) of the following document. Focus on the main topic and key points:
 
 {content_to_chunk[:2000]}"""  # Limit to first 2000 chars for summary generation
-                        try:
-                            ollama_options = {}
-                            if num_ctx:
-                                ollama_options["num_ctx"] = num_ctx
-                            summary_response = ask_ollama(
-                                "You are a helpful assistant that creates concise document summaries.",
-                                summary_prompt,
-                                summary_model,
-                                temperature=0.3,
-                                no_bot_prompt=True,
-                                stream_active=False,
-                                num_ctx=num_ctx
-                            )
-                            document_summary = f"[Document Summary: {summary_response.strip()}]\n\n"
-                            if self.verbose:
-                                on_print(f"Summary generated: {summary_response.strip()}", Fore.GREEN)
-                        except Exception as e:
-                            if self.verbose:
-                                on_print(f"Failed to generate summary: {e}", Fore.YELLOW)
-                            document_summary = None
+                            try:
+                                ollama_options = {}
+                                if num_ctx:
+                                    ollama_options["num_ctx"] = num_ctx
+                                summary_response = ask_ollama(
+                                    "You are a helpful assistant that creates concise document summaries.",
+                                    summary_prompt,
+                                    summary_model,
+                                    temperature=0.3,
+                                    no_bot_prompt=True,
+                                    stream_active=False,
+                                    num_ctx=num_ctx
+                                )
+                                document_summary = f"[Document Summary: {summary_response.strip()}]\n\n"
+                                if self.verbose:
+                                    on_print(f"Summary generated: {summary_response.strip()}", Fore.GREEN)
+                            except Exception as e:
+                                if self.verbose:
+                                    on_print(f"Failed to generate summary: {e}", Fore.YELLOW)
+                                document_summary = None
                     
                     for i, chunk in enumerate(chunks):
                         chunk_id = f"{document_id}_{i}"
