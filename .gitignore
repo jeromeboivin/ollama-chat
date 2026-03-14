@@ -1,3 +1,4 @@
 *.pyc
 /plugins
 agents.json
+.venv

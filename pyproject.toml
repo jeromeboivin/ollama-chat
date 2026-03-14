@@ -1,0 +1,15 @@
+[project]
+name = "ollama-chat"
+version = "1.0.0"
+description = "Extensible CLI for Local Language Models and OpenAI Models"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: tests requiring live services (Ollama, ChromaDB, etc.)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
