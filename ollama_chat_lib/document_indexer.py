@@ -182,10 +182,11 @@ class DocumentIndexer:
         
         :param content: The full text content.
         :param start_string: The string marking the start of extraction.
-        :param end_string: The string marking the end of extraction.
+        :param end_string: The string marking the end of extraction. If omitted,
+                           extraction continues to the end of the document.
         :return: The extracted text, or the full content if strings are not found.
         """
-        if not start_string or not end_string:
+        if not start_string:
             return content
             
         start_index = content.find(start_string)
@@ -196,6 +197,15 @@ class DocumentIndexer:
             
         # Move past the start string
         start_index += len(start_string)
+
+        if not end_string:
+            extracted_text = content[start_index:]
+            if self.verbose:
+                on_print(
+                    f"Extracted {len(extracted_text)} characters from '{start_string}' to the end of the document",
+                    Fore.WHITE + Style.DIM,
+                )
+            return extracted_text
         
         end_index = content.find(end_string, start_index)
         if end_index == -1:
@@ -241,10 +251,16 @@ class DocumentIndexer:
                 extract_start = on_user_input("Enter the start string (text that marks the beginning of the section): ").strip()
                 extract_end = on_user_input("Enter the end string (text that marks the end of the section): ").strip()
                 
-                if not extract_start or not extract_end:
-                    on_print("Warning: Empty start or end string provided. Text extraction will be disabled.", Fore.YELLOW)
+                if not extract_start:
+                    on_print("Warning: Empty start string provided. Text extraction will be disabled.", Fore.YELLOW)
                     extract_start = None
                     extract_end = None
+                elif not extract_end:
+                    extract_end = None
+                    on_print(
+                        f"Text extraction enabled: extracting content after '{extract_start}' to the end of each document",
+                        Fore.GREEN,
+                    )
                 else:
                     on_print(f"Text extraction enabled: extracting content between '{extract_start}' and '{extract_end}'", Fore.GREEN)
 
@@ -325,9 +341,9 @@ class DocumentIndexer:
                 if additional_metadata and file_path in additional_metadata:
                     file_metadata.update(additional_metadata[file_path])
 
-                # Extract text for embedding if start and end strings are provided
+                # Extract text for embedding if a start string is provided.
                 embedding_content = content
-                if extract_start and extract_end:
+                if extract_start:
                     embedding_content = self.extract_text_between_strings(content, extract_start, extract_end)
                     # Add metadata to indicate partial extraction was used
                     file_metadata['extraction_used'] = True
@@ -506,7 +522,7 @@ class DocumentIndexer:
                                 ollama_options["num_ctx"] = num_ctx
                                 
                             if self.verbose:
-                                embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
+                                embedding_info = "using extracted text" if extract_start else "using full content"
                                 summary_info = " with summary" if document_summary else ""
                                 on_print(f"Generating embedding for chunk {chunk_id} using {self.model} ({embedding_info}{summary_info})", Fore.WHITE + Style.DIM)
                             # Prepare a potentially truncated string for the embedding call so we don't exceed
@@ -559,7 +575,7 @@ class DocumentIndexer:
                             ollama_options["num_ctx"] = num_ctx
                             
                         if self.verbose:
-                            embedding_info = f"using extracted text" if extract_start and extract_end else "using full content"
+                            embedding_info = "using extracted text" if extract_start else "using full content"
                             on_print(f"Generating embedding for document {document_id} using {self.model} ({embedding_info})", Fore.WHITE + Style.DIM)
 
                         # Use extracted content for embedding computation. Truncate input to embedding API if needed
