@@ -3,6 +3,8 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock
 import ollama_chat as oc
+from types import SimpleNamespace
+from ollama_chat_lib import run_helpers
 from ollama_chat_lib import state
 
 
@@ -62,3 +64,36 @@ class TestCLIFlags:
         assert len(oc.stop_words) > 50
         assert "the" in oc.stop_words
         assert "and" in oc.stop_words
+
+
+class TestIndexingPrompts:
+
+    def test_prompt_for_boolean_setting_keeps_default_on_empty_input(self):
+        with patch("ollama_chat_lib.run_helpers.on_user_input", return_value=""):
+            assert run_helpers.prompt_for_boolean_setting("Chunk large documents?", True) is True
+            assert run_helpers.prompt_for_boolean_setting("Chunk large documents?", False) is False
+
+    def test_prompt_for_indexing_settings_collects_preflight_answers(self):
+        args = SimpleNamespace(
+            chunk_documents=True,
+            skip_existing=True,
+            split_paragraphs=False,
+            add_summary=True,
+            store_full_docs=False,
+            extract_start=None,
+            extract_end=None,
+        )
+
+        with patch(
+            "ollama_chat_lib.run_helpers.on_user_input",
+            side_effect=["n", "n", "y", "n", "y", "## Main Code", ""],
+        ), patch("ollama_chat_lib.run_helpers.on_print"):
+            settings = run_helpers.prompt_for_indexing_settings(args)
+
+        assert settings["chunk_documents"] is False
+        assert settings["skip_existing"] is False
+        assert settings["split_paragraphs"] is True
+        assert settings["add_summary"] is False
+        assert settings["store_full_docs"] is False
+        assert settings["extract_start"] == "## Main Code"
+        assert settings["extract_end"] is None

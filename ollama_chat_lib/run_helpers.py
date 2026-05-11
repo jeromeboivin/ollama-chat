@@ -123,6 +123,87 @@ def parse_args():
     return args
 
 
+def prompt_for_boolean_setting(prompt_text, current_value):
+    """Prompt for a boolean setting while preserving the current value on empty input."""
+    default_hint = "Y/n" if current_value else "y/N"
+    response = on_user_input(f"{prompt_text} [{default_hint}]: ").strip().lower()
+    if not response:
+        return current_value
+    return response in ['y', 'yes']
+
+
+def prompt_for_indexing_settings(args):
+    """Collect indexing settings before starting a potentially long indexing job."""
+    settings = {
+        'chunk_documents': args.chunk_documents,
+        'skip_existing': args.skip_existing,
+        'split_paragraphs': args.split_paragraphs,
+        'add_summary': args.add_summary,
+        'store_full_docs': args.store_full_docs,
+        'extract_start': args.extract_start,
+        'extract_end': args.extract_end,
+    }
+
+    on_print("\nReview indexing settings before starting.", Fore.CYAN)
+    settings['chunk_documents'] = prompt_for_boolean_setting(
+        "Chunk large documents during indexing?",
+        settings['chunk_documents'],
+    )
+    settings['skip_existing'] = prompt_for_boolean_setting(
+        "Skip documents that are already indexed?",
+        settings['skip_existing'],
+    )
+    settings['split_paragraphs'] = prompt_for_boolean_setting(
+        "Split markdown content into paragraphs?",
+        settings['split_paragraphs'],
+    )
+    settings['add_summary'] = prompt_for_boolean_setting(
+        "Generate summaries for indexed chunks?",
+        settings['add_summary'],
+    )
+
+    if settings['chunk_documents']:
+        settings['store_full_docs'] = prompt_for_boolean_setting(
+            "Store the full original document for each chunk?",
+            settings['store_full_docs'],
+        )
+    else:
+        settings['store_full_docs'] = False
+
+    extraction_enabled = bool(settings['extract_start'])
+    if extraction_enabled:
+        if settings['extract_end']:
+            on_print(
+                f"Current extraction range: '{settings['extract_start']}' to '{settings['extract_end']}'",
+                Fore.WHITE + Style.DIM,
+            )
+        else:
+            on_print(
+                f"Current extraction range: '{settings['extract_start']}' to end of file",
+                Fore.WHITE + Style.DIM,
+            )
+
+    extraction_enabled = prompt_for_boolean_setting(
+        "Extract a specific text section for embeddings?",
+        extraction_enabled,
+    )
+    if extraction_enabled:
+        extract_start = on_user_input("Enter the start boundary for extraction: ").strip()
+        extract_end = on_user_input("Enter the end boundary for extraction (press Enter for end of file): ").strip()
+        if extract_start:
+            settings['extract_start'] = extract_start
+            settings['extract_end'] = extract_end or None
+        else:
+            on_print("Warning: Empty start boundary provided. Extraction disabled.", Fore.YELLOW)
+            settings['extract_start'] = None
+            settings['extract_end'] = None
+    else:
+        settings['extract_start'] = None
+        settings['extract_end'] = None
+
+    return settings
+
+
 def initialize(args, mod):
     """Set up state, select model, handle CLI-only operations. Returns ctx dict or None."""
     default_model = None
@@ -392,16 +473,33 @@ def initialize(args, mod):
             summary_model=state.current_model
         )
 
+        indexing_settings = {
+            'chunk_documents': args.chunk_documents,
+            'skip_existing': args.skip_existing,
+            'split_paragraphs': args.split_paragraphs,
+            'add_summary': args.add_summary,
+            'store_full_docs': args.store_full_docs,
+            'extract_start': args.extract_start,
+            'extract_end': args.extract_end,
+        }
+        if state.interactive_mode and sys.stdin.isatty():
+            review_settings = prompt_for_boolean_setting(
+                "Review indexing settings before starting?",
+                True,
+            )
+            if review_settings:
+                indexing_settings = prompt_for_indexing_settings(args)
+
         document_indexer.index_documents(
-            allow_chunks=args.chunk_documents,
+            allow_chunks=indexing_settings['chunk_documents'],
             no_chunking_confirmation=True,  # Non-interactive mode
-            split_paragraphs=args.split_paragraphs,
+            split_paragraphs=indexing_settings['split_paragraphs'],
             num_ctx=num_ctx,
-            skip_existing=args.skip_existing,
-            extract_start=args.extract_start,
-            extract_end=args.extract_end,
-            add_summary=args.add_summary,
-            store_full_docs=args.store_full_docs
+            skip_existing=indexing_settings['skip_existing'],
+            extract_start=indexing_settings['extract_start'],
+            extract_end=indexing_settings['extract_end'],
+            add_summary=indexing_settings['add_summary'],
+            store_full_docs=indexing_settings['store_full_docs']
         )
 
         on_print(f"Indexing completed for folder: {args.index_documents}", Fore.GREEN)

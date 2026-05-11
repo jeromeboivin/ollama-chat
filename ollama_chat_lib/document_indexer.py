@@ -44,7 +44,15 @@ class DocumentIndexer:
             on_print(f"Verbose mode is {'on' if self.verbose else 'off'}", Fore.WHITE + Style.DIM)
             on_print(f"Using embeddings model: {self.model}", Fore.WHITE + Style.DIM)
 
-    def _prepare_text_for_embedding(self, text, num_ctx=None):
+    def _get_max_embedding_chars(self, num_ctx=None):
+        """Return the character budget used for embedding prompts."""
+        if num_ctx and isinstance(num_ctx, int) and num_ctx > 0:
+            max_tokens = num_ctx
+        else:
+            max_tokens = 2048
+        return max_tokens * 4
+
+    def _prepare_text_for_embedding(self, text, num_ctx=None, max_chars=None):
         """
         Prepare text to send to the embedding model by truncating it to the model/context limit.
 
@@ -56,14 +64,14 @@ class DocumentIndexer:
         must remain untouched for storage in ChromaDB.
         """
         try:
-            if num_ctx and isinstance(num_ctx, int) and num_ctx > 0:
-                max_tokens = num_ctx
+            if max_chars is None:
+                if num_ctx and isinstance(num_ctx, int) and num_ctx > 0:
+                    max_tokens = num_ctx
+                else:
+                    max_tokens = 2048
+                max_chars = self._get_max_embedding_chars(num_ctx)
             else:
-                # Default context window if not specified
-                max_tokens = 2048
-
-            # Heuristic: 1 token ~= 4 characters
-            max_chars = max_tokens * 4
+                max_tokens = max(1, max_chars // 4)
 
             if len(text) > max_chars:
                 if self.verbose:
@@ -75,6 +83,105 @@ class DocumentIndexer:
             if self.verbose:
                 on_print(f"Error while preparing text for embedding: {e}. Using original text.", Fore.YELLOW)
             return text
+
+    def _sanitize_metadata(self, metadata):
+        """Normalize metadata to the scalar value types accepted by ChromaDB."""
+        sanitized = {}
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                sanitized[key] = value
+            else:
+                sanitized[key] = str(value)
+        return sanitized
+
+    def _offer_long_document_extraction(self, content, embedding_content, num_ctx=None, no_chunking_confirmation=False, document_label=None):
+        """Offer an interactive extraction strategy before truncating a long document."""
+        if no_chunking_confirmation:
+            return embedding_content, None, None
+
+        max_chars = self._get_max_embedding_chars(num_ctx)
+        if len(embedding_content) <= max_chars:
+            return embedding_content, None, None
+
+        target_label = document_label or "This document"
+        on_print(f"\n{target_label} is longer than the embedding context and will be truncated.", Fore.YELLOW)
+        on_print("You can choose a more relevant section by providing start and end boundaries for the text to embed.")
+        use_extraction = on_user_input("Do you want to extract a different part of this document before truncation? [y/n]: ").lower() in ['y', 'yes']
+        if not use_extraction:
+            return embedding_content, None, None
+
+        extract_start = on_user_input("Enter the start boundary for the section to embed: ").strip()
+        extract_end = on_user_input("Enter the end boundary for the section to embed (press Enter for end of file): ").strip()
+
+        if not extract_start:
+            on_print("Warning: Empty start boundary provided. Falling back to truncation.", Fore.YELLOW)
+            return embedding_content, None, None
+
+        if content.find(extract_start) == -1:
+            on_print(f"Warning: Start boundary '{extract_start}' was not found. Falling back to truncation.", Fore.YELLOW)
+            return embedding_content, None, None
+
+        extract_end = extract_end or None
+        extracted_text = self.extract_text_between_strings(content, extract_start, extract_end)
+        if not extracted_text:
+            on_print("Warning: The selected boundaries produced empty content. Falling back to truncation.", Fore.YELLOW)
+            return embedding_content, None, None
+
+        if extract_end:
+            on_print(f"Using extracted content between '{extract_start}' and '{extract_end}' for embeddings.", Fore.GREEN)
+        else:
+            on_print(f"Using extracted content after '{extract_start}' to the end of the document for embeddings.", Fore.GREEN)
+
+        return extracted_text, extract_start, extract_end
+
+    def _should_retry_embedding_with_shorter_prompt(self, text, prompt, current_limit, error):
+        if current_limit <= 256 or len(prompt) <= 256:
+            return False
+
+        if len(text) > len(prompt):
+            return True
+
+        error_text = str(error).lower()
+        retry_markers = ("context", "token", "too long", "prompt", "truncate", "length")
+        return any(marker in error_text for marker in retry_markers)
+
+    def _generate_embedding_with_retry(self, text, num_ctx=None, target_label=None):
+        """Generate an embedding, retrying with a smaller prompt when truncation is still too large."""
+        ollama_options = {}
+        if num_ctx:
+            ollama_options["num_ctx"] = num_ctx
+
+        current_limit = self._get_max_embedding_chars(num_ctx)
+
+        while True:
+            embedding_prompt = self._prepare_text_for_embedding(text, num_ctx=num_ctx, max_chars=current_limit)
+            try:
+                response = ollama.embeddings(
+                    prompt=embedding_prompt,
+                    model=self.model,
+                    options=ollama_options
+                )
+                return response["embedding"]
+            except Exception as e:
+                if not self._should_retry_embedding_with_shorter_prompt(text, embedding_prompt, current_limit, e):
+                    raise
+
+                next_limit = min(current_limit // 2, len(embedding_prompt) - 1)
+                if next_limit < 256:
+                    next_limit = 256
+                if next_limit >= len(embedding_prompt):
+                    raise
+
+                if self.verbose:
+                    label = target_label or "document"
+                    on_print(
+                        f"Embedding failed for {label} at {len(embedding_prompt)} chars: {e}. Retrying with {next_limit} chars.",
+                        Fore.YELLOW,
+                    )
+
+                current_limit = next_limit
 
     def _generate_document_id(self, file_path, max_length=63):
         """
@@ -352,6 +459,8 @@ class DocumentIndexer:
                     file_metadata['extracted_length'] = len(embedding_content)
                     file_metadata['original_length'] = len(content)
 
+                file_metadata = self._sanitize_metadata(file_metadata)
+
                 if allow_chunks:
                     chunks = []
                     # Use embedding_content for chunking (which may be extracted text)
@@ -517,24 +626,18 @@ class DocumentIndexer:
                         # Embed the chunk content (from extracted text) with summary prepended
                         embedding = None
                         if self.model:
-                            ollama_options = {}
-                            if num_ctx:
-                                ollama_options["num_ctx"] = num_ctx
-                                
                             if self.verbose:
-                                embedding_info = "using extracted text" if extract_start else "using full content"
+                                embedding_info = "using extracted text" if file_metadata.get('extraction_used') else "using full content"
                                 summary_info = " with summary" if document_summary else ""
                                 on_print(f"Generating embedding for chunk {chunk_id} using {self.model} ({embedding_info}{summary_info})", Fore.WHITE + Style.DIM)
                             # Prepare a potentially truncated string for the embedding call so we don't exceed
                             # the model/context window and risk freezing the Ollama server. The full chunk_with_summary
                             # remains unchanged for storage in ChromaDB.
-                            embedding_prompt = self._prepare_text_for_embedding(chunk_with_summary, num_ctx=num_ctx)
-                            response = ollama.embeddings(
-                                prompt=embedding_prompt,
-                                model=self.model,
-                                options=ollama_options
+                            embedding = self._generate_embedding_with_retry(
+                                chunk_with_summary,
+                                num_ctx=num_ctx,
+                                target_label=f"chunk {chunk_id}",
                             )
-                            embedding = response["embedding"]
                         
                         # Store the chunk with summary prepended
                         chunk_metadata = file_metadata.copy()
@@ -570,23 +673,33 @@ class DocumentIndexer:
                     # Embed the extracted content but store the whole document
                     embedding = None
                     if self.model:
-                        ollama_options = {}
-                        if num_ctx:
-                            ollama_options["num_ctx"] = num_ctx
+                        if not extract_start:
+                            embedding_content, long_doc_extract_start, long_doc_extract_end = self._offer_long_document_extraction(
+                                content,
+                                embedding_content,
+                                num_ctx=num_ctx,
+                                no_chunking_confirmation=no_chunking_confirmation,
+                                document_label=f"Document {document_id}",
+                            )
+                            if long_doc_extract_start:
+                                file_metadata['extraction_used'] = True
+                                file_metadata['extract_start'] = long_doc_extract_start
+                                file_metadata['extract_end'] = long_doc_extract_end
+                                file_metadata['extracted_length'] = len(embedding_content)
+                                file_metadata['original_length'] = len(content)
+                                file_metadata = self._sanitize_metadata(file_metadata)
                             
                         if self.verbose:
-                            embedding_info = "using extracted text" if extract_start else "using full content"
+                            embedding_info = "using extracted text" if file_metadata.get('extraction_used') else "using full content"
                             on_print(f"Generating embedding for document {document_id} using {self.model} ({embedding_info})", Fore.WHITE + Style.DIM)
 
                         # Use extracted content for embedding computation. Truncate input to embedding API if needed
                         # while keeping the full document content unchanged for storage.
-                        embedding_prompt = self._prepare_text_for_embedding(embedding_content, num_ctx=num_ctx)
-                        response = ollama.embeddings(
-                            prompt=embedding_prompt,
-                            model=self.model,
-                            options=ollama_options
+                        embedding = self._generate_embedding_with_retry(
+                            embedding_content,
+                            num_ctx=num_ctx,
+                            target_label=f"document {document_id}",
                         )
-                        embedding = response["embedding"]
 
                     # Store the full document content but use embedding from extracted text
                     if embedding:
