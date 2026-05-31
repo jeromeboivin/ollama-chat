@@ -19,6 +19,9 @@ from pygments.formatters import Terminal256Formatter
 
 from ollama_chat_lib import state
 from ollama_chat_lib.io_hooks import on_print, on_stdout_write, on_stdout_flush, on_user_input
+from ollama_chat_lib.terminal_ui import (
+    format_prompt_commands_help, thinking_spinner_prompt,
+)
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────
@@ -46,7 +49,8 @@ def print_spinning_wheel(print_char_index):
     # use turning block character as spinner
     spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    on_stdout_write(spinner[print_char_index % len(spinner)], Style.RESET_ALL, "\rBot: ")
+    spinner_style, spinner_prompt = thinking_spinner_prompt()
+    on_stdout_write(spinner[print_char_index % len(spinner)], spinner_style, spinner_prompt)
     on_stdout_flush()
 
 
@@ -86,36 +90,7 @@ def encode_file_to_base64_with_mime(file_path):
 # ── Prompt commands help ──────────────────────────────────────────────────
 
 def print_possible_prompt_commands():
-    possible_prompt_commands = """
-    Possible prompt commands:
-    /cot: Help the assistant answer the user's question by forcing a Chain of Thought (COT) approach.
-    /file <path of a file to load>: Read the file and append the content to user input.
-    /search <number of results>: Query the vector database and append the answer to user input (RAG system).
-    /web: Perform a web search using DuckDuckGo.
-    /model: Change the Ollama model.
-    /tools: Prompts the user to select or deselect tools from the available tools list.
-    /chatbot: Change the chatbot personality.
-    /collection: Change the vector database collection.
-    /rmcollection <collection name>: Delete the vector database collection.
-    /context <model context size>: Change the model's context window size. Default value: 2. Size must be a numeric value between 2 and 125.
-    /index <folder path>: Index text files in the folder to the vector database.
-        (Note: For non-interactive indexing, use CLI args: --index-documents, --chunk-documents, --extract-start, --extract-end, etc.)
-    /cb: Replace /cb with the clipboard content.
-    /load <filename>: Load a conversation from a file.
-    /save <filename>: Save the conversation to a file. If no filename is provided, save with a timestamp into current directory.
-    /verbose: Toggle verbose mode on or off.
-    /memory: Toggle memory assistant on or off.
-    /memorize or /remember: Store the current conversation in memory.
-    reset, clear, restart: Reset the conversation.
-    quit, exit, bye: Exit the chatbot.
-    For multiline input, you can wrap text with triple double quotes.
-    
-    CLI-only RAG operations (use with --interactive=False):
-    --query "<your question>": Query the vector database from command line
-    --query-n-results <number>: Number of results to return from query
-    --index-documents <folder>: Index documents from folder (with options: --chunk-documents, --skip-existing, etc.)
-    """
-    return possible_prompt_commands.strip()
+    return format_prompt_commands_help()
 
 
 # ── Chatbot management ───────────────────────────────────────────────────

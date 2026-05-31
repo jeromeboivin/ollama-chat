@@ -22,3 +22,4 @@ python-pptx
 python-docx
 openpyxl
 markdown
+prompt_toolkit

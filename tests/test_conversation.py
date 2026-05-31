@@ -57,6 +57,13 @@ class TestPrintSpinningWheel:
         args = mock_write.call_args
         assert "⠙" in args[0][0]
 
+    @patch("ollama_chat_lib.conversation.on_stdout_flush")
+    @patch("ollama_chat_lib.conversation.on_stdout_write")
+    def test_uses_thinking_prompt(self, mock_write, mock_flush):
+        oc.print_spinning_wheel(0)
+        args = mock_write.call_args
+        assert "thinking" in args[0][2]
+
 
 # ── encode_file_to_base64_with_mime ──────────────────────────────────────
 
@@ -93,12 +100,20 @@ class TestPrintPossiblePromptCommands:
 
     def test_contains_key_commands(self):
         result = oc.print_possible_prompt_commands()
+        assert "/help" in result
         assert "/cot" in result
         assert "/file" in result
         assert "/search" in result
         assert "/web" in result
         assert "/model" in result
         assert "/tools" in result
+
+    def test_groups_commands_and_input_tips(self):
+        result = oc.print_possible_prompt_commands()
+        assert "Chat" in result
+        assert "Workspace and Session" in result
+        assert "Input tips" in result
+        assert "End a line with \\" in result
 
 
 # ── split_numbered_list ──────────────────────────────────────────────────

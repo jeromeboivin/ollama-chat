@@ -29,7 +29,7 @@ stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you'
 
 # List of available commands to autocomplete
 COMMANDS = [
-    "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
+    "/help", "/context", "/index", "/verbose", "/cot", "/search", "/web", "/model",
     "/thinking_model", "/model2", "/tools", "/load", "/save", "/collection", "/memory", "/remember",
     "/memorize", "/forget", "/editcollection", "/rmcollection", "/deletecollection", "/chatbot",
     "/think", "/cb", "/file", "/quit", "/exit", "/bye"

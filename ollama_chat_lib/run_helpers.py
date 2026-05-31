@@ -29,6 +29,10 @@ from ollama_chat_lib.conversation import (
     save_conversation_to_file,
     DEFAULT_CHATBOTS,
 )
+from ollama_chat_lib.terminal_ui import (
+    assistant_render_prompt, continuation_prompt, format_session_hint,
+    format_status, read_chat_input, user_prompt,
+)
 from ollama_chat_lib.model_selection import (
     select_ollama_model_if_available, select_openai_model_if_available,
     prompt_for_model,
@@ -51,7 +55,21 @@ def parse_args():
     readline.parse_and_bind("tab: complete")
 
     # If specified as script named arguments, use the provided ChromaDB client host (--chroma-host) and port (--chroma-port)
-    parser = argparse.ArgumentParser(description='Run the Ollama chatbot.')
+    parser = argparse.ArgumentParser(
+        description='Chat with local and hosted models from the terminal.',
+        epilog=(
+            'Examples:\n'
+            '  ollama_chat.py --model llama3.2\n'
+            '  ollama_chat.py --prompt "Summarize this repo" --interactive false\n'
+            '  ollama_chat.py --web-search "latest ChromaDB release notes"\n'
+            '  ollama_chat.py --index-documents ./docs --collection project-docs\n\n'
+            'Interactive tips:\n'
+            '  Type /help or ? once the session starts to see slash commands.\n'
+            '  End a line with \\ to continue onto the next line.\n'
+            '  Use \"\"\" ... \"\"\" if you prefer the original multiline flow.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument('--list-tools', action='store_true', help='List available tools and exit')
     parser.add_argument('--list-collections', action='store_true', help='List available ChromaDB collections and exit')
     parser.add_argument('--chroma-path', type=str, help='ChromaDB database path', default=None)
@@ -202,6 +220,46 @@ def prompt_for_indexing_settings(args):
         settings['extract_end'] = None
 
     return settings
+
+
+def collect_multiline_input(user_input):
+    """Expand interactive multiline input using either trailing backslashes or triple quotes."""
+    continuation_style, continuation_text = continuation_prompt()
+
+    if user_input.strip().startswith('"""'):
+        multi_line_input = [user_input[3:]]
+        on_stdout_write(continuation_text, continuation_style)
+
+        while True:
+            line = on_user_input()
+            if line.strip().endswith('"""') and len(line.strip()) > 3:
+                multi_line_input.append(line[:-3])
+                break
+            if line.strip().endswith('"""'):
+                break
+
+            multi_line_input.append(line)
+            on_stdout_write(continuation_text, continuation_style)
+
+        return "\n".join(multi_line_input)
+
+    if user_input.rstrip().endswith("\\") and not user_input.rstrip().endswith("\\\\"):
+        multi_line_input = [user_input.rstrip()[:-1].rstrip()]
+        on_stdout_write(continuation_text, continuation_style)
+
+        while True:
+            line = on_user_input()
+            if line.rstrip().endswith("\\") and not line.rstrip().endswith("\\\\"):
+                multi_line_input.append(line.rstrip()[:-1].rstrip())
+                on_stdout_write(continuation_text, continuation_style)
+                continue
+
+            multi_line_input.append(line)
+            break
+
+        return "\n".join(multi_line_input)
+
+    return user_input
 
 
 def initialize(args, mod):
@@ -1012,13 +1070,22 @@ def main_loop(ctx, mod):
     default_model = ctx["default_model"]
     args = ctx["args"]
 
+    if state.interactive_mode and not answer_and_exit:
+        session_hint, session_hint_style = format_session_hint(
+            model_name=selected_model,
+            tools_enabled=bool(state.selected_tools),
+            memory_enabled=bool(use_memory_manager),
+        )
+        on_print(session_hint, session_hint_style)
+
     # Main conversation loop
     while True:
         thoughts = None
         if not auto_start_conversation:
             try:
                 if state.interactive_mode:
-                    on_prompt("\nYou: ", Fore.YELLOW + Style.NORMAL)
+                    prompt_style, prompt_text = user_prompt()
+                    on_prompt(prompt_text, prompt_style)
 
                 if state.user_prompt:
                     if state.other_instance_url:
@@ -1028,48 +1095,46 @@ def main_loop(ctx, mod):
                         user_input = state.user_prompt
                     state.user_prompt = None
                 else:
-                    user_input = on_user_input()
+                    user_input = read_chat_input(
+                        on_user_input,
+                        model_name=selected_model,
+                        tools_enabled=bool(state.selected_tools),
+                        memory_enabled=bool(use_memory_manager),
+                    )
 
-                if user_input.strip().startswith('"""'):
-                    multi_line_input = [user_input[3:]]  # Keep the content after the first """
-                    on_stdout_write("... ")  # Prompt continuation line
-
-                    while True:
-                        line = on_user_input()
-                        if line.strip().endswith('"""') and len(line.strip()) > 3:
-                            # Handle if the line contains content before """
-                            multi_line_input.append(line[:-3])
-                            break
-                        elif line.strip().endswith('"""'):
-                            break
-                        else:
-                            multi_line_input.append(line)
-                            on_stdout_write("... ")  # Prompt continuation line
-
-                    user_input = "\n".join(multi_line_input)
+                user_input = collect_multiline_input(user_input)
 
             except EOFError:
                 break
             except KeyboardInterrupt:
                 auto_save = False
-                on_print("\nGoodbye!", Style.RESET_ALL)
+                goodbye_message, goodbye_style = format_status("Session closed.", "info")
+                on_print(f"\n{goodbye_message}", goodbye_style)
                 break
 
             if len(user_input.strip()) == 0:
                 continue
 
         # Exit condition
+        if user_input in ["/help", "?"]:
+            on_print(print_possible_prompt_commands(), Fore.WHITE + Style.NORMAL)
+            continue
+
         if user_input.lower() in ['/quit', '/exit', '/bye', 'quit', 'exit', 'bye', 'goodbye', 'stop'] or re.search(r'\b(bye|goodbye)\b', user_input, re.IGNORECASE):
-            on_print("Goodbye!", Style.RESET_ALL)
+            goodbye_message, goodbye_style = format_status("Session closed.", "success")
+            on_print(goodbye_message, goodbye_style)
             if state.memory_manager:
-                on_print("Saving conversation to memory...", Fore.WHITE + Style.DIM)
+                memory_message, memory_style = format_status("Saving conversation to memory...", "info")
+                on_print(memory_message, memory_style)
                 if state.memory_manager.add_memory(conversation):
-                    on_print("Conversation saved to memory.", Fore.WHITE + Style.DIM)
+                    saved_message, saved_style = format_status("Conversation saved to memory.", "success")
+                    on_print(saved_message, saved_style)
                     on_print("", Style.RESET_ALL)
             break
 
         if user_input.lower() in ['/reset', '/clear', '/restart', 'reset', 'clear', 'restart']:
-            on_print("Conversation reset.", Style.RESET_ALL)
+            reset_message, reset_style = format_status("Conversation reset.", "success")
+            on_print(reset_message, reset_style)
             if state.initial_message:
                 conversation = [state.initial_message]
             else:
@@ -1091,13 +1156,25 @@ def main_loop(ctx, mod):
                 context_window = int(re.search(r'/context\s+(\d+)', user_input).group(1))
                 max_context_length = 125 # 125 * 1024 = 128000 tokens
                 if context_window < 0 or context_window > max_context_length:
-                    on_print(f"Context window must be between 0 and {max_context_length}.", Fore.RED)
+                    context_message, context_style = format_status(
+                        f"Context window must be between 0 and {max_context_length}.",
+                        "error",
+                    )
+                    on_print(context_message, context_style)
                 else:
                     num_ctx = context_window * 1024
                     if state.verbose_mode:
-                        on_print(f"Context window changed to {num_ctx} tokens.", Fore.WHITE + Style.DIM)
+                        context_message, context_style = format_status(
+                            f"Context window changed to {num_ctx} tokens.",
+                            "info",
+                        )
+                        on_print(context_message, context_style)
             else:
-                on_print(f"Please specify context window size with /context <number>.", Fore.RED)
+                context_message, context_style = format_status(
+                    "Specify the context window with /context <number>.",
+                    "error",
+                )
+                on_print(context_message, context_style)
             continue
 
         if "/system" in user_input:
@@ -1152,7 +1229,11 @@ def main_loop(ctx, mod):
 
         if user_input == "/verbose":
             state.verbose_mode = not state.verbose_mode
-            on_print(f"Verbose mode: {state.verbose_mode}", Fore.WHITE + Style.DIM)
+            verbose_message, verbose_style = format_status(
+                f"Verbose mode {'on' if state.verbose_mode else 'off'}.",
+                "info",
+            )
+            on_print(verbose_message, verbose_style)
             continue
 
         if "/cot" in user_input:
@@ -1231,16 +1312,19 @@ def main_loop(ctx, mod):
                 # Deactivate memory manager
                 state.memory_manager = None
                 use_memory_manager = False
-                on_print("Memory manager deactivated.", Fore.WHITE + Style.DIM)
+                memory_message, memory_style = format_status("Memory manager off.", "info")
+                on_print(memory_message, memory_style)
             else:
                 load_chroma_client()
 
                 if state.chroma_client:
                     state.memory_manager = mod.MemoryManager(state.memory_collection_name, state.chroma_client, state.current_model, state.embeddings_model, state.verbose_mode, num_ctx=num_ctx, long_term_memory_file=state.long_term_memory_file)
                     use_memory_manager = True
-                    on_print("Memory manager activated.", Fore.WHITE + Style.DIM)
+                    memory_message, memory_style = format_status("Memory manager on.", "success")
+                    on_print(memory_message, memory_style)
                 else:
-                    on_print("ChromaDB client not initialized.", Fore.RED)
+                    memory_message, memory_style = format_status("ChromaDB client not initialized.", "error")
+                    on_print(memory_message, memory_style)
 
             continue
 
@@ -1404,7 +1488,8 @@ def main_loop(ctx, mod):
             else:
                 clipboard_content = pyperclip.paste()
             user_input = user_input.replace("/cb", "\n" + clipboard_content + "\n")
-            on_print("Clipboard content added to user input.", Fore.WHITE + Style.DIM)
+            clipboard_message, clipboard_style = format_status("Clipboard content added to the prompt.", "info")
+            on_print(clipboard_message, clipboard_style)
 
         image_path = None
         # If user input contains '/file <path of a file to load>' anywhere in the prompt, read the file and append the content to user_input
@@ -1476,16 +1561,19 @@ def main_loop(ctx, mod):
             if not state.think_mode_on:
                 state.think_mode_on = True
                 if state.verbose_mode:
-                    on_print("Think mode activated.", Fore.WHITE + Style.DIM)
+                    think_message, think_style = format_status("Think mode on.", "info")
+                    on_print(think_message, think_style)
             else:
                 state.think_mode_on = False
                 if state.verbose_mode:
-                    on_print("Think mode deactivated.", Fore.WHITE + Style.DIM)
+                    think_message, think_style = format_status("Think mode off.", "info")
+                    on_print(think_message, think_style)
             continue
 
         # If user input starts with '/' and is not a command, ignore it.
         if user_input.startswith('/') and not user_input.startswith('//'):
-            on_print("Invalid command. Please try again.", Fore.RED)
+            invalid_message, invalid_style = format_status("Unknown command. Type /help to see available commands.", "error")
+            on_print(invalid_message, invalid_style)
             continue
 
         # Add user input to conversation history
@@ -1500,9 +1588,9 @@ def main_loop(ctx, mod):
         if thoughts:
             thoughts = f"Thinking...\n{thoughts}\nEnd of internal thoughts.\n\nFinal response:"
             if state.syntax_highlighting:
-                on_print(colorize(thoughts), Style.RESET_ALL, "\rBot: " if state.interactive_mode else "")
+                on_print(colorize(thoughts), Style.RESET_ALL, assistant_render_prompt() if state.interactive_mode else "")
             else:
-                on_print(thoughts, Style.RESET_ALL, "\rBot: " if state.interactive_mode else "")
+                on_print(thoughts, Style.RESET_ALL, assistant_render_prompt() if state.interactive_mode else "")
 
             # Add the chain of thoughts to the conversation, as an assistant message
             conversation.append({"role": "assistant", "content": thoughts})
@@ -1512,7 +1600,7 @@ def main_loop(ctx, mod):
 
         alternate_bot_response = None
         if state.alternate_model:
-            alternate_bot_response = mod.ask_ollama_with_conversation(conversation, state.alternate_model, temperature=state.temperature, prompt_template=state.prompt_template, tools=state.selected_tools, prompt="\nAlt", prompt_color=Fore.CYAN, stream_active=stream_active, num_ctx=num_ctx)
+            alternate_bot_response = mod.ask_ollama_with_conversation(conversation, state.alternate_model, temperature=state.temperature, prompt_template=state.prompt_template, tools=state.selected_tools, prompt="Alt", prompt_color=Fore.CYAN, stream_active=stream_active, num_ctx=num_ctx)
 
         bot_response_handled_by_plugin = False
         for plugin in state.plugins:
@@ -1522,16 +1610,16 @@ def main_loop(ctx, mod):
 
         if not bot_response_handled_by_plugin:
             if state.syntax_highlighting:
-                on_print(colorize(bot_response), Style.RESET_ALL, "\rBot: " if state.interactive_mode else "")
+                on_print(colorize(bot_response), Style.RESET_ALL, assistant_render_prompt() if state.interactive_mode else "")
 
                 if alternate_bot_response:
-                    on_print(colorize(alternate_bot_response), Fore.CYAN, "\rAlt: " if state.interactive_mode else "")
+                    on_print(colorize(alternate_bot_response), Fore.CYAN, assistant_render_prompt("Alt") if state.interactive_mode else "")
             elif not state.use_openai and not state.use_azure_openai and len(state.selected_tools) > 0:
                 # Ollama cannot stream when tools are used
-                on_print(bot_response, Style.RESET_ALL, "\rBot: " if state.interactive_mode else "")
+                on_print(bot_response, Style.RESET_ALL, assistant_render_prompt() if state.interactive_mode else "")
 
                 if alternate_bot_response:
-                    on_print(alternate_bot_response, Fore.CYAN, "\rAlt: " if state.interactive_mode else "")
+                    on_print(alternate_bot_response, Fore.CYAN, assistant_render_prompt("Alt") if state.interactive_mode else "")
 
         if alternate_bot_response:
             # Ask user to select the preferred response
@@ -1556,7 +1644,8 @@ def main_loop(ctx, mod):
 
         # Exit condition: if the bot response contains an exit command ('bye', 'goodbye'), using a regex pattern to match the words
         if bot_response and re.search(r'\b(bye|goodbye)\b', bot_response, re.IGNORECASE):
-            on_print("Goodbye!", Style.RESET_ALL)
+            goodbye_message, goodbye_style = format_status("Session closed.", "success")
+            on_print(goodbye_message, goodbye_style)
             break
 
         if answer_and_exit:

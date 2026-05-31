@@ -16,6 +16,7 @@ from ollama_chat_lib.io_hooks import (
 from ollama_chat_lib.utils import find_latest_user_message, extract_json, render_tools
 from ollama_chat_lib.conversation import encode_file_to_base64_with_mime, print_spinning_wheel
 from ollama_chat_lib.model_selection import is_model_an_ollama_model
+from ollama_chat_lib.terminal_ui import assistant_stream_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -465,10 +466,8 @@ def ask_ollama_with_conversation(conversation, model, temperature=0.1, prompt_te
 
     if not state.syntax_highlighting:
         if state.interactive_mode and not no_bot_prompt:
-            if prompt_color:
-                on_prompt(f"{prompt}: ", prompt_color)
-            else:
-                on_prompt(f"{prompt}: ", Style.RESET_ALL)
+            response_style, response_prompt = assistant_stream_prompt(prompt, prompt_color)
+            on_prompt(response_prompt, response_style)
         else:
             if prompt_color:
                 on_stdout_write("", prompt_color)

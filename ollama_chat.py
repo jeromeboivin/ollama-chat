@@ -108,6 +108,13 @@ from ollama_chat_lib.conversation import (
     summarize_text_file as _summarize_text_file,
     DEFAULT_CHATBOTS,
 )
+from ollama_chat_lib.terminal_ui import (  # noqa: E402
+    command_catalog,
+    enhanced_prompt_available,
+    find_matching_commands,
+    format_chat_toolbar,
+    read_chat_input,
+)
 # -------------------------------------------------------------------------
 
 
