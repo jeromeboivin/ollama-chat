@@ -15,6 +15,7 @@ from ollama_chat_lib.constants import (
     web_cache_collection_name, stop_words,
     adaptive_distance_multiplier, distance_percentile_threshold, semantic_weight,
 )
+from ollama_chat_lib.terminal_ui import prompt_for_confirmation, prompt_for_single_choice
 
 
 def load_chroma_client():
@@ -84,27 +85,48 @@ def prompt_for_vector_database_collection(prompt_create_new=True, include_web_ca
         new_collection_desc = on_user_input("Enter a description for the new collection: ")
         return new_collection_name, new_collection_desc
 
-    on_print("Available collections:", Style.RESET_ALL)
-    for i, state.collection in enumerate(filtered_collections):
+    options = []
+    for state.collection in filtered_collections:
         collection_name = state.collection.name
         if type(state.collection.metadata) == dict:
             collection_metadata = state.collection.metadata.get("description", "No description")
         else:
             collection_metadata = "No description"
-        cache_indicator = " (Web Cache)" if collection_name == web_cache_collection_name else ""
-        on_print(f"{i}. {collection_name}{cache_indicator} - {collection_metadata}")
+        cache_indicator = "Web cache" if collection_name == web_cache_collection_name else "Collection"
+        options.append({
+            "value": collection_name,
+            "key": collection_name,
+            "label": collection_name,
+            "description": f"{cache_indicator} • {collection_metadata}",
+            "group": "Collections",
+        })
 
     if prompt_create_new:
-        on_print(f"{len(filtered_collections)}. Create a new collection")
+        options.append({
+            "value": "__create_new_collection__",
+            "key": "create",
+            "label": "Create a new collection",
+            "description": "Create a collection and optionally add a description.",
+            "aliases": ["new"],
+            "group": "Collections",
+        })
 
-    choice = int(on_user_input("Enter the number of your preferred collection [0]: ") or 0)
+    default_collection = state.current_collection_name if any(col.name == state.current_collection_name for col in filtered_collections) else filtered_collections[0].name
+    choice = prompt_for_single_choice(
+        "Choose a collection. Type to filter or press Tab to browse.",
+        options,
+        default_value=default_collection,
+        prompt_label="collection",
+        read_fn=on_user_input,
+        print_fn=on_print,
+    )
 
-    if prompt_create_new and choice == len(filtered_collections):
+    if prompt_create_new and choice == "__create_new_collection__":
         new_collection_name = on_user_input("Enter a new collection to create: ")
         new_collection_desc = on_user_input("Enter a description for the new collection: ")
         return new_collection_name, new_collection_desc
 
-    return filtered_collections[choice].name, None
+    return choice, None
 
 
 def set_current_collection(collection_name, description=None, create_new_collection_if_not_found=True, verbose=False):
@@ -144,8 +166,13 @@ def delete_collection(collection_name):
     load_chroma_client()
     if not state.chroma_client:
         return
-    confirmation = on_user_input(f"Are you sure you want to delete the collection '{collection_name}'? (y/n): ").lower()
-    if confirmation != 'y' and confirmation != 'yes':
+    if not prompt_for_confirmation(
+        f"Delete collection '{collection_name}'?",
+        default=False,
+        prompt_label="confirm",
+        read_fn=on_user_input,
+        print_fn=on_print,
+    ):
         on_print("Collection deletion canceled.", Fore.YELLOW)
         return
     try:

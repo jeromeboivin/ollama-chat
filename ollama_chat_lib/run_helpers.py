@@ -31,7 +31,8 @@ from ollama_chat_lib.conversation import (
 )
 from ollama_chat_lib.terminal_ui import (
     assistant_render_prompt, continuation_prompt, format_session_hint,
-    format_status, read_chat_input, user_prompt,
+    format_status, prompt_for_confirmation, prompt_for_single_choice,
+    read_chat_input, user_prompt,
 )
 from ollama_chat_lib.model_selection import (
     select_ollama_model_if_available, select_openai_model_if_available,
@@ -143,11 +144,7 @@ def parse_args():
 
 def prompt_for_boolean_setting(prompt_text, current_value):
     """Prompt for a boolean setting while preserving the current value on empty input."""
-    default_hint = "Y/n" if current_value else "y/N"
-    response = on_user_input(f"{prompt_text} [{default_hint}]: ").strip().lower()
-    if not response:
-        return current_value
-    return response in ['y', 'yes']
+    return prompt_for_confirmation(prompt_text, default=current_value, prompt_label="confirm", read_fn=on_user_input, print_fn=on_print)
 
 
 def prompt_for_indexing_settings(args):
@@ -449,8 +446,13 @@ def initialize(args, mod):
     # If output file already exists, ask user for confirmation to overwrite
     if output_file and os.path.exists(output_file):
         if state.interactive_mode:
-            confirmation = on_user_input(f"Output file '{output_file}' already exists. Overwrite? (y/n): ").lower()
-            if confirmation != 'y' and confirmation != 'yes':
+            if not prompt_for_confirmation(
+                f"Output file '{output_file}' already exists. Overwrite it?",
+                default=False,
+                prompt_label="overwrite",
+                read_fn=on_user_input,
+                print_fn=on_print,
+            ):
                 on_print("Output file not overwritten.")
                 output_file = None
             else:
@@ -1622,9 +1624,29 @@ def main_loop(ctx, mod):
                     on_print(alternate_bot_response, Fore.CYAN, assistant_render_prompt("Alt") if state.interactive_mode else "")
 
         if alternate_bot_response:
-            # Ask user to select the preferred response
-            on_print(f"Select the preferred response:\n1. Original model ({state.current_model})\n2. Alternate model ({state.alternate_model})", Fore.WHITE + Style.DIM)
-            choice = on_user_input("Enter the number of your preferred response [1]: ") or "1"
+            choice = prompt_for_single_choice(
+                "Choose which answer to keep.",
+                [
+                    {
+                        "value": "1",
+                        "key": "1",
+                        "label": f"Original model ({state.current_model})",
+                        "description": "Keep the response from the primary model.",
+                        "group": "Responses",
+                    },
+                    {
+                        "value": "2",
+                        "key": "2",
+                        "label": f"Alternate model ({state.alternate_model})",
+                        "description": "Keep the response from the alternate model.",
+                        "group": "Responses",
+                    },
+                ],
+                default_value="1",
+                prompt_label="answer",
+                read_fn=on_user_input,
+                print_fn=on_print,
+            ) or "1"
             bot_response = bot_response if choice == "1" else alternate_bot_response
 
         # Add bot response to conversation history

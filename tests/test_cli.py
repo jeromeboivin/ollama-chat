@@ -127,7 +127,7 @@ class TestEnhancedPromptHelpers:
         toolbar = oc.format_chat_toolbar("llama3.2", tools_enabled=True, memory_enabled=True, think_enabled=True)
         assert "Enter send" in toolbar
         assert "Alt+Enter newline" in toolbar
-        assert "Tab picker" in toolbar
+        assert "Tab browse" in toolbar
         assert "model llama3.2" in toolbar
         assert "tools" in toolbar
         assert "memory on" in toolbar
@@ -147,6 +147,11 @@ class TestEnhancedPromptHelpers:
     def test_find_matching_commands_keeps_group_order(self):
         matches = oc.find_matching_commands("/")
         assert matches[0]["group"] == "Chat"
+
+    def test_chat_toolbar_surfaces_top_slash_match(self):
+        toolbar = oc.format_chat_toolbar("llama3.2", tools_enabled=False, memory_enabled=False, think_enabled=False, command_query="/mdl")
+        assert "slash " in toolbar
+        assert "top /model" in toolbar
 
     @patch("ollama_chat_lib.terminal_ui._prompt_toolkit_modules", return_value=None)
     def test_enhanced_prompt_available_false_without_prompt_toolkit(self, mock_modules):
@@ -187,3 +192,88 @@ class TestEnhancedPromptHelpers:
 
         completions = asyncio.run(_collect())
         assert "/model" in completions
+
+
+class TestChoiceHelpers:
+
+    def test_find_matching_choice_entries_supports_fuzzy_search(self):
+        entries = [
+            {"value": "llama3:latest", "key": "llama3:latest", "label": "llama3:latest", "description": "Local model", "group": "Models", "aliases": ["llm"], "group_index": 0, "item_index": 0},
+            {"value": "qwen:7b", "key": "qwen:7b", "label": "qwen:7b", "description": "Alternative", "group": "Models", "aliases": [], "group_index": 0, "item_index": 1},
+        ]
+
+        matches = oc.find_matching_choice_entries("llm", entries)
+        assert matches[0]["value"] == "llama3:latest"
+
+    def test_find_matching_choice_entries_prefers_key_over_description(self):
+        entries = [
+            {"value": "memory", "key": "memory", "label": "Memory", "description": "search", "group": "Modes", "aliases": [], "group_index": 0, "item_index": 0},
+            {"value": "search", "key": "search", "label": "Search", "description": "Browse indexed content", "group": "Modes", "aliases": [], "group_index": 0, "item_index": 1},
+        ]
+
+        matches = oc.find_matching_choice_entries("search", entries)
+        assert matches[0]["value"] == "search"
+
+    def test_format_choice_toolbar_shows_top_match_and_new_hints(self):
+        from ollama_chat_lib.terminal_ui import format_choice_toolbar
+
+        entries = [
+            {"value": "llama3:latest", "key": "llama3:latest", "label": "llama3:latest", "description": "Local model", "group": "Models", "aliases": [], "group_index": 0, "item_index": 0},
+            {"value": "qwen:7b", "key": "qwen:7b", "label": "qwen:7b", "description": "Alternative", "group": "Models", "aliases": [], "group_index": 0, "item_index": 1},
+        ]
+
+        toolbar = format_choice_toolbar(entries, default_label="llama3:latest", query_text="qwe")
+        assert "top qwen:7b" in toolbar
+        assert "Enter accepts top" in toolbar
+
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_single_choice_uses_fuzzy_match_in_fallback(self, mock_available):
+        answers = iter(["llm"])
+
+        result = oc.prompt_for_single_choice(
+            "Choose a model",
+            [
+                {"value": "llama3:latest", "key": "llama3:latest", "label": "llama3:latest", "description": "Local model", "group": "Models"},
+                {"value": "qwen:7b", "key": "qwen:7b", "label": "qwen:7b", "description": "Alternative", "group": "Models"},
+            ],
+            default_value="llama3:latest",
+            prompt_label="model",
+            read_fn=lambda prompt=None: next(answers),
+            print_fn=lambda *args, **kwargs: None,
+        )
+
+        assert result == "llama3:latest"
+
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_multiple_choice_toggles_and_returns_selection(self, mock_available):
+        answers = iter(["web, read", ""])
+        web_tool = {"function": {"name": "web_search"}}
+        read_tool = {"function": {"name": "read_file"}}
+
+        result = oc.prompt_for_multiple_choice(
+            "Choose tools",
+            [
+                {"value": web_tool, "key": "web_search", "label": "web_search", "description": "Search the web", "group": "Built-in tools"},
+                {"value": read_tool, "key": "read_file", "label": "read_file", "description": "Read a file", "group": "Built-in tools"},
+            ],
+            selected_values=[],
+            prompt_label="tools",
+            read_fn=lambda prompt=None: next(answers),
+            print_fn=lambda *args, **kwargs: None,
+        )
+
+        assert web_tool in result
+        assert read_tool in result
+
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_confirmation_uses_default_on_empty_input(self, mock_available):
+        answers = iter([""])
+
+        result = oc.prompt_for_confirmation(
+            "Delete collection?",
+            default=True,
+            read_fn=lambda prompt=None: next(answers),
+            print_fn=lambda *args, **kwargs: None,
+        )
+
+        assert result is True

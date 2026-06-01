@@ -112,7 +112,11 @@ from ollama_chat_lib.terminal_ui import (  # noqa: E402
     command_catalog,
     enhanced_prompt_available,
     find_matching_commands,
+    find_matching_choice_entries,
     format_chat_toolbar,
+    prompt_for_confirmation,
+    prompt_for_multiple_choice,
+    prompt_for_single_choice,
     read_chat_input,
 )
 # -------------------------------------------------------------------------

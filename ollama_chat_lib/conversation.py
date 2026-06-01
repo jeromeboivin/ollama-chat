@@ -20,7 +20,7 @@ from pygments.formatters import Terminal256Formatter
 from ollama_chat_lib import state
 from ollama_chat_lib.io_hooks import on_print, on_stdout_write, on_stdout_flush, on_user_input
 from ollama_chat_lib.terminal_ui import (
-    format_prompt_commands_help, thinking_spinner_prompt,
+    format_prompt_commands_help, prompt_for_single_choice, thinking_spinner_prompt,
 )
 
 
@@ -158,14 +158,24 @@ def split_numbered_list(input_text):
 
 
 def prompt_for_chatbot():
+    options = []
+    for chatbot in state.chatbots:
+        options.append({
+            "value": chatbot,
+            "key": chatbot["name"],
+            "label": chatbot["name"],
+            "description": chatbot["description"],
+            "group": "Chatbots",
+        })
 
-    on_print("Available chatbots:", Style.RESET_ALL)
-    for i, chatbot in enumerate(state.chatbots):
-        on_print(f"{i}. {chatbot['name']} - {chatbot['description']}")
-
-    choice = int(on_user_input("Enter the number of your preferred chatbot [0]: ") or 0)
-
-    return state.chatbots[choice]
+    return prompt_for_single_choice(
+        "Choose a chatbot. Type to filter or press Tab to browse.",
+        options,
+        default_value=state.chatbots[0] if state.chatbots else None,
+        prompt_label="chatbot",
+        read_fn=on_user_input,
+        print_fn=on_print,
+    )
 
 
 # ── Conversation persistence ─────────────────────────────────────────────

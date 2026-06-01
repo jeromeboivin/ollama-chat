@@ -14,6 +14,7 @@ from tqdm import tqdm
 from ollama_chat_lib import state
 from ollama_chat_lib.io_hooks import on_print, on_user_input
 from ollama_chat_lib.splitters import MarkdownSplitter, TabularDataSplitter
+from ollama_chat_lib.terminal_ui import prompt_for_confirmation
 from ollama_chat_lib.text_extraction import (
     extract_text_from_csv,
     extract_text_from_docx,
@@ -108,7 +109,13 @@ class DocumentIndexer:
         target_label = document_label or "This document"
         on_print(f"\n{target_label} is longer than the embedding context and will be truncated.", Fore.YELLOW)
         on_print("You can choose a more relevant section by providing start and end boundaries for the text to embed.")
-        use_extraction = on_user_input("Do you want to extract a different part of this document before truncation? [y/n]: ").lower() in ['y', 'yes']
+        use_extraction = prompt_for_confirmation(
+            "Extract a different section before truncation?",
+            default=False,
+            prompt_label="extract",
+            read_fn=on_user_input,
+            print_fn=on_print,
+        )
         if not use_extraction:
             return embedding_content, None, None
 
@@ -345,14 +352,26 @@ class DocumentIndexer:
         # Ask the user to confirm if they want to allow chunking of large documents
         if allow_chunks and not no_chunking_confirmation:
             on_print("Large documents will be chunked into smaller pieces for indexing.")
-            allow_chunks = on_user_input("Do you want to continue with chunking (if you answer 'no', large documents will be indexed as a whole)? [y/n]: ").lower() in ['y', 'yes']
+            allow_chunks = prompt_for_confirmation(
+                "Continue with chunking?",
+                default=True,
+                prompt_label="chunking",
+                read_fn=on_user_input,
+                print_fn=on_print,
+            )
 
         # Ask the user for extraction strings if not provided
         # Skip asking if no_chunking_confirmation is True (automated indexing)
         if extract_start is None and extract_end is None and not no_chunking_confirmation:
             on_print("\nOptional: You can extract only a specific part of each document for embedding computation.")
             on_print("This allows you to focus on relevant sections while still storing the full document.")
-            use_extraction = on_user_input("Do you want to extract specific text sections for embedding? [y/n]: ").lower() in ['y', 'yes']
+            use_extraction = prompt_for_confirmation(
+                "Extract specific text sections for embeddings?",
+                default=False,
+                prompt_label="extract",
+                read_fn=on_user_input,
+                print_fn=on_print,
+            )
             
             if use_extraction:
                 extract_start = on_user_input("Enter the start string (text that marks the beginning of the section): ").strip()
@@ -375,7 +394,13 @@ class DocumentIndexer:
         if allow_chunks and store_full_docs is None and not no_chunking_confirmation:
             on_print("\nOptional: You can store the full original document for each chunk instead of just the chunk text.")
             on_print("Embeddings will still be computed from chunks only, but retrieved results will contain the complete document.")
-            store_full_docs = on_user_input("Do you want to store the full document for each chunk? [y/n]: ").lower() in ['y', 'yes']
+            store_full_docs = prompt_for_confirmation(
+                "Store the full document for each chunk?",
+                default=False,
+                prompt_label="storage",
+                read_fn=on_user_input,
+                print_fn=on_print,
+            )
             if store_full_docs:
                 on_print("Full document storage enabled: each chunk will store the complete original document.", Fore.GREEN)
         

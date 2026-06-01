@@ -9,6 +9,7 @@ from ddgs import DDGS
 
 from ollama_chat_lib import state
 from ollama_chat_lib.io_hooks import on_print, on_user_input
+from ollama_chat_lib.terminal_ui import prompt_for_multiple_choice
 from ollama_chat_lib.constants import (
     web_cache_collection_name,
     min_quality_results_threshold,
@@ -475,38 +476,30 @@ By structuring your reasoning as an inner dialogue, you will create a rich, expl
 # ---------------------------------------------------------------------------
 
 def select_tools(available_tools, selected_tools):
-    def display_tool_options():
-        on_print("Available tools:\n", Style.RESET_ALL)
-        for i, tool in enumerate(available_tools):
-            tool_name = tool['function']['name']
-            status = "[ ]"
-            for selected_tool in state.selected_tools:
-                if selected_tool['function']['name'] == tool_name:
-                    status = "[X]"
-                    break
-            on_print(f"{i + 1}. {status} {tool_name}: {tool['function']['description']}")
+    if not available_tools:
+        on_print("No tools available.", Fore.YELLOW)
+        return selected_tools
 
-    while True:
-        display_tool_options()
-        on_print("Select or deselect tools by entering the corresponding number (e.g., 1).\nPress Enter or type 'done' when done.")
-        user_input = on_user_input("Your choice: ").strip()
-        if len(user_input) == 0 or user_input == 'done':
-            break
-        try:
-            index = int(user_input) - 1
-            if 0 <= index < len(available_tools):
-                selected_tool = available_tools[index]
-                if selected_tool in selected_tools:
-                    selected_tools.remove(selected_tool)
-                    on_print(f"Tool '{selected_tool['function']['name']}' deselected.\n")
-                else:
-                    selected_tools.append(selected_tool)
-                    on_print(f"Tool '{selected_tool['function']['name']}' selected.\n")
-            else:
-                on_print("Invalid selection. Please choose a valid tool number.\n")
-        except ValueError:
-            on_print("Invalid input. Please enter a number corresponding to a tool or 'done'.\n")
-    return selected_tools
+    builtin_tools = set(get_builtin_tool_names())
+    options = []
+    for tool in available_tools:
+        tool_name = tool['function']['name']
+        options.append({
+            "value": tool,
+            "key": tool_name,
+            "label": tool_name,
+            "description": tool['function']['description'],
+            "group": "Built-in tools" if tool_name in builtin_tools else "Plugin tools",
+        })
+
+    return prompt_for_multiple_choice(
+        "Choose tools. Type to filter, press Tab to browse, Enter to toggle, and press Enter on an empty prompt when done.",
+        options,
+        selected_values=selected_tools,
+        prompt_label="tools",
+        read_fn=on_user_input,
+        print_fn=on_print,
+    )
 
 
 def select_tool_by_name(available_tools, selected_tools, target_tool_name):
