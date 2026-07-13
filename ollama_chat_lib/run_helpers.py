@@ -11,7 +11,19 @@ import sys
 import os
 import re
 import json
-import readline
+try:
+    import readline
+except ModuleNotFoundError:
+    class _ReadlineFallback:
+        @staticmethod
+        def set_completer(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def parse_and_bind(*args, **kwargs):
+            return None
+
+    readline = _ReadlineFallback()
 import tempfile
 import platform
 import argparse
@@ -99,6 +111,8 @@ def parse_args():
     parser.add_argument('--index-documents', type=str, help='Root folder to index text files', default=None)
     parser.add_argument('--chunk-documents', type=bool, help='Enable chunking for large documents during indexing', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--skip-existing', type=bool, help='Skip indexing of documents that already exist in the collection', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--document-id-strategy', choices=('legacy', 'collision-safe'), help='Document ID strategy (default: legacy)', default='legacy')
+    parser.add_argument('--document-id-namespace', type=str, help='Stable dataset name required by the collision-safe document ID strategy', default=None)
     parser.add_argument('--extract-start', type=str, help='Start string for extracting specific text sections during indexing', default=None)
     parser.add_argument('--extract-end', type=str, help='End string for extracting specific text sections during indexing', default=None)
     parser.add_argument('--split-paragraphs', type=bool, help='Split markdown content into paragraphs during indexing', default=False, action=argparse.BooleanOptionalAction)
@@ -147,11 +161,23 @@ def prompt_for_boolean_setting(prompt_text, current_value):
     return prompt_for_confirmation(prompt_text, default=current_value, prompt_label="confirm", read_fn=on_user_input, print_fn=on_print)
 
 
-def prompt_for_indexing_settings(args):
-    """Collect indexing settings before starting a potentially long indexing job."""
+def validate_document_identity_settings(strategy, namespace):
+    """Validate and normalize document identity CLI settings."""
+    if strategy not in ('legacy', 'collision-safe'):
+        raise ValueError("Document ID strategy must be 'legacy' or 'collision-safe'.")
+    normalized_namespace = (namespace or '').strip() or None
+    if strategy == 'collision-safe' and not normalized_namespace:
+        raise ValueError("--document-id-namespace is required with --document-id-strategy collision-safe.")
+    return strategy, normalized_namespace
+
+
+def _prompt_for_document_settings(args, *, include_skip_existing, heading):
+    """Collect document indexing settings for an interactive run."""
     settings = {
         'chunk_documents': args.chunk_documents,
         'skip_existing': args.skip_existing,
+        'document_id_strategy': args.document_id_strategy,
+        'document_id_namespace': args.document_id_namespace,
         'split_paragraphs': args.split_paragraphs,
         'add_summary': args.add_summary,
         'store_full_docs': args.store_full_docs,
@@ -159,15 +185,33 @@ def prompt_for_indexing_settings(args):
         'extract_end': args.extract_end,
     }
 
-    on_print("\nReview indexing settings before starting.", Fore.CYAN)
+    on_print(f"\n{heading}", Fore.CYAN)
     settings['chunk_documents'] = prompt_for_boolean_setting(
         "Chunk large documents during indexing?",
         settings['chunk_documents'],
     )
-    settings['skip_existing'] = prompt_for_boolean_setting(
-        "Skip documents that are already indexed?",
-        settings['skip_existing'],
+    if include_skip_existing:
+        settings['skip_existing'] = prompt_for_boolean_setting(
+            "Skip documents that are already indexed?",
+            settings['skip_existing'],
+        )
+    else:
+        settings['skip_existing'] = False
+    use_collision_safe_ids = prompt_for_boolean_setting(
+        "Use collision-safe IDs for duplicate filenames?",
+        settings['document_id_strategy'] == 'collision-safe',
     )
+    if use_collision_safe_ids:
+        current_namespace = settings['document_id_namespace'] or ''
+        namespace_prompt = "Enter a stable dataset namespace"
+        if current_namespace:
+            namespace_prompt += f" [{current_namespace}]"
+        entered_namespace = on_user_input(namespace_prompt + ": ").strip()
+        settings['document_id_strategy'] = 'collision-safe'
+        settings['document_id_namespace'] = entered_namespace or current_namespace
+    else:
+        settings['document_id_strategy'] = 'legacy'
+        settings['document_id_namespace'] = None
     settings['split_paragraphs'] = prompt_for_boolean_setting(
         "Split markdown content into paragraphs?",
         settings['split_paragraphs'],
@@ -216,7 +260,70 @@ def prompt_for_indexing_settings(args):
         settings['extract_start'] = None
         settings['extract_end'] = None
 
+    settings['document_id_strategy'], settings['document_id_namespace'] = validate_document_identity_settings(
+        settings['document_id_strategy'],
+        settings['document_id_namespace'],
+    )
+
     return settings
+
+
+def prompt_for_indexing_settings(args):
+    """Collect indexing settings before starting a potentially long indexing job."""
+    return _prompt_for_document_settings(
+        args,
+        include_skip_existing=True,
+        heading="Review indexing settings before starting.",
+    )
+
+
+def prompt_for_reindex_settings(args):
+    """Collect reindex settings before starting a file or folder update."""
+    return _prompt_for_document_settings(
+        args,
+        include_skip_existing=False,
+        heading="Review reindex settings before starting.",
+    )
+
+
+def default_indexing_settings(args):
+    """Build the default indexing settings dictionary from parsed CLI args."""
+    return {
+        'chunk_documents': args.chunk_documents,
+        'skip_existing': args.skip_existing,
+        'document_id_strategy': args.document_id_strategy,
+        'document_id_namespace': args.document_id_namespace,
+        'split_paragraphs': args.split_paragraphs,
+        'add_summary': args.add_summary,
+        'store_full_docs': args.store_full_docs,
+        'extract_start': args.extract_start,
+        'extract_end': args.extract_end,
+    }
+
+
+def resolve_indexing_settings(args):
+    """Resolve indexing settings once for the current run."""
+    indexing_settings = default_indexing_settings(args)
+
+    if state.interactive_mode and sys.stdin.isatty():
+        review_settings = prompt_for_boolean_setting(
+            "Review indexing settings before starting?",
+            True,
+        )
+        if review_settings:
+            indexing_settings = prompt_for_indexing_settings(args)
+
+    indexing_settings['document_id_strategy'], indexing_settings['document_id_namespace'] = validate_document_identity_settings(
+        indexing_settings['document_id_strategy'],
+        indexing_settings['document_id_namespace'],
+    )
+    return indexing_settings
+
+
+def resolve_reindex_target_path(user_input):
+    """Extract a /reindex target path from the command without prompting."""
+    target_path = user_input.split("/reindex", 1)[1].strip()
+    return target_path.strip().strip('"').strip("'")
 
 
 def collect_multiline_input(user_input):
@@ -518,6 +625,9 @@ def initialize(args, mod):
             on_print(f"Collection: {state.current_collection_name}", Fore.WHITE + Style.DIM)
             on_print(f"Chunking: {args.chunk_documents}", Fore.WHITE + Style.DIM)
             on_print(f"Skip existing: {args.skip_existing}", Fore.WHITE + Style.DIM)
+            on_print(f"Document ID strategy: {args.document_id_strategy}", Fore.WHITE + Style.DIM)
+            if args.document_id_namespace:
+                on_print(f"Document ID namespace: {args.document_id_namespace}", Fore.WHITE + Style.DIM)
             if args.extract_start or args.extract_end:
                 on_print(f"Extraction range: '{args.extract_start}' to '{args.extract_end}'", Fore.WHITE + Style.DIM)
             on_print(f"Split paragraphs: {args.split_paragraphs}", Fore.WHITE + Style.DIM)
@@ -533,33 +643,24 @@ def initialize(args, mod):
             summary_model=state.current_model
         )
 
-        indexing_settings = {
-            'chunk_documents': args.chunk_documents,
-            'skip_existing': args.skip_existing,
-            'split_paragraphs': args.split_paragraphs,
-            'add_summary': args.add_summary,
-            'store_full_docs': args.store_full_docs,
-            'extract_start': args.extract_start,
-            'extract_end': args.extract_end,
-        }
-        if state.interactive_mode and sys.stdin.isatty():
-            review_settings = prompt_for_boolean_setting(
-                "Review indexing settings before starting?",
-                True,
-            )
-            if review_settings:
-                indexing_settings = prompt_for_indexing_settings(args)
+        try:
+            indexing_settings = resolve_indexing_settings(args)
+        except ValueError as error:
+            on_print(str(error), Fore.RED)
+            sys.exit(2)
 
         document_indexer.index_documents(
             allow_chunks=indexing_settings['chunk_documents'],
-            no_chunking_confirmation=True,  # Non-interactive mode
+            no_chunking_confirmation=True,
             split_paragraphs=indexing_settings['split_paragraphs'],
             num_ctx=num_ctx,
             skip_existing=indexing_settings['skip_existing'],
             extract_start=indexing_settings['extract_start'],
             extract_end=indexing_settings['extract_end'],
             add_summary=indexing_settings['add_summary'],
-            store_full_docs=indexing_settings['store_full_docs']
+            store_full_docs=indexing_settings['store_full_docs'],
+            document_id_strategy=indexing_settings['document_id_strategy'],
+            document_id_namespace=indexing_settings['document_id_namespace'],
         )
 
         on_print(f"Indexing completed for folder: {args.index_documents}", Fore.GREEN)
@@ -1196,6 +1297,97 @@ def main_loop(ctx, mod):
                         break
             continue
 
+        if user_input.startswith("/reindex"):
+            if not state.chroma_client:
+                on_print("ChromaDB client not initialized.", Fore.RED)
+                continue
+
+            load_chroma_client()
+
+            if not state.current_collection_name:
+                on_print("No ChromaDB collection loaded.", Fore.RED)
+
+                collection_name, collection_description = prompt_for_vector_database_collection()
+                set_current_collection(collection_name, collection_description, verbose=state.verbose_mode)
+
+            reindex_target = resolve_reindex_target_path(user_input)
+            if not reindex_target:
+                on_print("Specify a local file or folder path to reindex.", Fore.RED)
+                continue
+            if reindex_target.startswith("http"):
+                on_print("/reindex only supports local files or folders.", Fore.RED)
+                continue
+
+            reindex_target = os.path.abspath(os.path.expanduser(reindex_target))
+            if not os.path.exists(reindex_target):
+                on_print(f"Path not found: {reindex_target}", Fore.RED)
+                continue
+
+            indexer_root = reindex_target if os.path.isdir(reindex_target) else os.path.dirname(reindex_target)
+            document_indexer = mod.DocumentIndexer(
+                indexer_root,
+                state.current_collection_name,
+                state.chroma_client,
+                state.embeddings_model,
+                verbose=state.verbose_mode,
+                summary_model=state.current_model,
+            )
+
+            reindex_args = argparse.Namespace(
+                chunk_documents=True,
+                skip_existing=False,
+                document_id_strategy='legacy',
+                document_id_namespace=None,
+                split_paragraphs=False,
+                add_summary=True,
+                store_full_docs=False,
+                extract_start=None,
+                extract_end=None,
+            )
+
+            reindex_settings = {
+                'chunk_documents': reindex_args.chunk_documents,
+                'skip_existing': False,
+                'document_id_strategy': reindex_args.document_id_strategy,
+                'document_id_namespace': reindex_args.document_id_namespace,
+                'split_paragraphs': reindex_args.split_paragraphs,
+                'add_summary': reindex_args.add_summary,
+                'store_full_docs': reindex_args.store_full_docs,
+                'extract_start': reindex_args.extract_start,
+                'extract_end': reindex_args.extract_end,
+            }
+
+            try:
+                reindex_settings['document_id_strategy'], reindex_settings['document_id_namespace'] = validate_document_identity_settings(
+                    reindex_settings['document_id_strategy'],
+                    reindex_settings['document_id_namespace'],
+                )
+                result = document_indexer.reindex_path(
+                    reindex_target,
+                    allow_chunks=reindex_settings['chunk_documents'],
+                    no_chunking_confirmation=True,
+                    split_paragraphs=reindex_settings['split_paragraphs'],
+                    num_ctx=num_ctx,
+                    extract_start=reindex_settings['extract_start'],
+                    extract_end=reindex_settings['extract_end'],
+                    add_summary=reindex_settings['add_summary'],
+                    store_full_docs=reindex_settings['store_full_docs'],
+                    document_id_strategy=reindex_settings['document_id_strategy'],
+                    document_id_namespace=reindex_settings['document_id_namespace'],
+                )
+            except (FileNotFoundError, ValueError) as error:
+                on_print(str(error), Fore.RED)
+                continue
+
+            if result['processed'] == 0:
+                on_print(f"No supported files found under: {reindex_target}", Fore.YELLOW)
+            else:
+                on_print(
+                    f"Reindex complete: {result['processed']} processed, {result['updated']} updated, {result['added']} added, {result['errors']} errors.",
+                    Fore.GREEN if result['errors'] == 0 else Fore.YELLOW,
+                )
+            continue
+
         if "/index" in user_input:
             if not state.chroma_client:
                 on_print("ChromaDB client not initialized.", Fore.RED)
@@ -1219,7 +1411,29 @@ def main_loop(ctx, mod):
                 folder_to_index = temp_folder
 
             document_indexer = mod.DocumentIndexer(folder_to_index, state.current_collection_name, state.chroma_client, state.embeddings_model, verbose=state.verbose_mode, summary_model=state.current_model)
-            document_indexer.index_documents(num_ctx=num_ctx)
+            try:
+                indexing_settings = resolve_indexing_settings(args)
+            except ValueError as error:
+                on_print(str(error), Fore.RED)
+                if temp_folder:
+                    for file in os.listdir(temp_folder):
+                        os.remove(os.path.join(temp_folder, file))
+                    os.rmdir(temp_folder)
+                continue
+
+            document_indexer.index_documents(
+                allow_chunks=indexing_settings['chunk_documents'],
+                no_chunking_confirmation=True,
+                split_paragraphs=indexing_settings['split_paragraphs'],
+                num_ctx=num_ctx,
+                skip_existing=indexing_settings['skip_existing'],
+                extract_start=indexing_settings['extract_start'],
+                extract_end=indexing_settings['extract_end'],
+                add_summary=indexing_settings['add_summary'],
+                store_full_docs=indexing_settings['store_full_docs'],
+                document_id_strategy=indexing_settings['document_id_strategy'],
+                document_id_namespace=indexing_settings['document_id_namespace'],
+            )
 
             if temp_folder:
                 # Remove the temporary folder and its contents

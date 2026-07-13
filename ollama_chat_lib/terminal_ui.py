@@ -35,6 +35,7 @@ _COMMAND_GROUPS = [
             ("/web", "Search the web and answer with sources."),
             ("/collection", "Switch the active vector collection."),
             ("/index", "Index a folder or crawled site into the vector store."),
+            ("/reindex", "Reindex a local file or folder subtree into the vector store."),
             ("/rmcollection", "Delete a vector collection by name."),
             ("/deletecollection", "Alias for deleting a vector collection."),
             ("/editcollection", "Edit collection metadata."),

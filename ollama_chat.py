@@ -12,7 +12,19 @@ import platform
 import tempfile
 from colorama import Fore, Style
 import chromadb
-import readline
+try:
+    import readline
+except ModuleNotFoundError:
+    class _ReadlineFallback:
+        @staticmethod
+        def set_completer(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def parse_and_bind(*args, **kwargs):
+            return None
+
+    readline = _ReadlineFallback()
 import base64
 import getpass
 import math

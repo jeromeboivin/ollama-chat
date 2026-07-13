@@ -196,7 +196,7 @@ class SimpleWebScraper:
             local_path = os.path.join(local_path, "index.md" if markdown else "index.html")
         elif markdown:
             local_path = os.path.splitext(local_path)[0] + ".md"
-        return local_path
+        return os.path.normpath(local_path)
 
     def _normalize_url(self, url):
         parsed = urlparse(url)

@@ -35,7 +35,7 @@ class TestCLIFlags:
 
     def test_commands_list_completeness(self):
         """COMMANDS should include all documented slash commands."""
-        expected = {"/help", "/context", "/index", "/verbose", "/search", "/web",
+        expected = {"/help", "/context", "/index", "/reindex", "/verbose", "/search", "/web",
                     "/model", "/tools", "/load", "/save", "/quit", "/exit",
                     "/bye", "/collection", "/memory", "/remember", "/think"}
         assert expected.issubset(set(oc.COMMANDS))
@@ -71,15 +71,19 @@ class TestCLIFlags:
 
 class TestIndexingPrompts:
 
-    def test_prompt_for_boolean_setting_keeps_default_on_empty_input(self):
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_boolean_setting_keeps_default_on_empty_input(self, mock_available):
         with patch("ollama_chat_lib.run_helpers.on_user_input", return_value=""):
             assert run_helpers.prompt_for_boolean_setting("Chunk large documents?", True) is True
             assert run_helpers.prompt_for_boolean_setting("Chunk large documents?", False) is False
 
-    def test_prompt_for_indexing_settings_collects_preflight_answers(self):
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_indexing_settings_collects_preflight_answers(self, mock_available):
         args = SimpleNamespace(
             chunk_documents=True,
             skip_existing=True,
+            document_id_strategy="legacy",
+            document_id_namespace=None,
             split_paragraphs=False,
             add_summary=True,
             store_full_docs=False,
@@ -89,17 +93,188 @@ class TestIndexingPrompts:
 
         with patch(
             "ollama_chat_lib.run_helpers.on_user_input",
-            side_effect=["n", "n", "y", "n", "y", "## Main Code", ""],
+            side_effect=["n", "n", "n", "y", "n", "y", "## Main Code", ""],
         ), patch("ollama_chat_lib.run_helpers.on_print"):
             settings = run_helpers.prompt_for_indexing_settings(args)
 
         assert settings["chunk_documents"] is False
         assert settings["skip_existing"] is False
+        assert settings["document_id_strategy"] == "legacy"
+        assert settings["document_id_namespace"] is None
         assert settings["split_paragraphs"] is True
         assert settings["add_summary"] is False
         assert settings["store_full_docs"] is False
         assert settings["extract_start"] == "## Main Code"
         assert settings["extract_end"] is None
+
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_indexing_settings_collects_collision_safe_namespace(self, mock_available):
+        args = SimpleNamespace(
+            chunk_documents=False,
+            skip_existing=True,
+            document_id_strategy="collision-safe",
+            document_id_namespace="existing-namespace",
+            split_paragraphs=False,
+            add_summary=False,
+            store_full_docs=False,
+            extract_start=None,
+            extract_end=None,
+        )
+
+        with patch(
+            "ollama_chat_lib.run_helpers.on_user_input",
+            side_effect=["n", "y", "y", "", "n", "n", "n"],
+        ), patch("ollama_chat_lib.run_helpers.on_print"):
+            settings = run_helpers.prompt_for_indexing_settings(args)
+
+        assert settings["document_id_strategy"] == "collision-safe"
+        assert settings["document_id_namespace"] == "existing-namespace"
+
+    @patch("ollama_chat_lib.terminal_ui.enhanced_prompt_available", return_value=False)
+    def test_prompt_for_reindex_settings_omits_skip_existing_prompt(self, mock_available):
+        args = SimpleNamespace(
+            chunk_documents=False,
+            skip_existing=True,
+            document_id_strategy="legacy",
+            document_id_namespace=None,
+            split_paragraphs=False,
+            add_summary=True,
+            store_full_docs=False,
+            extract_start=None,
+            extract_end=None,
+        )
+
+        with patch(
+            "ollama_chat_lib.run_helpers.on_user_input",
+            side_effect=["n", "y", "dataset", "n", "n", "n"],
+        ), patch("ollama_chat_lib.run_helpers.on_print"):
+            settings = run_helpers.prompt_for_reindex_settings(args)
+
+        assert settings["skip_existing"] is False
+        assert settings["chunk_documents"] is False
+        assert settings["document_id_strategy"] == "collision-safe"
+        assert settings["document_id_namespace"] == "dataset"
+        assert settings["split_paragraphs"] is False
+        assert settings["add_summary"] is False
+
+    def test_resolve_reindex_target_path_reads_inline_path(self):
+        with patch("ollama_chat_lib.run_helpers.on_user_input") as mock_input:
+            result = run_helpers.resolve_reindex_target_path('/reindex "C:/docs/subset"')
+
+        assert result == "C:/docs/subset"
+        mock_input.assert_not_called()
+
+    def test_resolve_reindex_target_path_returns_empty_when_missing(self):
+        with patch("ollama_chat_lib.run_helpers.on_user_input") as mock_input:
+            result = run_helpers.resolve_reindex_target_path("/reindex")
+
+        assert result == ""
+        mock_input.assert_not_called()
+
+    def test_validate_document_identity_settings(self):
+        assert run_helpers.validate_document_identity_settings("legacy", None) == ("legacy", None)
+        assert run_helpers.validate_document_identity_settings("collision-safe", " dataset ") == (
+            "collision-safe",
+            "dataset",
+        )
+        with pytest.raises(ValueError, match="document-id-namespace"):
+            run_helpers.validate_document_identity_settings("collision-safe", "")
+
+    def test_default_indexing_settings_uses_args_values(self):
+        args = SimpleNamespace(
+            chunk_documents=False,
+            skip_existing=False,
+            document_id_strategy="legacy",
+            document_id_namespace=None,
+            split_paragraphs=True,
+            add_summary=False,
+            store_full_docs=True,
+            extract_start="## Main Code",
+            extract_end=None,
+        )
+
+        settings = run_helpers.default_indexing_settings(args)
+
+        assert settings == {
+            "chunk_documents": False,
+            "skip_existing": False,
+            "document_id_strategy": "legacy",
+            "document_id_namespace": None,
+            "split_paragraphs": True,
+            "add_summary": False,
+            "store_full_docs": True,
+            "extract_start": "## Main Code",
+            "extract_end": None,
+        }
+
+    def test_resolve_indexing_settings_uses_defaults_when_not_interactive(self):
+        args = SimpleNamespace(
+            chunk_documents=False,
+            skip_existing=False,
+            document_id_strategy="legacy",
+            document_id_namespace=None,
+            split_paragraphs=True,
+            add_summary=False,
+            store_full_docs=True,
+            extract_start="## Main Code",
+            extract_end=None,
+        )
+
+        with patch("ollama_chat_lib.run_helpers.state.interactive_mode", False), \
+             patch("ollama_chat_lib.run_helpers.sys.stdin.isatty", return_value=True), \
+             patch("ollama_chat_lib.run_helpers.prompt_for_indexing_settings") as mock_prompt:
+            settings = run_helpers.resolve_indexing_settings(args)
+
+        assert settings["extract_start"] == "## Main Code"
+        mock_prompt.assert_not_called()
+
+    def test_resolve_indexing_settings_reviews_once_in_interactive_mode(self):
+        args = SimpleNamespace(
+            chunk_documents=True,
+            skip_existing=True,
+            document_id_strategy="legacy",
+            document_id_namespace=None,
+            split_paragraphs=False,
+            add_summary=True,
+            store_full_docs=False,
+            extract_start=None,
+            extract_end=None,
+        )
+        reviewed_settings = {
+            "chunk_documents": False,
+            "skip_existing": False,
+            "document_id_strategy": "legacy",
+            "document_id_namespace": None,
+            "split_paragraphs": True,
+            "add_summary": False,
+            "store_full_docs": False,
+            "extract_start": "## Main Code",
+            "extract_end": None,
+        }
+
+        with patch("ollama_chat_lib.run_helpers.state.interactive_mode", True), \
+             patch("ollama_chat_lib.run_helpers.sys.stdin.isatty", return_value=True), \
+             patch("ollama_chat_lib.run_helpers.prompt_for_boolean_setting", return_value=True), \
+             patch("ollama_chat_lib.run_helpers.prompt_for_indexing_settings", return_value=reviewed_settings) as mock_prompt:
+            settings = run_helpers.resolve_indexing_settings(args)
+
+        assert settings == reviewed_settings
+        mock_prompt.assert_called_once_with(args)
+
+    def test_document_identity_cli_defaults_and_options(self):
+        with patch.object(sys, "argv", ["ollama_chat.py"]):
+            args = run_helpers.parse_args()
+        assert args.document_id_strategy == "legacy"
+        assert args.document_id_namespace is None
+
+        with patch.object(sys, "argv", [
+            "ollama_chat.py",
+            "--document-id-strategy", "collision-safe",
+            "--document-id-namespace", "rd-cases",
+        ]):
+            args = run_helpers.parse_args()
+        assert args.document_id_strategy == "collision-safe"
+        assert args.document_id_namespace == "rd-cases"
 
 
 class TestCollectMultilineInput:
@@ -137,6 +312,7 @@ class TestEnhancedPromptHelpers:
         commands = oc.command_catalog()
         assert any(entry["group"] == "Chat" and entry["command"] == "/model" for entry in commands)
         assert any(entry["group"] == "Context and Retrieval" and entry["command"] == "/search" for entry in commands)
+        assert any(entry["group"] == "Context and Retrieval" and entry["command"] == "/reindex" for entry in commands)
         assert any(entry["group"] == "Workspace and Session" and entry["command"] == "/save" for entry in commands)
 
     def test_find_matching_commands_supports_fuzzy_search(self):

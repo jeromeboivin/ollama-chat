@@ -103,3 +103,9 @@ def handling_plugin():
             return "intercepted"
 
     return _HandlingPlugin()
+
+
+@pytest.fixture(autouse=True)
+def disable_enhanced_prompts(monkeypatch):
+    """Keep tests on the plain input path unless they explicitly opt into prompt-toolkit behavior."""
+    monkeypatch.setattr("ollama_chat_lib.terminal_ui.enhanced_prompt_available", lambda: False)

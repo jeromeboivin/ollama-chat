@@ -1,4 +1,5 @@
 """Tests for SimpleWebCrawler."""
+import os
 import pytest
 from unittest.mock import patch, MagicMock
 import ollama_chat as oc
@@ -111,7 +112,7 @@ class TestSimpleWebScraper:
         scraper = oc.SimpleWebScraper("http://example.com", output_dir="/out")
         path = scraper._get_local_path("http://example.com/page.html")
         assert path.endswith("page.html")
-        assert "/out/" in path
+        assert path == os.path.normpath(os.path.join("/out", "example.com", "page.html"))
 
     def test_get_local_path_index(self):
         scraper = oc.SimpleWebScraper("http://example.com", output_dir="/out")

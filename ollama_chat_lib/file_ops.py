@@ -1,6 +1,6 @@
 """File and command operations — read, create, delete files; expand env vars; run shell commands."""
 import os
-import shlex
+import shutil
 import subprocess
 from typing import Tuple
 
@@ -103,10 +103,31 @@ def expand_env_vars(command: str) -> str:
     return os.path.expandvars(command)
 
 
+def _shell_command_args(command: str):
+    if os.name == "nt":
+        for shell_name in ("pwsh", "powershell"):
+            shell_path = shutil.which(shell_name)
+            if shell_path:
+                return [shell_path, "-NoProfile", "-NonInteractive", "-Command", command]
+
+        comspec = os.environ.get("ComSpec") or shutil.which("cmd.exe") or shutil.which("cmd")
+        if comspec:
+            return [comspec, "/d", "/s", "/c", command]
+
+        raise FileNotFoundError("No Windows shell is available to execute commands.")
+
+    shell_path = os.environ.get("SHELL")
+    if shell_path and os.path.exists(shell_path):
+        return [shell_path, "-lc", command]
+
+    shell_path = shutil.which("sh") or "/bin/sh"
+    return [shell_path, "-lc", command]
+
+
 def run_command(command: str) -> Tuple[str, str]:
     command = expand_env_vars(command)
     result = subprocess.run(
-        shlex.split(command),
+        _shell_command_args(command),
         capture_output=True,
         text=True
     )

@@ -118,6 +118,33 @@ python ollama_chat.py \
   --interactive=False
 ```
 
+### Index Documents with Duplicate Filenames
+
+The legacy document ID is based on the filename, so files such as
+`first/RD00007608.txt` and `second/RD00007608.txt` would otherwise share the
+ID `RD00007608`. Use collision-safe IDs when one collection must contain both:
+
+```bash
+python ollama_chat.py \
+    --index-documents /path/to/rd-cases \
+    --collection my_docs \
+    --embeddings-model mxbai-embed-large \
+    --document-id-strategy collision-safe \
+    --document-id-namespace rd-cases-2026 \
+    --interactive=False
+```
+
+Choose a stable namespace for the dataset and reuse it on later runs. Identity
+is derived from that namespace plus each file's root-relative path, so moving
+the dataset root does not create new IDs. Existing legacy records are not
+migrated or deleted: their original ID is retained when it belongs to the same
+source, while a different source with the same filename receives a deterministic
+hash suffix.
+
+Keep `--skip-existing` enabled. `--no-skip-existing` is not a duplicate-file
+workaround: ChromaDB `upsert` reuses the colliding ID and can replace the
+existing record.
+
 ### Query Documents from Command Line
 ```bash
 # Basic query
@@ -187,6 +214,8 @@ Here's a step-by-step guide on how to use it:
     - **Advanced indexing options** (see [RAG CLI Usage Guide](RAG_CLI_USAGE.md) for details):
       - `--chunk-documents`: Enable/disable document chunking (default: enabled)
       - `--skip-existing`: Skip documents already in collection (default: enabled)
+            - `--document-id-strategy <legacy|collision-safe>`: Select filename-based IDs or safely disambiguate duplicate filenames
+            - `--document-id-namespace <name>`: Stable dataset name required by `collision-safe`
       - `--extract-start <text>`: Start marker for extracting specific document sections
       - `--extract-end <text>`: End marker for extracting specific document sections
       - `--split-paragraphs`: Split Markdown content into paragraphs

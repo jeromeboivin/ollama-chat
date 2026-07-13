@@ -115,5 +115,5 @@ class TestRunCommand:
         assert "hello" in stdout
 
     def test_failing_command(self, reset_globals):
-        stdout, stderr = oc.run_command("ls /nonexistent_dir_abc123")
+        stdout, stderr = oc.run_command("command_that_should_not_exist_abc123")
         assert stderr  # should have error output
