@@ -841,3 +841,157 @@ def instantiate_agent_with_tools_and_process_task(task: str, system_prompt: str,
         return result
 
     return agent
+
+
+# ---------------------------------------------------------------------------
+# Coding agent delegation functions
+# ---------------------------------------------------------------------------
+
+def delegate_coding_task(task: str, context_files: list = None, *, ask_fn, model: str = None, load_chroma_client_fn=None) -> str:
+    """Delegate a coding task to a worker sub-agent with restricted tools.
+    
+    Args:
+        task: Description of the coding task
+        context_files: List of file paths to provide as context
+        ask_fn: LLM call function
+        model: Model to use (defaults to state.worker_model)
+        load_chroma_client_fn: Function to load ChromaDB client
+        
+    Returns:
+        Structured result from the worker agent
+    """
+    from ollama_chat_lib.agent import Agent
+    from ollama_chat_lib.tools import get_available_tools, get_coding_worker_tool_names
+    from ollama_chat_lib import state
+    import json
+    
+    worker_model = model or state.worker_model
+    
+    # Build context from files
+    context = ""
+    if context_files:
+        from ollama_chat_lib.file_ops import read_file
+        for file_path in context_files:
+            try:
+                content = read_file(file_path)
+                context += f"\n--- {file_path} ---\n{content}\n"
+            except Exception as e:
+                context += f"\n--- {file_path} ---\n[Error reading file: {e}]\n"
+    
+    # Prepare system prompt for coding worker
+    system_prompt = f"""You are a coding worker agent. Your job is to implement the task described below.
+
+You have access to file editing tools (read_file, create_file, edit_file, apply_patch, delete_file), 
+command execution (run_command), and code navigation tools (list_directory, glob_files, search_code).
+
+Guidelines:
+- Make minimal, focused changes
+- Follow existing code style and patterns
+- Run tests/lints after changes if applicable
+- Return a clear summary of what you did
+
+Task: {task}
+
+Context files:
+{context if context else "(none provided)"}
+"""
+    
+    # Get coding worker tools
+    load_chroma_client_fn = load_chroma_client_fn or (lambda: None)
+    all_tools = get_available_tools(load_chroma_client_fn)
+    worker_tool_names = get_coding_worker_tool_names()
+    agent_tools = [t for t in all_tools if t['function']['name'] in worker_tool_names]
+    
+    # Create and run worker agent
+    agent = Agent(
+        name="coding-worker",
+        description="Coding implementation worker",
+        model=worker_model,
+        thinking_model=None,
+        system_prompt=system_prompt,
+        temperature=0.2,
+        tools=agent_tools,
+        verbose=state.verbose_mode,
+        thinking_model_reasoning_pattern=state.thinking_model_reasoning_pattern
+    )
+    
+    try:
+        result = agent.process_task(task, return_intermediate_results=True)
+        return f"Worker completed task.\n\nResult:\n{result}"
+    except Exception as e:
+        return f"Worker error: {e}"
+
+
+def delegate_code_review(task: str, context_files: list = None, *, ask_fn, model: str = None, load_chroma_client_fn=None) -> str:
+    """Delegate a code review task to a reviewer sub-agent with read-only tools.
+    
+    Args:
+        task: Description of the review task
+        context_files: List of file paths to review
+        ask_fn: LLM call function
+        model: Model to use (defaults to state.review_model)
+        load_chroma_client_fn: Function to load ChromaDB client
+        
+    Returns:
+        Structured review result from the reviewer agent
+    """
+    from ollama_chat_lib.agent import Agent
+    from ollama_chat_lib.tools import get_available_tools, get_review_tool_names
+    from ollama_chat_lib import state
+    
+    review_model = model or state.review_model
+    
+    # Build context from files
+    context = ""
+    if context_files:
+        from ollama_chat_lib.file_ops import read_file
+        for file_path in context_files:
+            try:
+                content = read_file(file_path)
+                context += f"\n--- {file_path} ---\n{content}\n"
+            except Exception as e:
+                context += f"\n--- {file_path} ---\n[Error reading file: {e}]\n"
+    
+    # Prepare system prompt for code reviewer
+    system_prompt = f"""You are a code review agent. Your job is to review the code changes described below.
+
+You have read-only access to files (read_file, list_directory, glob_files, search_code) and can run 
+test/lint commands via run_command (restricted to safe commands).
+
+Guidelines:
+- Focus on correctness, security, performance, and maintainability
+- Check for bugs, edge cases, and potential issues
+- Verify tests exist and pass
+- Provide actionable feedback with specific file/line references
+- Rate the changes: APPROVE / REQUEST_CHANGES / COMMENT
+
+Task: {task}
+
+Files to review:
+{context if context else "(none provided - review recent changes)"}
+"""
+    
+    # Get review tools
+    load_chroma_client_fn = load_chroma_client_fn or (lambda: None)
+    all_tools = get_available_tools(load_chroma_client_fn)
+    review_tool_names = get_review_tool_names()
+    agent_tools = [t for t in all_tools if t['function']['name'] in review_tool_names]
+    
+    # Create and run reviewer agent
+    agent = Agent(
+        name="code-reviewer",
+        description="Code review agent",
+        model=review_model,
+        thinking_model=None,
+        system_prompt=system_prompt,
+        temperature=0.1,
+        tools=agent_tools,
+        verbose=state.verbose_mode,
+        thinking_model_reasoning_pattern=state.thinking_model_reasoning_pattern
+    )
+    
+    try:
+        result = agent.process_task(task, return_intermediate_results=True)
+        return f"Review completed.\n\nResult:\n{result}"
+    except Exception as e:
+        return f"Review error: {e}"

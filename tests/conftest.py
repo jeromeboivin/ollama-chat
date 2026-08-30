@@ -29,10 +29,11 @@ def _ensure_stubs():
 
 
 @pytest.fixture()
-def reset_globals():
+def reset_globals(tmp_path):
     """Reset module-level globals in ollama_chat that tests may mutate."""
     import ollama_chat as oc
     from ollama_chat_lib import state
+    from ollama_chat_lib.terminal import _global_terminal, _global_terminal_workspace
 
     saved = {}
     names = [
@@ -43,9 +44,20 @@ def reset_globals():
         "plugins_folder", "interactive_mode", "temperature",
         "session_created_files", "chroma_db_path",
         "chroma_client_host", "chroma_client_port",
+        "workspace_root", "worker_model", "review_model",
     ]
     for n in names:
         saved[n] = getattr(state, n, None)
+
+    # Reset global terminal
+    import ollama_chat_lib.terminal as term_module
+    if term_module._global_terminal:
+        term_module._global_terminal.close()
+    term_module._global_terminal = None
+    term_module._global_terminal_workspace = None
+
+    # Set workspace_root to temp path for file_ops tests
+    state.workspace_root = str(tmp_path)
 
     yield oc
 

@@ -1,11 +1,15 @@
 """Agent: task decomposition and execution with tool support."""
 
 import re
+import json
+from collections import Counter
+from typing import Optional, List, Dict, Any
 
 from colorama import Fore, Style
 
 from ollama_chat_lib.io_hooks import on_print
 from ollama_chat_lib.utils import render_tools
+from ollama_chat_lib import state
 
 
 def split_reasoning_and_final_response(response, thinking_model_reasoning_pattern):
@@ -30,9 +34,12 @@ class Agent:
     # Static registry to store all agents
     agent_registry = {}
 
-    def __init__(self, name, description, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=15, tools=None, verbose=False, num_ctx=None, thinking_model_reasoning_pattern=None, ask_fn=None):
+    def __init__(self, name, description, model, thinking_model=None, system_prompt=None, temperature=0.7, max_iterations=15, tools=None, verbose=False, num_ctx=None, thinking_model_reasoning_pattern=None, ask_fn=None, workspace_root: Optional[str] = None):
         """
         Initialize the Agent with a name, system prompt, tools, and other parameters.
+        
+        Args:
+            workspace_root: Root directory for workspace confinement (paths are resolved relative to this)
         """
         self.name = name
         self.description = description
@@ -46,11 +53,16 @@ class Agent:
         self.thinking_model = thinking_model or model
         self.thinking_model_reasoning_pattern = thinking_model_reasoning_pattern
         self._ask_fn = ask_fn
+        self.workspace_root = workspace_root
 
         # State management variables for the TODO list
         self.todo_list = []
         self.completed_tasks = []
         self.task_results = {}
+
+        # Loop/stall detection
+        self._tool_call_history: List[tuple] = []  # (tool_name, args_hash)
+        self._stall_threshold = 3  # Same tool+args N times without state change
 
         # Register this agent in the global agent registry
         Agent.agent_registry[name] = self
@@ -192,6 +204,13 @@ Based on the context of the completed tasks and the remaining plan, provide a re
         # Execute the subtask with available tools
         result = self.query_llm(prompt, system_prompt=self.system_prompt, tools=self.tools)
         
+        # Record tool calls for stall detection (if result contains tool calls)
+        # This is a best-effort detection
+        if isinstance(result, list):
+            for tool_call in result:
+                if isinstance(tool_call, dict) and 'function' in tool_call:
+                    self.record_tool_call(tool_call['function'].get('name', ''), tool_call['function'].get('arguments', {}))
+        
         return result
 
     def process_task(self, task, return_intermediate_results=False):
@@ -204,6 +223,7 @@ Based on the context of the completed tasks and the remaining plan, provide a re
             self.todo_list = self.decompose_task(task)
             self.completed_tasks = []
             self.task_results = {}
+            self._tool_call_history = []
             
             if self.verbose:
                 on_print(f"Initial TODO list: {self.todo_list}", Fore.WHITE + Style.DIM)
@@ -213,6 +233,8 @@ Based on the context of the completed tasks and the remaining plan, provide a re
 
             # Use a while loop to process the dynamic TODO list
             iteration_count = 0
+            last_state_hash = None
+            
             while self.todo_list and iteration_count < self.max_iterations:
                 # Get the next subtask to execute
                 current_subtask = self.todo_list.pop(0)
@@ -232,19 +254,83 @@ Based on the context of the completed tasks and the remaining plan, provide a re
                     self.task_results[current_subtask] = result
 
                 iteration_count += 1
+                
+                # Loop/stall detection: check if state has changed
+                current_state = (tuple(self.completed_tasks), tuple(self.todo_list))
+                current_state_hash = hash(current_state)
+                
+                if last_state_hash is not None and current_state_hash == last_state_hash:
+                    # State hasn't changed - check tool call history
+                    if len(self._tool_call_history) >= self._stall_threshold:
+                        recent = self._tool_call_history[-self._stall_threshold:]
+                        # Check if all recent calls are identical
+                        if all(call == recent[0] for call in recent):
+                            if self.verbose:
+                                on_print(f"Stall detected: same tool call repeated {self._stall_threshold} times without progress. Breaking.", Fore.YELLOW)
+                            break
+                else:
+                    last_state_hash = current_state_hash
+
                 if self.verbose:
                     on_print(f"Finished iteration {iteration_count}. Remaining tasks: {len(self.todo_list)}", Fore.WHITE + Style.DIM)
 
+            # Fallback checkpoint: auto-commit if we made changes
+            self._maybe_auto_commit()
 
             # Consolidate final response from all stored results
             final_response = "\n\n".join(self.task_results.values())
             
             if return_intermediate_results:
-                # The concept of "intermediate versions" changes slightly.
-                # Here we return just the final consolidated result in a list.
                 return [final_response] 
             else:
                 return final_response
 
         except Exception as e:
             return f"Error during task processing: {str(e)}"
+    
+    def _maybe_auto_commit(self):
+        """Auto-commit changes via git if the model forgot to."""
+        if not self.workspace_root:
+            return
+        
+        try:
+            import subprocess
+            # Check if there are uncommitted changes
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=self.workspace_root,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.stdout.strip():
+                # There are changes - commit them
+                commit_msg = f"agent: auto-checkpoint after {self.name} task"
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=self.workspace_root,
+                    capture_output=True,
+                    timeout=5
+                )
+                subprocess.run(
+                    ["git", "commit", "--no-verify", "-m", commit_msg],
+                    cwd=self.workspace_root,
+                    capture_output=True,
+                    timeout=5
+                )
+                if self.verbose:
+                    on_print(f"Auto-committed changes: {commit_msg}", Fore.GREEN + Style.DIM)
+        except Exception:
+            pass  # Silently ignore - git might not be available or not a repo
+    
+    def record_tool_call(self, tool_name: str, args: Dict[str, Any]):
+        """Record a tool call for stall detection."""
+        # Create a hashable representation of args
+        args_str = json.dumps(args, sort_keys=True, default=str)
+        args_hash = hash(args_str)
+        self._tool_call_history.append((tool_name, args_hash))
+        
+        # Keep history bounded
+        if len(self._tool_call_history) > 50:
+            self._tool_call_history = self._tool_call_history[-50:]

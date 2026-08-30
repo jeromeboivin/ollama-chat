@@ -305,6 +305,279 @@ def get_available_tools(load_chroma_client_fn):
                 "required": ["command"]
             }
         }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'edit_file',
+            'description': 'Edit a file by replacing a specific string with a new string. Uses exact string matching with unique-match enforcement and post-edit syntax checking.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to edit (relative to workspace root)"
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "The exact string to replace (must match uniquely unless replace_all=true)"
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": "The replacement string"
+                    },
+                    "expect_unique": {
+                        "type": "boolean",
+                        "description": "If true, fail if old_str doesn't match exactly once",
+                        "default": True
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "If true, replace all occurrences of old_str",
+                        "default": False
+                    }
+                },
+                "required": ["path", "old_str", "new_str"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'apply_patch',
+            'description': 'Apply a unified diff patch to a file for larger multi-hunk changes.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to patch (relative to workspace root)"
+                    },
+                    "unified_diff": {
+                        "type": "string",
+                        "description": "The unified diff format patch to apply"
+                    }
+                },
+                "required": ["path", "unified_diff"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'list_directory',
+            'description': 'List directory contents with optional recursive traversal and gitignore support.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path (relative to workspace root)",
+                        "default": "."
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Whether to list recursively",
+                        "default": False
+                    },
+                    "respect_gitignore": {
+                        "type": "boolean",
+                        "description": "Whether to respect .gitignore patterns",
+                        "default": True
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'glob_files',
+            'description': 'Find files matching a glob pattern.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.rs')"
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Root directory (relative to workspace root, default: workspace root)"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results",
+                        "default": 100
+                    }
+                },
+                "required": ["pattern"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'search_code',
+            'description': 'Search code using ripgrep (if available) or Python regex fallback.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (regex or literal string)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search (relative to workspace root)"
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "description": "Whether pattern is a regex",
+                        "default": True
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results",
+                        "default": 200
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": "Optional file glob pattern to filter (e.g., '*.py')"
+                    }
+                },
+                "required": ["pattern"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'todo_write',
+            'description': 'Write/replace the entire todo list for task planning.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "List of todo items. Each item should have: content (required), status (optional: pending/in_progress/completed/blocked/failed), id (optional, auto-generated)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "failed"]},
+                                "id": {"type": "string"}
+                            },
+                            "required": ["content"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'todo_read',
+            'description': 'Read the current todo list.',
+            'parameters': {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'todo_update',
+            'description': 'Update a todo item by ID.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "todo_id": {
+                        "type": "string",
+                        "description": "ID of the todo to update"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "New status (pending, in_progress, completed, blocked, failed)",
+                        "enum": ["pending", "in_progress", "completed", "blocked", "failed"]
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content"
+                    },
+                    "result": {
+                        "type": "string",
+                        "description": "Result of completion"
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "Error message if failed"
+                    }
+                },
+                "required": ["todo_id"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'delegate_coding_task',
+            'description': 'Delegate a coding task to a worker sub-agent. Returns structured result (not a transcript). Worker has full editing/execution tools but no delegation tools.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "task_description": {
+                        "type": "string",
+                        "description": "Description of the coding task to delegate"
+                    },
+                    "target_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific file(s)/path(s) the worker should focus on (limits blast radius)"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context for the worker (e.g., relevant code snippets, error messages, requirements)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use for the worker (defaults to configured worker model)"
+                    }
+                },
+                "required": ["task_description", "target_paths"]
+            }
+        }
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'delegate_code_review',
+            'description': 'Delegate a code review to a read-only reviewer sub-agent. Returns structured findings list with approval status.',
+            'parameters': {
+                "type": "object",
+                "properties": {
+                    "target_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "File(s)/path(s) to review"
+                    },
+                    "review_focus": {
+                        "type": "string",
+                        "description": "Specific focus for the review (e.g., 'security', 'performance', 'correctness', 'style')"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use for the reviewer (defaults to configured review model)"
+                    }
+                },
+                "required": ["target_paths"]
+            }
+        }
     }]
 
     # Find index of instantiate_agent_with_tools_and_process_task function
@@ -523,7 +796,72 @@ def get_builtin_tool_names():
         'retrieve_relevant_memory',
         'instantiate_agent_with_tools_and_process_task',
         'create_new_agent_with_tools',
-        'summarize_text_file'
+        'summarize_text_file',
+        # Coding agent tools
+        'read_file',
+        'create_file',
+        'delete_file',
+        'run_command',
+        'edit_file',
+        'apply_patch',
+        'list_directory',
+        'glob_files',
+        'search_code',
+        'todo_write',
+        'todo_read',
+        'todo_update',
+        'delegate_coding_task',
+        'delegate_code_review',
+    ]
+
+
+def get_orchestrator_tool_names():
+    """Tools available to the coding orchestrator (planner/delegator)."""
+    return [
+        'read_file',
+        'list_directory',
+        'glob_files',
+        'search_code',
+        'todo_write',
+        'todo_read',
+        'todo_update',
+        'delegate_coding_task',
+        'delegate_code_review',
+        'query_vector_database',
+        'retrieve_relevant_memory',
+        'web_search',
+    ]
+
+
+def get_coding_worker_tool_names():
+    """Tools available to coding worker sub-agents (implementers)."""
+    return [
+        'read_file',
+        'create_file',
+        'delete_file',
+        'edit_file',
+        'apply_patch',
+        'run_command',
+        'list_directory',
+        'glob_files',
+        'search_code',
+        'query_vector_database',
+        'retrieve_relevant_memory',
+        'web_search',
+    ]
+
+
+def get_review_tool_names():
+    """Tools available to code review sub-agents (read-only)."""
+    return [
+        'read_file',
+        'list_directory',
+        'glob_files',
+        'search_code',
+        'run_command',  # Restricted to test/lint commands via system prompt
+        'query_vector_database',
+        'retrieve_relevant_memory',
+        'web_search',
     ]
 
 
@@ -725,3 +1063,175 @@ def web_search(query=None, n_results=5, region="wt-wt", web_embedding_model=None
         return results, intermediate_data
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Coding agent tool implementations
+# ---------------------------------------------------------------------------
+
+def edit_file(path: str, old_str: str, new_str: str, *, ask_fn=None, model: str = None) -> str:
+    """Edit a file by replacing exact string matches.
+    
+    Args:
+        path: Path to the file to edit
+        old_str: Exact string to replace (must be unique in file)
+        new_str: Replacement string
+        ask_fn: Optional LLM call function for auto-revert on failure
+        model: Optional model name for tracking failures
+        
+    Returns:
+        Success message or error description
+    """
+    from ollama_chat_lib.code_tools import edit_file as code_edit_file
+    return code_edit_file(path, old_str, new_str, ask_fn=ask_fn, model=model)
+
+
+def apply_patch(patch: str, *, ask_fn=None, model: str = None) -> str:
+    """Apply a unified diff patch to files.
+    
+    Args:
+        patch: Unified diff format patch string
+        ask_fn: Optional LLM call function for auto-revert on failure
+        model: Optional model name for tracking failures
+        
+    Returns:
+        Success message or error description
+    """
+    from ollama_chat_lib.code_tools import apply_patch as code_apply_patch
+    return code_apply_patch(patch, ask_fn=ask_fn, model=model)
+
+
+def list_directory(path: str = ".", *, ask_fn=None) -> str:
+    """List directory contents with gitignore support.
+    
+    Args:
+        path: Directory path to list (relative to workspace root)
+        ask_fn: Optional LLM call function
+        
+    Returns:
+        Formatted directory listing
+    """
+    from ollama_chat_lib.code_tools import list_directory as code_list_directory
+    return code_list_directory(path)
+
+
+def glob_files(pattern: str, *, ask_fn=None) -> str:
+    """Find files matching a glob pattern.
+    
+    Args:
+        pattern: Glob pattern (e.g., "**/*.py")
+        ask_fn: Optional LLM call function
+        
+    Returns:
+        List of matching file paths
+    """
+    from ollama_chat_lib.code_tools import glob_files as code_glob_files
+    return code_glob_files(pattern)
+
+
+def search_code(pattern: str, path: str = ".", *, ask_fn=None) -> str:
+    """Search for code patterns using ripgrep or Python fallback.
+    
+    Args:
+        pattern: Regex pattern to search for
+        path: Directory to search in (relative to workspace root)
+        ask_fn: Optional LLM call function
+        
+    Returns:
+        Search results with file paths and line numbers
+    """
+    from ollama_chat_lib.code_tools import search_code as code_search_code
+    return code_search_code(pattern, path)
+
+
+def todo_write(todos: list, *, ask_fn=None) -> str:
+    """Write/replace the entire todo list.
+    
+    Args:
+        todos: List of todo items, each with 'content', 'status', 'priority'
+        ask_fn: Optional LLM call function
+        
+    Returns:
+        Confirmation message
+    """
+    from ollama_chat_lib.planning import get_todo_store
+    store = get_todo_store()
+    store.write(todos)
+    return f"Todo list updated with {len(todos)} items"
+
+
+def todo_read(*, ask_fn=None) -> str:
+    """Read the current todo list.
+    
+    Args:
+        ask_fn: Optional LLM call function
+        
+    Returns:
+        Formatted todo list
+    """
+    from ollama_chat_lib.planning import get_todo_store
+    store = get_todo_store()
+    return store.render_checklist()
+
+
+def todo_update(todo_id: str, content: str = None, status: str = None, priority: str = None, *, ask_fn=None) -> str:
+    """Update a specific todo item.
+    
+    Args:
+        todo_id: ID of the todo to update
+        content: New content (optional)
+        status: New status - 'pending', 'in_progress', 'completed' (optional)
+        priority: New priority - 'high', 'medium', 'low' (optional)
+        ask_fn: Optional LLM call function
+        
+    Returns:
+        Confirmation message
+    """
+    from ollama_chat_lib.planning import get_todo_store
+    store = get_todo_store()
+    store.update(todo_id, content=content, status=status, priority=priority)
+    return f"Todo {todo_id} updated"
+
+
+def delegate_coding_task(task: str, context_files: list = None, *, ask_fn=None, model: str = None) -> str:
+    """Delegate a coding task to a worker sub-agent.
+    
+    Args:
+        task: Description of the coding task
+        context_files: List of file paths to provide as context
+        ask_fn: LLM call function (required)
+        model: Model to use (defaults to state.worker_model)
+        
+    Returns:
+        Structured result from the worker agent
+    """
+    from ollama_chat_lib.llm_core import delegate_coding_task as llm_delegate_coding_task
+    from ollama_chat_lib import state
+    
+    if ask_fn is None:
+        return "Error: ask_fn is required for delegate_coding_task"
+    
+    worker_model = model or state.worker_model
+    return llm_delegate_coding_task(task, context_files, ask_fn=ask_fn, model=worker_model)
+
+
+def delegate_code_review(task: str, context_files: list = None, *, ask_fn=None, model: str = None) -> str:
+    """Delegate a code review task to a reviewer sub-agent.
+    
+    Args:
+        task: Description of the review task
+        context_files: List of file paths to review
+        ask_fn: LLM call function (required)
+        model: Model to use (defaults to state.review_model)
+        
+    Returns:
+        Structured review result from the reviewer agent
+    """
+    from ollama_chat_lib.llm_core import delegate_code_review as llm_delegate_code_review
+    from ollama_chat_lib import state
+    
+    if ask_fn is None:
+        return "Error: ask_fn is required for delegate_code_review"
+    
+    review_model = model or state.review_model
+    return llm_delegate_code_review(task, context_files, ask_fn=ask_fn, model=review_model)

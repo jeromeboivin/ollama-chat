@@ -132,6 +132,15 @@ def parse_args():
     parser.add_argument('--agent-name', type=str, help='Name for the agent', default=None)
     parser.add_argument('--agent-description', type=str, help='Description of the agent', default=None)
 
+    # Coding agent arguments
+    parser.add_argument('--code-task', type=str, help='Run a coding task with the orchestrator agent (non-interactive)', default=None)
+    parser.add_argument('--workspace', type=str, help='Workspace root directory for coding agent', default=None)
+    parser.add_argument('--worker-model', type=str, help='Model for coding worker sub-agents', default=None)
+    parser.add_argument('--review-model', type=str, help='Model for code review sub-agents', default=None)
+    parser.add_argument('--test-command', type=str, help='Test command to run after changes (e.g., pytest, cargo test)', default=None)
+    parser.add_argument('--shell', type=str, help='Shell to use for terminal (bash, zsh, powershell, cmd)', default=None)
+    parser.add_argument('--max-iterations', type=int, help='Max iterations for orchestrator agent', default=None)
+
     # Web search arguments
     parser.add_argument('--web-search', type=str, help='Perform a web search with the given query and answer using search results', default=None)
     parser.add_argument('--web-search-results', type=int, help='Number of web search results to fetch (default: 5)', default=5)
@@ -729,6 +738,113 @@ def initialize(args, mod):
             on_print(result)
 
         # Exit after agent execution (non-interactive mode)
+        if not state.interactive_mode:
+            sys.exit(0)
+
+    # Handle coding agent task if requested
+    if args.code_task:
+        if state.verbose_mode:
+            on_print(f"Running coding task: {args.code_task}", Fore.WHITE + Style.DIM)
+            on_print(f"Workspace: {args.workspace or 'current directory'}", Fore.WHITE + Style.DIM)
+            on_print(f"Worker model: {args.worker_model or 'default'}", Fore.WHITE + Style.DIM)
+            on_print(f"Review model: {args.review_model or 'default'}", Fore.WHITE + Style.DIM)
+
+        # Set workspace root
+        if args.workspace:
+            state.workspace_root = args.workspace
+        elif not state.workspace_root:
+            state.workspace_root = os.getcwd()
+
+        # Set worker and review models
+        if args.worker_model:
+            state.worker_model = args.worker_model
+        if args.review_model:
+            state.review_model = args.review_model
+
+        # Set max iterations for orchestrator
+        if args.max_iterations:
+            pass  # Will be passed to agent
+
+        # Set test command
+        if args.test_command:
+            state.test_command = args.test_command
+
+        # Set shell
+        if args.shell:
+            state.shell = args.shell
+
+        # Load ChromaDB if needed
+        load_chroma_client()
+
+        # Ensure plugins are loaded
+        if not state.plugins:
+            state.plugins = mod.discover_plugins(state.plugins_folder, load_plugins=True)
+
+        # Initialize model if not already done
+        if not state.current_model:
+            if not state.use_openai and not state.use_azure_openai:
+                default_model_temp = preferred_model if preferred_model else "qwen3:4b"
+                if ":" not in default_model_temp:
+                    default_model_temp += ":latest"
+                state.current_model = select_ollama_model_if_available(default_model_temp)
+
+        # Find the coding orchestrator chatbot
+        coding_chatbot = None
+        for bot in state.chatbots:
+            if bot["name"] == "coding orchestrator":
+                coding_chatbot = bot
+                break
+
+        if coding_chatbot is None:
+            on_print("Error: 'coding orchestrator' chatbot not found.", Fore.RED)
+            sys.exit(1)
+
+        # Select orchestrator tools
+        state.selected_tools = []
+        for tool_name in coding_chatbot.get("tools", []):
+            state.selected_tools = mod.select_tool_by_name(mod.get_available_tools(), state.selected_tools, tool_name)
+
+        # Run the orchestrator agent
+        from ollama_chat_lib.agent import Agent
+        from ollama_chat_lib.tools import get_available_tools
+
+        orchestrator_tools = get_available_tools(load_chroma_client)
+        orchestrator_tool_names = [t['function']['name'] for t in orchestrator_tools if t['function']['name'] in coding_chatbot.get("tools", [])]
+        agent_tools = [t for t in orchestrator_tools if t['function']['name'] in orchestrator_tool_names]
+
+        # Format system prompt with workspace root
+        system_prompt = coding_chatbot["system_prompt"].format(workspace_root=state.workspace_root)
+
+        agent = Agent(
+            name="coding-orchestrator",
+            description="CLI coding agent orchestrator",
+            model=state.current_model,
+            thinking_model=state.thinking_model,
+            system_prompt=system_prompt,
+            temperature=0.3,
+            tools=agent_tools,
+            verbose=state.verbose_mode,
+            thinking_model_reasoning_pattern=state.thinking_model_reasoning_pattern,
+            max_iterations=args.max_iterations or 20,
+            workspace_root=state.workspace_root
+        )
+
+        if state.verbose_mode:
+            on_print(f"Starting coding orchestrator with model: {state.current_model}", Fore.WHITE + Style.DIM)
+
+        try:
+            result = agent.process_task(args.code_task, return_intermediate_results=True)
+            on_print("\n" + "="*80, Fore.CYAN)
+            on_print("CODING TASK COMPLETE", Fore.CYAN + Style.BRIGHT)
+            on_print("="*80, Fore.CYAN)
+            on_print(result)
+        except Exception as e:
+            on_print(f"Error during coding task: {e}", Fore.RED)
+            if state.verbose_mode:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
         if not state.interactive_mode:
             sys.exit(0)
 

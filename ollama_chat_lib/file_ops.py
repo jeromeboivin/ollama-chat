@@ -2,12 +2,40 @@
 import os
 import shlex
 import subprocess
-from typing import Tuple
+from typing import Tuple, Optional
+from pathlib import Path
 
 from colorama import Fore, Style
 
 from ollama_chat_lib import state
 from ollama_chat_lib.io_hooks import on_print
+from ollama_chat_lib.terminal import (
+    TerminalSession, get_global_terminal, resolve_in_workspace, run_command as term_run_command
+)
+
+
+def _get_workspace_root() -> Path:
+    """Get the workspace root from state or use current directory."""
+    if hasattr(state, 'workspace_root') and state.workspace_root:
+        return Path(state.workspace_root).resolve()
+    return Path.cwd()
+
+
+def _resolve_path(file_path: str) -> Path:
+    """Resolve a file path within the workspace root."""
+    workspace_root = _get_workspace_root()
+    p = Path(file_path)
+    if not p.is_absolute():
+        p = (workspace_root / p).resolve()
+    else:
+        p = p.resolve()
+    
+    # Check workspace confinement
+    try:
+        p.relative_to(workspace_root)
+    except ValueError:
+        raise PermissionError(f"Path '{file_path}' escapes workspace root: {workspace_root}")
+    return p
 
 
 def read_file(file_path, encoding="utf-8"):
@@ -19,19 +47,23 @@ def read_file(file_path, encoding="utf-8"):
     :return: The file contents as a string, or an error message if the operation fails
     """
     try:
-        if not os.path.exists(file_path):
+        resolved_path = _resolve_path(file_path)
+        
+        if not resolved_path.exists():
             return f"Error: File '{file_path}' does not exist."
         
-        if not os.path.isfile(file_path):
+        if not resolved_path.is_file():
             return f"Error: '{file_path}' is not a file."
         
-        with open(file_path, 'r', encoding=encoding) as f:
+        with open(resolved_path, 'r', encoding=encoding) as f:
             content = f.read()
         
         if state.verbose_mode:
             on_print(f"Successfully read file: {file_path}", Fore.GREEN + Style.DIM)
         
         return content
+    except PermissionError as e:
+        return f"Error: {str(e)}"
     except Exception as e:
         return f"Error reading file '{file_path}': {str(e)}"
 
@@ -46,23 +78,27 @@ def create_file(file_path, content, encoding="utf-8"):
     :return: A success message or error message
     """
     try:
+        resolved_path = _resolve_path(file_path)
+        
         # Create parent directories if they don't exist
-        parent_dir = os.path.dirname(file_path)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
+        parent_dir = resolved_path.parent
+        if parent_dir and not parent_dir.exists():
+            parent_dir.mkdir(parents=True, exist_ok=True)
         
         # Write the file
-        with open(file_path, 'w', encoding=encoding) as f:
+        with open(resolved_path, 'w', encoding=encoding) as f:
             f.write(content)
         
         # Track the file for session-based deletion
-        if file_path not in state.session_created_files:
-            state.session_created_files.append(file_path)
+        if str(resolved_path) not in state.session_created_files:
+            state.session_created_files.append(str(resolved_path))
         
         if state.verbose_mode:
             on_print(f"Successfully created file: {file_path}", Fore.GREEN + Style.DIM)
         
         return f"File created successfully: {file_path}"
+    except PermissionError as e:
+        return f"Error: {str(e)}"
     except Exception as e:
         return f"Error creating file '{file_path}': {str(e)}"
 
@@ -75,26 +111,30 @@ def delete_file(file_path):
     :return: A success message or error message
     """
     try:
+        resolved_path = _resolve_path(file_path)
+        
         # Check if the file was created during this session
-        if file_path not in state.session_created_files:
+        if str(resolved_path) not in state.session_created_files:
             return f"Error: Cannot delete file '{file_path}'. It was not created during this session."
         
         # Check if the file exists
-        if not os.path.exists(file_path):
+        if not resolved_path.exists():
             # Remove from tracking list even if file doesn't exist
-            state.session_created_files.remove(file_path)
+            state.session_created_files.remove(str(resolved_path))
             return f"File '{file_path}' was already deleted or does not exist."
         
         # Delete the file
-        os.remove(file_path)
+        resolved_path.unlink()
         
         # Remove from tracking list
-        state.session_created_files.remove(file_path)
+        state.session_created_files.remove(str(resolved_path))
         
         if state.verbose_mode:
             on_print(f"Successfully deleted file: {file_path}", Fore.GREEN + Style.DIM)
         
         return f"File deleted successfully: {file_path}"
+    except PermissionError as e:
+        return f"Error: {str(e)}"
     except Exception as e:
         return f"Error deleting file '{file_path}': {str(e)}"
 
@@ -103,11 +143,6 @@ def expand_env_vars(command: str) -> str:
     return os.path.expandvars(command)
 
 
-def run_command(command: str) -> Tuple[str, str]:
-    command = expand_env_vars(command)
-    result = subprocess.run(
-        shlex.split(command),
-        capture_output=True,
-        text=True
-    )
-    return result.stdout, result.stderr
+def run_command(command: str, workspace_root: Optional[str] = None) -> Tuple[str, str]:
+    """Run a shell command using the terminal subsystem (backward compatible)."""
+    return term_run_command(command, workspace_root)

@@ -67,3 +67,8 @@ user_prompt = None
 session_created_files = []   # Track files created during the session
 prompt_template = None
 chatbots = []                # Loaded at startup, mutated by load_additional_chatbots()
+
+# ── Coding agent / workspace ──────────────────────────────────────────────
+workspace_root = None        # Root directory for workspace confinement
+worker_model = None          # Model for coding worker sub-agents
+review_model = None          # Model for code review sub-agents

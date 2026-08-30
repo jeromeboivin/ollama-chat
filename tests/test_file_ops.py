@@ -14,8 +14,9 @@ class TestReadFile:
         result = oc.read_file(str(f))
         assert result == "hello world"
 
-    def test_read_nonexistent_file(self, reset_globals):
-        result = oc.read_file("/tmp/nonexistent_file_abc123.txt")
+    def test_read_nonexistent_file(self, reset_globals, tmp_path):
+        # Test with a path inside the workspace
+        result = oc.read_file(str(tmp_path / "nonexistent_file_abc123.txt"))
         assert "Error" in result
         assert "does not exist" in result
 
@@ -115,5 +116,10 @@ class TestRunCommand:
         assert "hello" in stdout
 
     def test_failing_command(self, reset_globals):
-        stdout, stderr = oc.run_command("ls /nonexistent_dir_abc123")
-        assert stderr  # should have error output
+        # On PTY-based terminal, stderr is mixed into stdout
+        import ollama_chat as oc
+        from ollama_chat_lib import state
+        ws = state.workspace_root or "."
+        stdout, stderr = oc.run_command(f"ls {ws}/nonexistent_dir_abc123")
+        # Check that error appears in output (stdout on PTY)
+        assert "No such file" in stdout or "cannot access" in stdout or stderr != ""
