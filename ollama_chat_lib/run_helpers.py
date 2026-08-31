@@ -1564,6 +1564,49 @@ def main_loop(ctx, mod):
             edit_collection_metadata(collection_name)
             continue
 
+        if user_input == "/code":
+            # Switch to coding orchestrator chatbot
+            coding_chatbot = None
+            for bot in state.chatbots:
+                if bot["name"] == "coding orchestrator":
+                    coding_chatbot = bot
+                    break
+            
+            if coding_chatbot is None:
+                on_print("Error: 'coding orchestrator' chatbot not found.", Fore.RED)
+                continue
+            
+            if "tools" in coding_chatbot and len(coding_chatbot["tools"]) > 0:
+                # Append chatbot tools to selected_tools if not already in the array
+                if state.selected_tools is None:
+                    state.selected_tools = []
+
+                for tool in coding_chatbot["tools"]:
+                    state.selected_tools = mod.select_tool_by_name(mod.get_available_tools(), state.selected_tools, tool)
+
+            system_prompt = coding_chatbot["system_prompt"].format(workspace_root=state.workspace_root or os.getcwd())
+            # Initial system message
+            if not state.no_system_role and len(user_name) > 0:
+                first_name = user_name.split()[0]
+                system_prompt += f"\nThe user's name is {user_name}, first name: {first_name}. {today}"
+
+            if len(system_prompt) > 0:
+                # Replace placeholders in the system_prompt using the system_prompt_placeholders dictionary
+                for key, value in system_prompt_placeholders.items():
+                    system_prompt = system_prompt.replace(f"{{{{{key}}}}}", value)
+
+                if state.verbose_mode:
+                    on_print("System prompt: " + system_prompt, Fore.WHITE + Style.DIM)
+
+                state.initial_message = {"role": "system", "content": system_prompt}
+                conversation = [state.initial_message]
+            else:
+                conversation = []
+            on_print("Switched to coding orchestrator agent mode.", Style.RESET_ALL)
+            auto_start_conversation = ("starts_conversation" in coding_chatbot and coding_chatbot["starts_conversation"]) or args.auto_start
+            user_input = ""
+            continue
+
         if user_input == "/chatbot":
             chatbot = prompt_for_chatbot()
             if "tools" in chatbot and len(chatbot["tools"]) > 0:

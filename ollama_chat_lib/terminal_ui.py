@@ -53,6 +53,7 @@ _COMMAND_GROUPS = [
             ("/load", "Load a saved conversation JSON file."),
             ("/save", "Save the current conversation transcript."),
             ("/verbose", "Toggle verbose diagnostics."),
+            ("/code", "Switch to coding orchestrator agent mode."),
             ("/quit", "Exit the chat session."),
             ("/exit", "Alias for exiting the chat session."),
             ("/bye", "Friendly exit alias."),
